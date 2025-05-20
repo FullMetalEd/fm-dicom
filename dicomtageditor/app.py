@@ -2,7 +2,8 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog,
     QTreeWidget, QTreeWidgetItem, QTableWidget, QTableWidgetItem, QMessageBox, QLineEdit, QInputDialog, QComboBox, QLabel, QCheckBox, QSizePolicy, QSplitter,
     QDialog, QFormLayout, QDialogButtonBox, QProgressDialog,
-    QApplication, QToolBar, QGroupBox, QFrame, QStatusBar, QStyle, QMenu
+    QApplication, QToolBar, QGroupBox, QFrame, QStatusBar, QStyle, QMenu,
+    QGridLayout  # <-- Add this import
 )
 from PyQt6.QtGui import QPixmap, QImage, QIcon, QPalette, QColor, QFont, QAction
 from PyQt6.QtCore import QDir, Qt, QPoint, QSize
@@ -280,6 +281,22 @@ class MainWindow(QMainWindow):
         self.tag_table.horizontalHeader().setStretchLastSection(True)
         self.tag_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.tag_table.setAlternatingRowColors(True)
+        # Set alternating row colors manually for dark theme
+        self.tag_table.setStyleSheet("""
+            QTableWidget {
+                background-color: #23272a;
+                alternate-background-color: #2c2f33;
+                color: #f5f5f5;
+                selection-background-color: #508cff;
+                selection-color: #fff;
+                gridline-color: #444;
+            }
+            QHeaderView::section {
+                background-color: #202225;
+                color: #f5f5f5;
+                font-weight: bold;
+            }
+        """)
         self.tag_table.cellActivated.connect(self._populate_new_value_on_edit)
         self.tag_table.cellClicked.connect(self._populate_new_value_on_edit)
         right_layout.addWidget(self.tag_table)
@@ -290,68 +307,77 @@ class MainWindow(QMainWindow):
         layout.addWidget(main_splitter)
 
         # --- Grouped Button Layouts ---
-        btn_grid = QHBoxLayout()
+        btn_grid = QGridLayout()
+        btn_grid.setHorizontalSpacing(32)
+        btn_grid.setVerticalSpacing(10)
 
-        # Column 1: Editing
-        col1 = QVBoxLayout()
+        # Editing group
         edit_group = QGroupBox("Editing")
         edit_layout = QVBoxLayout()
+        edit_layout.setSpacing(10)
         self.edit_level_combo = QComboBox()
         self.edit_level_combo.addItems(["Instance", "Series", "Study", "Patient"])
         self.edit_level_combo.setCurrentText("Series")
         edit_layout.addWidget(self.edit_level_combo)
-
         self.save_btn = QPushButton(QIcon(save_icon), "Submit Changes")
         self.save_btn.clicked.connect(self.save_tag_changes)
         edit_layout.addWidget(self.save_btn)
-
         self.anon_btn = QPushButton("Anonymise Patient")
         self.anon_btn.clicked.connect(self.anonymise_selected)
         edit_layout.addWidget(self.anon_btn)
         edit_group.setLayout(edit_layout)
-        col1.addWidget(edit_group)
-        btn_grid.addLayout(col1)
 
-        # Column 2: Export/Send
-        col2 = QVBoxLayout()
+        # Export/Send group
         export_group = QGroupBox("Export/Send")
         export_layout = QVBoxLayout()
+        export_layout.setSpacing(10)
         self.save_as_btn = QPushButton(QIcon(save_icon), "Save As")
         self.save_as_btn.clicked.connect(self.save_as)
         export_layout.addWidget(self.save_as_btn)
-
         self.dicom_send_btn = QPushButton("DICOM Send")
         self.dicom_send_btn.clicked.connect(self.dicom_send)
         export_layout.addWidget(self.dicom_send_btn)
         export_group.setLayout(export_layout)
-        col2.addWidget(export_group)
-        btn_grid.addLayout(col2)
 
-        # Column 3: Tag/Batch/Merge/Delete
-        col3 = QVBoxLayout()
+        # Tags/Batch group
         tag_group = QGroupBox("Tags/Batch")
         tag_layout = QVBoxLayout()
+        tag_layout.setSpacing(10)
         self.edit_btn = QPushButton("New Tag")
         self.edit_btn.clicked.connect(self.edit_tag)
         tag_layout.addWidget(self.edit_btn)
-
         self.batch_edit_btn = QPushButton("Batch New Tag")
         self.batch_edit_btn.clicked.connect(self.batch_edit_tag)
         tag_layout.addWidget(self.batch_edit_btn)
         tag_group.setLayout(tag_layout)
-        col3.addWidget(tag_group)
 
+        # Merge/Delete row (not in a group box)
         self.merge_patients_btn = QPushButton(QIcon(merge_icon), "Merge Patients")
         self.merge_patients_btn.clicked.connect(self.merge_patients)
-        col3.addWidget(self.merge_patients_btn)
-
+        self.merge_patients_btn.setMinimumWidth(120)
+        self.merge_patients_btn.setMinimumHeight(36)
         self.delete_btn = QPushButton(QIcon(delete_icon), "Delete")
         self.delete_btn.setToolTip("Delete selected patients, studies, series, or instances")
         self.delete_btn.clicked.connect(self.delete_selected_items)
-        col3.addWidget(self.delete_btn)
+        self.delete_btn.setMinimumWidth(80)
+        self.delete_btn.setMinimumHeight(36)
 
-        btn_grid.addLayout(col3)
-        layout.addLayout(btn_grid)
+        # Place widgets in grid: 4 columns, 2 rows for even spacing
+        btn_grid.addWidget(edit_group, 0, 0, 2, 1)  # Span 2 rows for editing group
+        btn_grid.addWidget(export_group, 0, 1)
+        btn_grid.addWidget(tag_group, 0, 2)
+        btn_grid.addWidget(self.merge_patients_btn, 1, 1, alignment=Qt.AlignmentFlag.AlignLeft)
+        btn_grid.addWidget(self.delete_btn, 1, 2, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        # --- Button Bar Container ---
+        btn_bar = QWidget()
+        btn_bar.setLayout(btn_grid)
+        btn_bar.setMaximumHeight(170)
+        btn_bar.setStyleSheet(
+            "QGroupBox { font-weight: bold; margin-top: 18px; }"  # Increased margin-top for group titles
+            "QPushButton { min-height: 36px; min-width: 120px; font-size: 13px; }"
+        )
+        layout.addWidget(btn_bar)
 
         # --- Status Bar ---
         self.setStatusBar(QStatusBar())
