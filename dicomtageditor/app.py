@@ -2,10 +2,10 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog,
     QTreeWidget, QTreeWidgetItem, QTableWidget, QTableWidgetItem, QMessageBox, QLineEdit, QInputDialog, QComboBox, QLabel, QCheckBox, QSizePolicy, QSplitter,
     QDialog, QFormLayout, QDialogButtonBox, QProgressDialog,
-    QApplication,
+    QApplication, QToolBar, QGroupBox, QFrame, QStatusBar, QStyle, QMenu
 )
-from PyQt6.QtGui import QPixmap, QImage
-from PyQt6.QtCore import QDir, Qt
+from PyQt6.QtGui import QPixmap, QImage, QIcon, QPalette, QColor, QFont, QAction
+from PyQt6.QtCore import QDir, Qt, QPoint, QSize
 import pydicom
 import zipfile
 import tempfile
@@ -41,6 +41,30 @@ def depth(self):
     return depth
 
 QTreeWidgetItem.depth = depth
+
+def set_dark_palette(app):
+    palette = QPalette()
+    # Use a uniform dark background
+    background = QColor(32, 34, 37)
+    palette.setColor(QPalette.ColorRole.Window, background)
+    palette.setColor(QPalette.ColorRole.Base, background)
+    palette.setColor(QPalette.ColorRole.AlternateBase, background)
+    palette.setColor(QPalette.ColorRole.Button, background)
+    palette.setColor(QPalette.ColorRole.ToolTipBase, background)
+    # Make all text very light for contrast
+    light_text = QColor(245, 245, 245)
+    palette.setColor(QPalette.ColorRole.WindowText, light_text)
+    palette.setColor(QPalette.ColorRole.Text, light_text)
+    palette.setColor(QPalette.ColorRole.ButtonText, light_text)
+    palette.setColor(QPalette.ColorRole.ToolTipText, light_text)
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor(255, 255, 255))
+    # Highlight and links
+    palette.setColor(QPalette.ColorRole.Highlight, QColor(80, 140, 255))
+    palette.setColor(QPalette.ColorRole.BrightText, QColor(255, 85, 85))
+    # Disabled text
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor(100, 100, 100))
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText, QColor(100, 100, 100))
+    app.setPalette(palette)
 
 def load_config(config_path=None):
     # Try user config, then local config, then defaults
@@ -155,43 +179,75 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
 
-        # Top button row: 2 columns
-        top_btn_row = QHBoxLayout()
-        open_btn = QPushButton("Open DICOM File/ZIP")
-        open_btn.clicked.connect(self.open_file)
-        top_btn_row.addWidget(open_btn)
+        # --- Modern Qt Style/Theme ---
+        QApplication.setStyle("Fusion")
+        set_dark_palette(QApplication.instance())
 
-        open_dir_btn = QPushButton("Open DICOM Directory")
-        open_dir_btn.clicked.connect(self.open_directory)
-        top_btn_row.addWidget(open_dir_btn)
+        # --- Toolbar for Common Actions ---
+        toolbar = QToolBar("Main Toolbar")
+        toolbar.setIconSize(QSize(20, 20))
+        self.addToolBar(toolbar)
 
-        # --- Add expand/collapse buttons for patient/study tree ---
-        expand_all_btn = QPushButton("Expand All")
-        expand_all_btn.setToolTip("Expand all patients and studies")
-        expand_all_btn.clicked.connect(self.tree_expand_all)
-        top_btn_row.addWidget(expand_all_btn)
+        open_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton)
+        save_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton)
+        delete_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon)
+        merge_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogNewFolder)
+        expand_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown)
+        collapse_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp)
 
-        collapse_all_btn = QPushButton("Collapse All")
-        collapse_all_btn.setToolTip("Collapse all patients and studies")
-        collapse_all_btn.clicked.connect(self.tree_collapse_all)
-        top_btn_row.addWidget(collapse_all_btn)
-        # --- end expand/collapse buttons ---
+        act_open = QAction(open_icon, "Open", self)
+        act_open.triggered.connect(self.open_file)
+        toolbar.addAction(act_open)
 
-        layout.addLayout(top_btn_row)
+        act_open_dir = QAction(QIcon.fromTheme("folder"), "Open Directory", self)
+        act_open_dir.triggered.connect(self.open_directory)
+        toolbar.addAction(act_open_dir)
 
-        # Splitter for tree and image preview (left), tag table (right)
+        act_save = QAction(save_icon, "Save As", self)
+        act_save.triggered.connect(self.save_as)
+        toolbar.addAction(act_save)
+
+        act_delete = QAction(delete_icon, "Delete", self)
+        act_delete.triggered.connect(self.delete_selected_items)
+        toolbar.addAction(act_delete)
+
+        act_merge = QAction(merge_icon, "Merge Patients", self)
+        act_merge.triggered.connect(self.merge_patients)
+        toolbar.addAction(act_merge)
+
+        act_expand = QAction(expand_icon, "Expand All", self)
+        act_expand.triggered.connect(self.tree_expand_all)
+        toolbar.addAction(act_expand)
+
+        act_collapse = QAction(collapse_icon, "Collapse All", self)
+        act_collapse.triggered.connect(self.tree_collapse_all)
+        toolbar.addAction(act_collapse)
+
+        toolbar.addSeparator()
+
+        # --- Main Splitter ---
         main_splitter = QSplitter(Qt.Orientation.Horizontal)
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
         left_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Tree and preview toggle/preview
-        # Set QTreeWidget to ExtendedSelection for standard Ctrl/Shift multi-select behavior
+        # --- Tree Search/Filter ---
+        tree_search_layout = QHBoxLayout()
+        self.tree_search_bar = QLineEdit()
+        self.tree_search_bar.setPlaceholderText("Search patients/studies/series/instances...")
+        self.tree_search_bar.textChanged.connect(self.filter_tree_items)
+        tree_search_layout.addWidget(self.tree_search_bar)
+        left_layout.addLayout(tree_search_layout)
+
+        # --- Tree Widget ---
         self.tree = QTreeWidget()
         self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
         self.tree.setHeaderLabels(["Patient", "Study", "Series", "Instance"])
         self.tree.itemSelectionChanged.connect(self.display_selected_tree_file)
         self.tree.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self.show_tree_context_menu)
         left_layout.addWidget(self.tree)
 
         self.preview_toggle = QCheckBox("Show Image Preview")
@@ -208,7 +264,7 @@ class MainWindow(QMainWindow):
 
         main_splitter.addWidget(left_widget)
 
-        # Tag table (right side of splitter)
+        # --- Tag Table and Search ---
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
         right_layout.setContentsMargins(0, 0, 0, 0)
@@ -233,70 +289,92 @@ class MainWindow(QMainWindow):
         main_splitter.setStretchFactor(1, 2)
         layout.addWidget(main_splitter)
 
-        # Button grid layout (3 columns)
+        # --- Grouped Button Layouts ---
         btn_grid = QHBoxLayout()
 
-        # Column 1
+        # Column 1: Editing
         col1 = QVBoxLayout()
+        edit_group = QGroupBox("Editing")
+        edit_layout = QVBoxLayout()
         self.edit_level_combo = QComboBox()
         self.edit_level_combo.addItems(["Instance", "Series", "Study", "Patient"])
         self.edit_level_combo.setCurrentText("Series")
-        col1.addWidget(self.edit_level_combo)
+        edit_layout.addWidget(self.edit_level_combo)
 
-        self.save_btn = QPushButton("Submit Changes")
+        self.save_btn = QPushButton(QIcon(save_icon), "Submit Changes")
         self.save_btn.clicked.connect(self.save_tag_changes)
-        col1.addWidget(self.save_btn)
+        edit_layout.addWidget(self.save_btn)
 
-        # Add Anonymise button
         self.anon_btn = QPushButton("Anonymise Patient")
         self.anon_btn.clicked.connect(self.anonymise_selected)
-        col1.addWidget(self.anon_btn)
-
+        edit_layout.addWidget(self.anon_btn)
+        edit_group.setLayout(edit_layout)
+        col1.addWidget(edit_group)
         btn_grid.addLayout(col1)
 
-        # Column 2
+        # Column 2: Export/Send
         col2 = QVBoxLayout()
-        self.save_as_btn = QPushButton("Save As")
+        export_group = QGroupBox("Export/Send")
+        export_layout = QVBoxLayout()
+        self.save_as_btn = QPushButton(QIcon(save_icon), "Save As")
         self.save_as_btn.clicked.connect(self.save_as)
-        col2.addWidget(self.save_as_btn)
+        export_layout.addWidget(self.save_as_btn)
 
         self.dicom_send_btn = QPushButton("DICOM Send")
         self.dicom_send_btn.clicked.connect(self.dicom_send)
-        col2.addWidget(self.dicom_send_btn)
-
+        export_layout.addWidget(self.dicom_send_btn)
+        export_group.setLayout(export_layout)
+        col2.addWidget(export_group)
         btn_grid.addLayout(col2)
 
-        # Column 3
+        # Column 3: Tag/Batch/Merge/Delete
         col3 = QVBoxLayout()
+        tag_group = QGroupBox("Tags/Batch")
+        tag_layout = QVBoxLayout()
         self.edit_btn = QPushButton("New Tag")
         self.edit_btn.clicked.connect(self.edit_tag)
-        col3.addWidget(self.edit_btn)
+        tag_layout.addWidget(self.edit_btn)
 
         self.batch_edit_btn = QPushButton("Batch New Tag")
         self.batch_edit_btn.clicked.connect(self.batch_edit_tag)
-        col3.addWidget(self.batch_edit_btn)
+        tag_layout.addWidget(self.batch_edit_btn)
+        tag_group.setLayout(tag_layout)
+        col3.addWidget(tag_group)
 
-        # Add Merge Patients button
-        self.merge_patients_btn = QPushButton("Merge Patients")
+        self.merge_patients_btn = QPushButton(QIcon(merge_icon), "Merge Patients")
         self.merge_patients_btn.clicked.connect(self.merge_patients)
-        btn_grid.addWidget(self.merge_patients_btn)
+        col3.addWidget(self.merge_patients_btn)
 
-        # Add Delete button to the button grid (after merge_patients_btn)
-        self.delete_btn = QPushButton("Delete")
+        self.delete_btn = QPushButton(QIcon(delete_icon), "Delete")
         self.delete_btn.setToolTip("Delete selected patients, studies, series, or instances")
         self.delete_btn.clicked.connect(self.delete_selected_items)
-        btn_grid.addWidget(self.delete_btn)
+        col3.addWidget(self.delete_btn)
 
         btn_grid.addLayout(col3)
-
         layout.addLayout(btn_grid)
 
-        # Summary info label
+        # --- Status Bar ---
+        self.setStatusBar(QStatusBar())
+        self.statusBar().showMessage("Ready")
+
+        # --- Summary label ---
         self.summary_label = QLineEdit()
         self.summary_label.setReadOnly(True)
-        self.summary_label.setStyleSheet("background: #f0f0f0; border: none; font-weight: bold;")
+        self.summary_label.setStyleSheet(
+            "background: #202225; color: #f5f5f5; border: none; font-weight: bold;"
+        )
         layout.addWidget(self.summary_label)
 
+        # Set white text and dark background for search bars
+        searchbar_style = (
+            "background: #202225; color: #f5f5f5; border: 1px solid #444;"
+            "selection-background-color: #508cff;"
+            "selection-color: #fff;"
+        )
+        self.tree_search_bar.setStyleSheet(searchbar_style)
+        self.search_bar.setStyleSheet(searchbar_style)
+
+        # --- Initial Load ---
         self.loaded_files = []
         self.file_metadata = {}
         self.temp_dir = None
@@ -464,12 +542,45 @@ class MainWindow(QMainWindow):
             self.loaded_files = [(f, None) for f in dcm_files]
             self.populate_tree(dcm_files)
 
+    def show_tree_context_menu(self, pos: QPoint):
+        item = self.tree.itemAt(pos)
+        if not item:
+            return
+        menu = QMenu(self)
+        delete_action = QAction(QIcon.fromTheme("edit-delete"), "Delete", self)
+        delete_action.triggered.connect(self.delete_selected_items)
+        menu.addAction(delete_action)
+        if item.depth() == 0:
+            merge_action = QAction("Merge Patients", self)
+            merge_action.triggered.connect(self.merge_patients)
+            menu.addAction(merge_action)
+        menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def filter_tree_items(self, text):
+        # Simple filter: hide items that don't match text in any column
+        def match(item):
+            for col in range(item.columnCount()):
+                if text.lower() in item.text(col).lower():
+                    return True
+            for i in range(item.childCount()):
+                if match(item.child(i)):
+                    return True
+            return False
+
+        def filter_item(item):
+            visible = match(item) if text else True
+            item.setHidden(not visible)
+            for i in range(item.childCount()):
+                filter_item(item.child(i))
+
+        for i in range(self.tree.topLevelItemCount()):
+            filter_item(self.tree.topLevelItem(i))
+
     def populate_tree(self, files):
         self.tree.clear()
         hierarchy = {}
         self.file_metadata = {}
         modalities = set()
-        # Progress dialog for loading DICOM headers
         progress = QProgressDialog("Loading DICOM headers...", "Cancel", 0, len(files), self)
         progress.setWindowTitle("Loading DICOM Files")
         progress.setMinimumDuration(0)
@@ -505,18 +616,34 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
         progress.close()
 
+        # --- Improved Tree Appearance: icons, bold fonts ---
+        patient_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
+        study_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon)
+        series_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DriveHDIcon)
+        instance_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView)
+
         for patient, studies in hierarchy.items():
             patient_item = QTreeWidgetItem([patient])
+            patient_item.setIcon(0, patient_icon)
+            font = patient_item.font(0)
+            font.setBold(True)
+            patient_item.setFont(0, font)
             self.tree.addTopLevelItem(patient_item)
             for study, series_dict in studies.items():
                 study_item = QTreeWidgetItem([patient, study])
+                study_item.setIcon(1, study_icon)
+                font2 = study_item.font(1)
+                font2.setBold(True)
+                study_item.setFont(1, font2)
                 patient_item.addChild(study_item)
                 for series, instances in series_dict.items():
                     series_item = QTreeWidgetItem([patient, study, series])
+                    series_item.setIcon(2, series_icon)
                     study_item.addChild(series_item)
                     for instance, filepath in sorted(instances.items()):
                         instance_item = QTreeWidgetItem([patient, study, series, str(instance)])
-                        instance_item.setData(0, 1000, filepath)  # Store filepath in user role
+                        instance_item.setIcon(3, instance_icon)
+                        instance_item.setData(0, 1000, filepath)
                         series_item.addChild(instance_item)
         self.tree.expandAll()
 
@@ -526,7 +653,6 @@ class MainWindow(QMainWindow):
         series_count = sum(len(series_dict) for studies in hierarchy.values() for series_dict in studies.values())
         instance_count = len(files)
         modality_str = ", ".join(sorted(modalities)) if modalities else "Unknown"
-        # Calculate total size
         total_bytes = sum(os.path.getsize(f) for f in files if os.path.exists(f))
         if total_bytes < 1024 * 1024 * 1024:
             size_str = f"{total_bytes / (1024 * 1024):.2f} MB"
@@ -535,6 +661,7 @@ class MainWindow(QMainWindow):
         self.summary_label.setText(
             f"Patients: {patient_count} | Studies: {study_count} | Series: {series_count} | Instances: {instance_count} | Modalities: {modality_str} | Size: {size_str}"
         )
+        self.statusBar().showMessage(f"Loaded {instance_count} instances.")
 
     def display_selected_file(self, row):
         if row < 0 or row >= len(self.loaded_files):
