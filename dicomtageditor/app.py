@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog,
     QTreeWidget, QTreeWidgetItem, QTableWidget, QTableWidgetItem, QMessageBox, QLineEdit, QInputDialog, QComboBox, QLabel, QCheckBox, QSizePolicy, QSplitter,
-    QDialog, QFormLayout, QDialogButtonBox
+    QDialog, QFormLayout, QDialogButtonBox, QProgressDialog, QApplication
 )
 from PyQt6.QtGui import QPixmap, QImage
 from PyQt6.QtCore import QDir, Qt
@@ -13,6 +13,10 @@ import shutil
 import numpy as np
 import sys
 import yaml
+from pydicom.dataelem import DataElement
+from pydicom.uid import generate_uid
+import datetime
+import logging
 
 # Add import for pynetdicom
 try:
@@ -26,36 +30,52 @@ except Exception as e:
     STORAGE_CONTEXTS = []
     VERIFICATION_SOP_CLASS = None
 
+def load_config(config_path=None):
+    # Try user config, then local config, then defaults
+    paths = []
+    if config_path:
+        paths.append(config_path)
+    paths.append(os.path.expanduser("~/.dicomtageditor/config.yml"))
+    paths.append(os.path.join(os.path.dirname(__file__), "config.yml"))
+    for path in paths:
+        if os.path.exists(path):
+            with open(path, "r") as f:
+                return yaml.safe_load(f) or {}
+    # Defaults if no config found
+    return {
+        "log_path": os.path.expanduser("~/.dicomtageditor/dicomtageditor.log"),
+        "log_level": "INFO",
+        "show_image_preview": False,
+        "ae_title": "DCMSCU",
+        "destinations": [],
+        "window_size": [1200, 800],
+        "default_export_dir": str(QDir.homePath()),
+        "default_import_dir": str(QDir.homePath()),
+        "anonymization": {},
+        "recent_paths": [],
+        "theme": "light",
+        "language": "en"
+    }
+
+def setup_logging(log_path, log_level):
+    # Truncate log file on each run
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    logging.basicConfig(
+        level=getattr(logging, log_level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(message)s",
+        handlers=[
+            logging.FileHandler(log_path, mode="w", encoding="utf-8"),
+            logging.StreamHandler(sys.stderr)
+        ]
+    )
+
 class DicomSendDialog(QDialog):
-    def __init__(self, parent=None, config_path=None):
+    def __init__(self, parent=None, config=None):
         super().__init__(parent)
         self.setWindowTitle("DICOM Send")
         layout = QFormLayout(self)
 
-        # Load destinations from YAML config
-        self.destinations = []
-        # Always try both absolute and relative paths
-        config_paths = []
-        if config_path:
-            config_paths.append(config_path)
-        # Also try relative to the app.py file
-        if config_path and not os.path.isabs(config_path):
-            config_paths.append(os.path.join(os.path.dirname(__file__), config_path))
-        # Default locations
-        config_paths.append(os.path.expanduser("~/.dicom_send_destinations.yaml"))
-        config_paths.append(os.path.join(os.path.dirname(__file__), "dicom_send_destinations.yaml"))
-
-        for path in config_paths:
-            if os.path.exists(path):
-                try:
-                    with open(path, "r") as f:
-                        self.destinations = yaml.safe_load(f) or []
-                    print(f"Loaded DICOM send destinations from: {path}", file=sys.stderr)
-                    break
-                except Exception as e:
-                    print("Failed to load DICOM send config:", e, file=sys.stderr)
-                    self.destinations = []
-
+        self.destinations = config.get("destinations", []) if config else []
         self.dest_combo = QComboBox()
         self.dest_combo.addItem("Manual Entry")
         for dest in self.destinations:
@@ -64,7 +84,8 @@ class DicomSendDialog(QDialog):
         self.dest_combo.currentIndexChanged.connect(self._on_dest_changed)
         layout.addRow("Destination:", self.dest_combo)
 
-        self.ae_title = QLineEdit("DCMSCU")
+        default_ae = config.get("ae_title", "DCMSCU") if config else "DCMSCU"
+        self.ae_title = QLineEdit(default_ae)
         self.ae_title.setToolTip(
             "Calling AE Title: This is the Application Entity Title your system presents to the remote DICOM server. "
             "It identifies your workstation or application to the remote PACS. "
@@ -104,10 +125,20 @@ class DicomSendDialog(QDialog):
         )
 
 class MainWindow(QMainWindow):
-    def __init__(self, start_path=None):
+    def __init__(self, start_path=None, config_path=None):
+        self.config = load_config(config_path)
+        setup_logging(self.config.get("log_path"), self.config.get("log_level"))
+        logging.info("Application started")
+        
+        # Set config attributes early
+        self.dicom_send_config = self.config
+        self.default_export_dir = os.path.expanduser(self.config.get("default_export_dir", str(QDir.homePath())))
+        self.default_import_dir = os.path.expanduser(self.config.get("default_import_dir", str(QDir.homePath())))
+
         super().__init__()
         self.setWindowTitle("DICOM Tag Editor")
-        self.resize(1200, 800)
+        w, h = self.config.get("window_size", [1200, 800])
+        self.resize(w, h)
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
@@ -138,7 +169,7 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.tree)
 
         self.preview_toggle = QCheckBox("Show Image Preview")
-        self.preview_toggle.setChecked(False)
+        self.preview_toggle.setChecked(bool(self.config.get("show_image_preview", False)))
         self.preview_toggle.stateChanged.connect(self.display_selected_tree_file)
         left_layout.addWidget(self.preview_toggle)
 
@@ -190,6 +221,11 @@ class MainWindow(QMainWindow):
         self.save_btn.clicked.connect(self.save_tag_changes)
         col1.addWidget(self.save_btn)
 
+        # Add Anonymise button
+        self.anon_btn = QPushButton("Anonymise Patient")
+        self.anon_btn.clicked.connect(self.anonymise_selected)
+        col1.addWidget(self.anon_btn)
+
         btn_grid.addLayout(col1)
 
         # Column 2
@@ -231,10 +267,10 @@ class MainWindow(QMainWindow):
         self.current_ds = None
         self._all_tag_rows = []  # Store all tag rows for filtering
 
-        self.dicom_send_config_path = os.path.expanduser("~/.dicom_send_destinations.yaml")
-
         if start_path:
             self.load_path_on_start(start_path)
+
+        logging.info("MainWindow initialized")
 
     def _populate_new_value_on_edit(self, row, col):
         """Auto-populate the 'New Value' cell with the current value when clicked if empty."""
@@ -289,7 +325,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Not Found", f"Path does not exist: {path}")
 
     def open_file(self):
-        dialog = QFileDialog(self, "Open DICOM or ZIP File", QDir.homePath(), "DICOM Files (*.dcm);;ZIP Archives (*.zip);;All Files (*)")
+        dialog = QFileDialog(self, "Open DICOM or ZIP File", self.default_import_dir, "DICOM Files (*.dcm);;ZIP Archives (*.zip);;All Files (*)")
         dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
         if dialog.exec():
             file_paths = dialog.selectedFiles()
@@ -391,8 +427,14 @@ class MainWindow(QMainWindow):
         series_count = sum(len(series_dict) for studies in hierarchy.values() for series_dict in studies.values())
         instance_count = len(files)
         modality_str = ", ".join(sorted(modalities)) if modalities else "Unknown"
+        # Calculate total size
+        total_bytes = sum(os.path.getsize(f) for f in files if os.path.exists(f))
+        if total_bytes < 1024 * 1024 * 1024:
+            size_str = f"{total_bytes / (1024 * 1024):.2f} MB"
+        else:
+            size_str = f"{total_bytes / (1024 * 1024 * 1024):.2f} GB"
         self.summary_label.setText(
-            f"Patients: {patient_count} | Studies: {study_count} | Series: {series_count} | Instances: {instance_count} | Modalities: {modality_str}"
+            f"Patients: {patient_count} | Studies: {study_count} | Series: {series_count} | Instances: {instance_count} | Modalities: {modality_str} | Size: {size_str}"
         )
 
     def display_selected_file(self, row):
@@ -715,11 +757,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No Selection", "Please select a node in the tree to export.")
             return
         tree_item = selected[0]
-
         # Always traverse up to the patient node (depth 0)
         while tree_item.parent():
             tree_item = tree_item.parent()
-
         filepaths = self._collect_instance_filepaths(tree_item)
         if not filepaths:
             QMessageBox.warning(self, "No Instances", "No DICOM instances found under this node.")
@@ -730,7 +770,7 @@ class MainWindow(QMainWindow):
             return
 
         if export_type == "Directory":
-            dialog = QFileDialog(self, "Select Export Directory", QDir.homePath())
+            dialog = QFileDialog(self, "Select Export Directory", self.default_export_dir)
             dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
             dialog.setFileMode(QFileDialog.FileMode.Directory)
             dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
@@ -748,7 +788,7 @@ class MainWindow(QMainWindow):
                         QMessageBox.warning(self, "Export Error", f"Failed to export {fp}: {e}")
                 QMessageBox.information(self, "Export Complete", f"Exported {len(filepaths)} files to {out_dir}")
         else:  # ZIP
-            dialog = QFileDialog(self, "Save ZIP Archive", QDir.homePath(), "ZIP Archives (*.zip)")
+            dialog = QFileDialog(self, "Save ZIP Archive", self.default_export_dir, "ZIP Archives (*.zip)")
             dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
             dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
             if dialog.exec():
@@ -772,10 +812,9 @@ class MainWindow(QMainWindow):
                     QMessageBox.critical(self, "Export Error", f"Failed to create ZIP: {e}")
 
     def dicom_send(self):
-        print("Python executable:", sys.executable, file=sys.stderr)
-        print("sys.path:", sys.path, file=sys.stderr)
-        print("AE:", AE, "STORAGE_CONTEXTS:", STORAGE_CONTEXTS, file=sys.stderr)
+        logging.info("DICOM send initiated")
         if AE is None or not STORAGE_CONTEXTS or VERIFICATION_SOP_CLASS is None:
+            logging.error("pynetdicom not available")
             QMessageBox.critical(
                 self,
                 "Missing Dependency",
@@ -798,10 +837,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No Instances", "No DICOM instances found under this node.")
             return
 
-        dlg = DicomSendDialog(self, config_path=self.dicom_send_config_path)
+        dlg = DicomSendDialog(self, config=self.dicom_send_config)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         calling_ae, remote_ae, host, port = dlg.get_params()
+        logging.info(f"Sending {len(filepaths)} files to {host}:{port} AE={remote_ae}")
 
         ae = AE(ae_title=calling_ae)
         sop_classes = set()
@@ -810,13 +850,10 @@ class MainWindow(QMainWindow):
                 ds = pydicom.dcmread(fp, stop_before_pixels=True)
                 sop_classes.add(ds.SOPClassUID)
             except Exception as e:
-                print(f"Failed to read SOPClassUID from {fp}: {e}", file=sys.stderr)
-        # If no SOP classes found, abort
+                logging.error(f"Failed to read SOPClassUID from {fp}: {e}")
         if not sop_classes:
             QMessageBox.critical(self, "DICOM Send", "No valid SOP Class UIDs found in selected files.")
             return
-        # Print SOP classes for debugging
-        print("SOP Classes to request:", sop_classes, file=sys.stderr)
         for cx in STORAGE_CONTEXTS:
             if getattr(cx, "abstract_syntax", None) in sop_classes:
                 ae.add_requested_context(cx.abstract_syntax)
@@ -824,39 +861,56 @@ class MainWindow(QMainWindow):
 
         assoc = ae.associate(host, port, ae_title=remote_ae)
         if not assoc.is_established:
+            logging.error(f"Association to {host}:{port} ({remote_ae}) failed")
             QMessageBox.critical(self, "DICOM Send", f"Association to {host}:{port} ({remote_ae}) failed.")
             return
 
+        # --- Progress Dialog ---
+        total_files = len(filepaths)
+        total_bytes = sum(os.path.getsize(fp) for fp in filepaths if os.path.exists(fp))
+        mb_total = total_bytes / (1024 * 1024)
+        progress = QProgressDialog("Sending DICOM files...", "Cancel", 0, total_files, self)
+        progress.setWindowTitle("DICOM Send Progress")
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setLabelText(f"Sent 0/{total_files} images, 0.0/{mb_total:.1f} MB")
+
         sent = 0
+        sent_bytes = 0
         failed = []
         failed_details = []
-        for fp in filepaths:
+        for idx, fp in enumerate(filepaths):
+            if progress.wasCanceled():
+                failed_details.append("User cancelled operation.")
+                break
             try:
                 ds = pydicom.dcmread(fp)
                 status = assoc.send_c_store(ds)
                 status_code = getattr(status, "Status", None)
-                # Add more detailed status code explanations
-                status_meaning = {
-                    0x0000: "Success",
-                    0xB000: "Warning: Coercion of Data Elements",
-                    0xA700: "Refused: Out of Resources",
-                    0xA900: "Error: Data Set does not match SOP Class",
-                    0xC000: "Error: Cannot Understand",
-                    0xA778: "Refused: Move Destination unknown (check AE Title, Host, Port, or permissions)"
-                }
-                meaning = status_meaning.get(status_code, f"Unknown/Other (0x{status_code:04X})" if status_code is not None else "No status")
+                file_size = os.path.getsize(fp) if os.path.exists(fp) else 0
                 if status_code in [0x0000, 0xB000]:
                     sent += 1
+                    sent_bytes += file_size
                 else:
                     failed.append(fp)
-                    failed_details.append(f"{os.path.basename(fp)}: status=0x{status_code:04X} ({meaning})")
+                    failed_details.append(f"{os.path.basename(fp)}: status=0x{status_code:04X}")
             except Exception as e:
                 failed.append(fp)
                 failed_details.append(f"{os.path.basename(fp)}: {e}")
+                logging.error(f"Send failed for {fp}: {e}", exc_info=True)
+            # Update progress bar and label
+            progress.setValue(idx + 1)
+            mb_sent = sent_bytes / (1024 * 1024)
+            progress.setLabelText(f"Sent {sent}/{total_files} images, {mb_sent:.1f}/{mb_total:.1f} MB")
+            QApplication.processEvents()
         assoc.release()
+        progress.close()
         msg = f"Sent: {sent}\nFailed: {len(failed)}"
         if failed_details:
             msg += "\n\nDetails:\n" + "\n".join(failed_details)
+        logging.info(f"DICOM send complete: {msg}")
         QMessageBox.information(self, "DICOM Send", msg)
 
     def _collect_instance_filepaths(self, tree_item):
@@ -882,6 +936,128 @@ class MainWindow(QMainWindow):
         if self.temp_dir and os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
+    def anonymise_selected(self):
+        selected = self.tree.selectedItems()
+        if not selected:
+            QMessageBox.warning(self, "No Selection", "Please select a node in the tree to anonymise.")
+            return
+        # Always traverse up to the patient node (depth 0)
+        tree_item = selected[0]
+        while tree_item.parent():
+            tree_item = tree_item.parent()
+        filepaths = self._collect_instance_filepaths(tree_item)
+        if not filepaths:
+            QMessageBox.warning(self, "No Instances", "No DICOM instances found under this patient.")
+            return
+
+        # Confirm with user
+        reply = QMessageBox.question(
+            self,
+            "Confirm Anonymization",
+            f"This will irreversibly anonymize {len(filepaths)} files in-place.\nContinue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Tags to anonymize (add more as needed)
+        tags_to_blank = [
+            (0x0010, 0x0010),  # PatientName
+            (0x0010, 0x0020),  # PatientID
+            (0x0010, 0x0030),  # PatientBirthDate
+            (0x0010, 0x0032),  # PatientBirthTime
+            (0x0010, 0x0040),  # PatientSex
+            (0x0010, 0x1000),  # OtherPatientIDs
+            (0x0010, 0x1001),  # OtherPatientNames
+            (0x0010, 0x2160),  # EthnicGroup
+            (0x0010, 0x4000),  # PatientComments
+            (0x0008, 0x0090),  # ReferringPhysicianName
+            (0x0008, 0x0050),  # AccessionNumber
+            (0x0008, 0x0080),  # InstitutionName
+            (0x0008, 0x0081),  # InstitutionAddress
+            (0x0008, 0x1040),  # InstitutionalDepartmentName
+            (0x0008, 0x1070),  # OperatorsName
+            (0x0008, 0x1030),  # StudyDescription
+            (0x0008, 0x103E),  # SeriesDescription
+            (0x0020, 0x0010),  # StudyID
+            (0x0020, 0x000D),  # StudyInstanceUID (will be replaced)
+            (0x0020, 0x000E),  # SeriesInstanceUID (will be replaced)
+            (0x0008, 0x0018),  # SOPInstanceUID (will be replaced)
+        ]
+
+        # Generate unique anonymization prefix
+        now = datetime.datetime.now()
+        anon_prefix = f"ANON_{now.strftime('%Y%m%d_%H%M%S')}"
+
+        # Generate new UIDs for Study, Series, Instance
+        new_study_uid = generate_uid()
+        series_uid_map = {}
+        instance_uid_map = {}
+
+        updated = 0
+        failed = []
+        for idx, fp in enumerate(filepaths):
+            try:
+                ds = pydicom.dcmread(fp)
+                # Fill tags with unique placeholders
+                for tag in tags_to_blank:
+                    if tag in ds:
+                        # For UID fields, handle below
+                        if tag in [(0x0020, 0x000D), (0x0020, 0x000E), (0x0008, 0x0018)]:
+                            continue
+                        # Use tag-specific placeholder, but truncate to 16 chars for VR SH
+                        value = None
+                        if tag == (0x0010, 0x0010):  # PatientName
+                            value = f"{anon_prefix}_PATIENT"
+                        elif tag == (0x0010, 0x0020):  # PatientID
+                            value = f"{anon_prefix}_PID"
+                        elif tag == (0x0010, 0x0030):  # PatientBirthDate
+                            value = "19000101"
+                        elif tag == (0x0010, 0x0032):  # PatientBirthTime
+                            value = "000000"
+                        elif tag == (0x0010, 0x0040):  # PatientSex
+                            value = "O"
+                        elif tag == (0x0020, 0x0010):  # StudyID
+                            value = f"{anon_prefix}_STUDY"
+                        elif tag == (0x0008, 0x0050):  # AccessionNumber
+                            value = f"{anon_prefix}_ACC"
+                        elif tag == (0x0008, 0x1030):  # StudyDescription
+                            value = f"{anon_prefix}_STUDY_DESC"
+                        elif tag == (0x0008, 0x103E):  # SeriesDescription
+                            value = f"{anon_prefix}_SERIES_DESC"
+                        else:
+                            value = f"{anon_prefix}_{idx}"
+
+                        # Truncate value for VR SH (Short String, max 16 chars)
+                        vr = ds[tag].VR if hasattr(ds[tag], "VR") else None
+                        if vr == "SH" and len(value) > 16:
+                            value = value[:16]
+                        ds[tag].value = value
+                # Replace StudyInstanceUID
+                ds.StudyInstanceUID = new_study_uid
+                # Replace SeriesInstanceUID (unique per series)
+                old_series_uid = getattr(ds, "SeriesInstanceUID", None)
+                if old_series_uid not in series_uid_map:
+                    series_uid_map[old_series_uid] = generate_uid()
+                ds.SeriesInstanceUID = series_uid_map[old_series_uid]
+                # Replace SOPInstanceUID (unique per instance)
+                old_instance_uid = getattr(ds, "SOPInstanceUID", None)
+                if old_instance_uid not in instance_uid_map:
+                    instance_uid_map[old_instance_uid] = generate_uid()
+                ds.SOPInstanceUID = instance_uid_map[old_instance_uid]
+                # Optionally, update MediaStorageSOPInstanceUID if present
+                if hasattr(ds, "file_meta") and hasattr(ds.file_meta, "MediaStorageSOPInstanceUID"):
+                    ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
+                ds.save_as(fp)
+                updated += 1
+            except Exception as e:
+                failed.append(f"{os.path.basename(fp)}: {e}")
+
+        msg = f"Anonymization complete.\nFiles updated: {updated}\nFailed: {len(failed)}"
+        if failed:
+            msg += "\n\nDetails:\n" + "\n".join(failed)
+        QMessageBox.information(self, "Anonymization", msg)
+        self.display_selected_tree_file()
 # Add this helper method to QTreeWidgetItem to get depth
 # (You can add this at the bottom of the file or near the class definition)
 def _qtreewidgetitem_depth(item):

@@ -1,0 +1,14 @@
+log_path: "./FM-DTEditor.log"
+log_level: "DEBUG"
+show_image_preview: true
+window_size: [1500, 1000]
+theme: "dark"
+language: "en"
+default_export_dir: ~/FM-DTEditor/exports
+default_import_dir: ~/FM-DTEditor/imports
+ae_title: "FM-DTEditor"
+destinations:
+  - label: "DCMLTSTORE"
+    ae_title: "DCMLTSTORE"
+    host: "192.168.16.72"
+    port: 11112

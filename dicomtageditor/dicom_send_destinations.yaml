@@ -1,5 +1,0 @@
-- label: "DCMLTSTORE"
-  ae_title: "DCMLTSTORE"
-  host: "192.168.16.72"
-  port: 11112
-  calling_ae_title: "FM-DTEditor"
