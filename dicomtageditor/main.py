@@ -4,7 +4,8 @@ from .app import MainWindow
 
 def main():
     app = QApplication(sys.argv)
-    window = MainWindow()
+    path = sys.argv[1] if len(sys.argv) > 1 else None
+    window = MainWindow(start_path=path)
     window.show()
     sys.exit(app.exec())
 

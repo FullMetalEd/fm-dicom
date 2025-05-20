@@ -1,0 +1,12 @@
+[project]
+name = "dicom-tag-editor"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.2.6",
+    "pydicom>=3.0.1",
+    "pynetdicom>=2.0.2",
+    "pyqt6>=6.9.0",
+]

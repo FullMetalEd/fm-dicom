@@ -13,27 +13,26 @@
       in
       {
         devShells.default = pkgs.mkShell {
-	  buildInputs = with pkgs; [
-	    python3
-	    uv
-	    gcc
-	    python3Packages.numpy
-      
+          buildInputs = with pkgs; [
+            python3
+            uv
+            gcc
+            python3Packages.numpy
+            python3Packages.pydicom
+            python3Packages.pyqt6
+            python3Packages.pynetdicom
+          ];
 
-	];
+          shellHook = ''
+            rm -rf .venv
+            uv venv .venv
+            source .venv/bin/activate
 
-	shellHook = ''
-	  rm -rf .venv
-	  uv venv .venv
-	  source .venv/bin/activate
-	  
-	  export PIP_REQUIRE_VIRTUALENV=true
-	  export PIP_USE_UV=1
+            export PIP_REQUIRE_VIRTUALENV=true
+            export PIP_USE_UV=1
 
-	  uv pip install -e .
-	'';
-      
-      };
-    });
+            uv pip install -e .
+          '';
+        };
+      });
 }
-	
