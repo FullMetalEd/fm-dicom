@@ -1,7 +1,8 @@
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog,
     QTreeWidget, QTreeWidgetItem, QTableWidget, QTableWidgetItem, QMessageBox, QLineEdit, QInputDialog, QComboBox, QLabel, QCheckBox, QSizePolicy, QSplitter,
-    QDialog, QFormLayout, QDialogButtonBox, QProgressDialog, QApplication
+    QDialog, QFormLayout, QDialogButtonBox, QProgressDialog,
+    QApplication,
 )
 from PyQt6.QtGui import QPixmap, QImage
 from PyQt6.QtCore import QDir, Qt
@@ -153,6 +154,18 @@ class MainWindow(QMainWindow):
         open_dir_btn.clicked.connect(self.open_directory)
         top_btn_row.addWidget(open_dir_btn)
 
+        # --- Add expand/collapse buttons for patient/study tree ---
+        expand_all_btn = QPushButton("Expand All")
+        expand_all_btn.setToolTip("Expand all patients and studies")
+        expand_all_btn.clicked.connect(self.tree_expand_all)
+        top_btn_row.addWidget(expand_all_btn)
+
+        collapse_all_btn = QPushButton("Collapse All")
+        collapse_all_btn.setToolTip("Collapse all patients and studies")
+        collapse_all_btn.clicked.connect(self.tree_collapse_all)
+        top_btn_row.addWidget(collapse_all_btn)
+        # --- end expand/collapse buttons ---
+
         layout.addLayout(top_btn_row)
 
         # Splitter for tree and image preview (left), tag table (right)
@@ -162,7 +175,9 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(0, 0, 0, 0)
 
         # Tree and preview toggle/preview
+        # Set QTreeWidget to ExtendedSelection for standard Ctrl/Shift multi-select behavior
         self.tree = QTreeWidget()
+        self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
         self.tree.setHeaderLabels(["Patient", "Study", "Series", "Instance"])
         self.tree.itemSelectionChanged.connect(self.display_selected_tree_file)
         self.tree.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -250,6 +265,11 @@ class MainWindow(QMainWindow):
         self.batch_edit_btn.clicked.connect(self.batch_edit_tag)
         col3.addWidget(self.batch_edit_btn)
 
+        # Add Merge Patients button
+        self.merge_patients_btn = QPushButton("Merge Patients")
+        self.merge_patients_btn.clicked.connect(self.merge_patients)
+        btn_grid.addWidget(self.merge_patients_btn)
+
         btn_grid.addLayout(col3)
 
         layout.addLayout(btn_grid)
@@ -291,10 +311,23 @@ class MainWindow(QMainWindow):
                     with zipfile.ZipFile(path, 'r') as zip_ref:
                         zip_ref.extractall(self.temp_dir)
                     dcm_files = []
+                    # Progress dialog for extracting and scanning ZIP
+                    all_files = []
                     for root, dirs, files in os.walk(self.temp_dir):
                         for name in files:
-                            if name.lower().endswith('.dcm'):
-                                dcm_files.append(os.path.join(root, name))
+                            all_files.append(os.path.join(root, name))
+                    progress = QProgressDialog("Scanning ZIP for DICOM files...", "Cancel", 0, len(all_files), self)
+                    progress.setWindowTitle("Loading ZIP")
+                    progress.setMinimumDuration(0)
+                    progress.setValue(0)
+                    for idx, f in enumerate(all_files):
+                        if progress.wasCanceled():
+                            break
+                        if f.lower().endswith('.dcm'):
+                            dcm_files.append(f)
+                        progress.setValue(idx + 1)
+                        QApplication.processEvents()
+                    progress.close()
                     if not dcm_files:
                         QMessageBox.warning(self, "No DICOM", "No DICOM (.dcm) files found in ZIP archive.")
                         return
@@ -312,10 +345,23 @@ class MainWindow(QMainWindow):
         elif os.path.isdir(path):
             self.clear_loaded_files()
             dcm_files = []
+            # Progress dialog for scanning directory
+            all_files = []
             for root, dirs, files in os.walk(path):
                 for name in files:
-                    if name.lower().endswith('.dcm'):
-                        dcm_files.append(os.path.join(root, name))
+                    all_files.append(os.path.join(root, name))
+            progress = QProgressDialog("Scanning directory for DICOM files...", "Cancel", 0, len(all_files), self)
+            progress.setWindowTitle("Loading Directory")
+            progress.setMinimumDuration(0)
+            progress.setValue(0)
+            for idx, f in enumerate(all_files):
+                if progress.wasCanceled():
+                    break
+                if f.lower().endswith('.dcm'):
+                    dcm_files.append(f)
+                progress.setValue(idx + 1)
+                QApplication.processEvents()
+            progress.close()
             if not dcm_files:
                 QMessageBox.warning(self, "No DICOM", "No DICOM (.dcm) files found in directory.")
                 return
@@ -338,10 +384,22 @@ class MainWindow(QMainWindow):
                         with zipfile.ZipFile(file_path, 'r') as zip_ref:
                             zip_ref.extractall(self.temp_dir)
                         dcm_files = []
+                        all_files = []
                         for root, dirs, files in os.walk(self.temp_dir):
                             for name in files:
-                                if name.lower().endswith('.dcm'):
-                                    dcm_files.append(os.path.join(root, name))
+                                all_files.append(os.path.join(root, name))
+                        progress = QProgressDialog("Scanning ZIP for DICOM files...", "Cancel", 0, len(all_files), self)
+                        progress.setWindowTitle("Loading ZIP")
+                        progress.setMinimumDuration(0)
+                        progress.setValue(0)
+                        for idx, f in enumerate(all_files):
+                            if progress.wasCanceled():
+                                break
+                            if f.lower().endswith('.dcm'):
+                                dcm_files.append(f)
+                            progress.setValue(idx + 1)
+                            QApplication.processEvents()
+                        progress.close()
                         if not dcm_files:
                             self.tag_view.setText("No DICOM (.dcm) files found in ZIP archive.")
                             return
@@ -359,10 +417,22 @@ class MainWindow(QMainWindow):
         if dir_path:
             self.clear_loaded_files()
             dcm_files = []
+            all_files = []
             for root, dirs, files in os.walk(dir_path):
                 for name in files:
-                    if name.lower().endswith('.dcm'):
-                        dcm_files.append(os.path.join(root, name))
+                    all_files.append(os.path.join(root, name))
+            progress = QProgressDialog("Scanning directory for DICOM files...", "Cancel", 0, len(all_files), self)
+            progress.setWindowTitle("Loading Directory")
+            progress.setMinimumDuration(0)
+            progress.setValue(0)
+            for idx, f in enumerate(all_files):
+                if progress.wasCanceled():
+                    break
+                if f.lower().endswith('.dcm'):
+                    dcm_files.append(f)
+                progress.setValue(idx + 1)
+                QApplication.processEvents()
+            progress.close()
             if not dcm_files:
                 self.tag_view.setText("No DICOM (.dcm) files found in directory.")
                 return
@@ -371,40 +441,44 @@ class MainWindow(QMainWindow):
 
     def populate_tree(self, files):
         self.tree.clear()
-        # Build hierarchy: Patient > Study > Series > Instance (with descriptions)
         hierarchy = {}
         self.file_metadata = {}
         modalities = set()
-        for f in files:
+        # Progress dialog for loading DICOM headers
+        progress = QProgressDialog("Loading DICOM headers...", "Cancel", 0, len(files), self)
+        progress.setWindowTitle("Loading DICOM Files")
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        for idx, f in enumerate(files):
+            if progress.wasCanceled():
+                break
             try:
                 ds = pydicom.dcmread(f, stop_before_pixels=True)
                 patient_id = getattr(ds, "PatientID", "Unknown ID")
                 patient_name = getattr(ds, "PatientName", "Unknown Name")
                 patient_label = f"{patient_name} ({patient_id})"
-
                 study_uid = getattr(ds, "StudyInstanceUID", "Unknown StudyUID")
                 study_desc = getattr(ds, "StudyDescription", "No Study Description")
                 study_label = f"{study_desc} [{study_uid}]"
-
                 series_uid = getattr(ds, "SeriesInstanceUID", "Unknown SeriesUID")
                 series_desc = getattr(ds, "SeriesDescription", "No Series Description")
                 series_label = f"{series_desc} [{series_uid}]"
-
                 instance_number = getattr(ds, "InstanceNumber", None)
                 sop_uid = getattr(ds, "SOPInstanceUID", os.path.basename(f))
                 if instance_number is not None:
                     instance_label = f"Instance {instance_number} [{sop_uid}]"
                 else:
                     instance_label = f"{os.path.basename(f)} [{sop_uid}]"
-
                 modality = getattr(ds, "Modality", None)
                 if modality:
                     modalities.add(str(modality))
-
                 self.file_metadata[f] = (patient_label, study_label, series_label, instance_label)
                 hierarchy.setdefault(patient_label, {}).setdefault(study_label, {}).setdefault(series_label, {})[instance_label] = f
             except Exception:
                 continue
+            progress.setValue(idx + 1)
+            QApplication.processEvents()
+        progress.close()
 
         for patient, studies in hierarchy.items():
             patient_item = QTreeWidgetItem([patient])
@@ -1058,6 +1132,124 @@ class MainWindow(QMainWindow):
             msg += "\n\nDetails:\n" + "\n".join(failed)
         QMessageBox.information(self, "Anonymization", msg)
         self.display_selected_tree_file()
+
+    def merge_patients(self):
+        # Enable multi-selection for patient nodes
+        self.tree.setSelectionMode(QTreeWidget.SelectionMode.MultiSelection)
+        selected = self.tree.selectedItems()
+        # Only allow patient-level nodes (depth 0)
+        patient_nodes = [item for item in selected if item.depth() == 0]
+        if len(patient_nodes) < 2:
+            QMessageBox.warning(self, "Merge Patients", "Select at least two patient nodes to merge.\n\nHold Ctrl or Shift to select multiple patients.")
+            return
+
+        # Gather patient labels and ask user which to keep
+        patient_labels = [item.text(0) for item in patient_nodes]
+        primary_idx, ok = QInputDialog.getItem(
+            self, "Merge Patients", "Select primary patient (whose metadata to keep):", patient_labels, 0, False
+        )
+        if not ok:
+            return
+        primary_label = primary_idx
+        primary_node = next(item for item in patient_nodes if item.text(0) == primary_label)
+
+        # Get PatientID/PatientName from primary
+        primary_fp = None
+        for i in range(primary_node.childCount()):
+            study_item = primary_node.child(i)
+            for j in range(study_item.childCount()):
+                series_item = study_item.child(j)
+                for k in range(series_item.childCount()):
+                    instance_item = series_item.child(k)
+                    fp = instance_item.data(0, 1000)
+                    if fp:
+                        primary_fp = fp
+                        break
+                if primary_fp:
+                    break
+            if primary_fp:
+                break
+        if not primary_fp:
+            QMessageBox.warning(self, "Merge Patients", "Could not find a file for the primary patient.")
+            return
+        try:
+            ds_primary = pydicom.dcmread(primary_fp, stop_before_pixels=True)
+            primary_id = getattr(ds_primary, "PatientID", "")
+            primary_name = getattr(ds_primary, "PatientName", "")
+        except Exception as e:
+            QMessageBox.critical(self, "Merge Patients", f"Failed to read primary patient file: {e}")
+            return
+
+        # Collect all files under secondary patients
+        files_to_update = []
+        for node in patient_nodes:
+            if node is primary_node:
+                continue
+            for i in range(node.childCount()):
+                study_item = node.child(i)
+                for j in range(study_item.childCount()):
+                    series_item = study_item.child(j)
+                    for k in range(series_item.childCount()):
+                        instance_item = series_item.child(k)
+                        fp = instance_item.data(0, 1000)
+                        if fp:
+                            files_to_update.append(fp)
+
+        # Confirm
+        reply = QMessageBox.question(
+            self,
+            "Confirm Merge",
+            f"This will update {len(files_to_update)} files to PatientID '{primary_id}' and PatientName '{primary_name}'.\nContinue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Update files with progress dialog
+        updated = 0
+        failed = []
+        progress = QProgressDialog("Merging patients...", "Cancel", 0, len(files_to_update), self)
+        progress.setWindowTitle("Merging Patients")
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        for idx, fp in enumerate(files_to_update):
+            if progress.wasCanceled():
+                break
+            try:
+                ds = pydicom.dcmread(fp)
+                ds.PatientID = primary_id
+                ds.PatientName = primary_name
+                ds.save_as(fp)
+                updated += 1
+            except Exception as e:
+                failed.append(f"{os.path.basename(fp)}: {e}")
+            progress.setValue(idx + 1)
+            QApplication.processEvents()
+        progress.close()
+
+        # Remove merged patient nodes from tree and reload
+        for node in patient_nodes:
+            if node is not primary_node:
+                idx = self.tree.indexOfTopLevelItem(node)
+                self.tree.takeTopLevelItem(idx)
+
+        msg = f"Merged {len(patient_nodes)} patients.\nFiles updated: {updated}\nFailed: {len(failed)}"
+        if failed:
+            msg += "\n\nDetails:\n" + "\n".join(failed)
+        QMessageBox.information(self, "Merge Patients", msg)
+        # Optionally, reload tree from loaded_files to refresh summary
+        self.populate_tree([f for f, _ in self.loaded_files])
+        # Restore standard selection behavior
+        self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
+
+    def tree_expand_all(self):
+        """Expand all items in the tree."""
+        self.tree.expandAll()
+
+    def tree_collapse_all(self):
+        """Collapse all items in the tree."""
+        self.tree.collapseAll()
+
 # Add this helper method to QTreeWidgetItem to get depth
 # (You can add this at the bottom of the file or near the class definition)
 def _qtreewidgetitem_depth(item):
