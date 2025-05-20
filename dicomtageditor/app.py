@@ -1,6 +1,7 @@
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog,
-    QTreeWidget, QTreeWidgetItem, QTableWidget, QTableWidgetItem, QMessageBox, QLineEdit, QInputDialog, QComboBox, QLabel, QCheckBox, QSizePolicy, QSplitter
+    QTreeWidget, QTreeWidgetItem, QTableWidget, QTableWidgetItem, QMessageBox, QLineEdit, QInputDialog, QComboBox, QLabel, QCheckBox, QSizePolicy, QSplitter,
+    QDialog, QFormLayout, QDialogButtonBox
 )
 from PyQt6.QtGui import QPixmap, QImage
 from PyQt6.QtCore import QDir, Qt
@@ -10,6 +11,97 @@ import tempfile
 import os
 import shutil
 import numpy as np
+import sys
+import yaml
+
+# Add import for pynetdicom
+try:
+    from pynetdicom import AE, AllStoragePresentationContexts
+    from pynetdicom.sop_class import Verification
+    VERIFICATION_SOP_CLASS = Verification
+    STORAGE_CONTEXTS = AllStoragePresentationContexts
+except Exception as e:
+    print("PYNETDICOM IMPORT ERROR:", e, file=sys.stderr)
+    AE = None
+    STORAGE_CONTEXTS = []
+    VERIFICATION_SOP_CLASS = None
+
+class DicomSendDialog(QDialog):
+    def __init__(self, parent=None, config_path=None):
+        super().__init__(parent)
+        self.setWindowTitle("DICOM Send")
+        layout = QFormLayout(self)
+
+        # Load destinations from YAML config
+        self.destinations = []
+        # Always try both absolute and relative paths
+        config_paths = []
+        if config_path:
+            config_paths.append(config_path)
+        # Also try relative to the app.py file
+        if config_path and not os.path.isabs(config_path):
+            config_paths.append(os.path.join(os.path.dirname(__file__), config_path))
+        # Default locations
+        config_paths.append(os.path.expanduser("~/.dicom_send_destinations.yaml"))
+        config_paths.append(os.path.join(os.path.dirname(__file__), "dicom_send_destinations.yaml"))
+
+        for path in config_paths:
+            if os.path.exists(path):
+                try:
+                    with open(path, "r") as f:
+                        self.destinations = yaml.safe_load(f) or []
+                    print(f"Loaded DICOM send destinations from: {path}", file=sys.stderr)
+                    break
+                except Exception as e:
+                    print("Failed to load DICOM send config:", e, file=sys.stderr)
+                    self.destinations = []
+
+        self.dest_combo = QComboBox()
+        self.dest_combo.addItem("Manual Entry")
+        for dest in self.destinations:
+            label = dest.get("label") or f"{dest.get('ae_title','')}@{dest.get('host','')}:{dest.get('port','')}"
+            self.dest_combo.addItem(label)
+        self.dest_combo.currentIndexChanged.connect(self._on_dest_changed)
+        layout.addRow("Destination:", self.dest_combo)
+
+        self.ae_title = QLineEdit("DCMSCU")
+        self.ae_title.setToolTip(
+            "Calling AE Title: This is the Application Entity Title your system presents to the remote DICOM server. "
+            "It identifies your workstation or application to the remote PACS. "
+            "If unsure, use a unique name or the default."
+        )
+        self.remote_ae = QLineEdit("DCMRCVR")
+        self.host = QLineEdit("127.0.0.1")
+        self.port = QLineEdit("104")
+        layout.addRow("Calling AE Title:", self.ae_title)
+        layout.addRow("Remote AE Title:", self.remote_ae)
+        layout.addRow("Remote Host:", self.host)
+        layout.addRow("Remote Port:", self.port)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+    def _on_dest_changed(self, idx):
+        if idx == 0:
+            # Manual entry
+            return
+        dest = self.destinations[idx-1]
+        self.remote_ae.setText(str(dest.get("ae_title", "")))
+        self.host.setText(str(dest.get("host", "")))
+        self.port.setText(str(dest.get("port", "")))
+        if "calling_ae_title" in dest:
+            self.ae_title.setText(str(dest.get("calling_ae_title", "")))
+        else:
+            self.ae_title.setText("DCMSCU")
+
+    def get_params(self):
+        return (
+            self.ae_title.text().strip(),
+            self.remote_ae.text().strip(),
+            self.host.text().strip(),
+            int(self.port.text().strip())
+        )
 
 class MainWindow(QMainWindow):
     def __init__(self, start_path=None):
@@ -74,6 +166,9 @@ class MainWindow(QMainWindow):
         self.tag_table.setHorizontalHeaderLabels(["Tag ID", "Description", "Value", "New Value"])
         self.tag_table.horizontalHeader().setStretchLastSection(True)
         self.tag_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.tag_table.setAlternatingRowColors(True)
+        self.tag_table.cellActivated.connect(self._populate_new_value_on_edit)
+        self.tag_table.cellClicked.connect(self._populate_new_value_on_edit)
         right_layout.addWidget(self.tag_table)
 
         main_splitter.addWidget(right_widget)
@@ -104,7 +199,7 @@ class MainWindow(QMainWindow):
         col2.addWidget(self.save_as_btn)
 
         self.dicom_send_btn = QPushButton("DICOM Send")
-        # self.dicom_send_btn.clicked.connect(self.dicom_send)  # To be implemented
+        self.dicom_send_btn.clicked.connect(self.dicom_send)
         col2.addWidget(self.dicom_send_btn)
 
         btn_grid.addLayout(col2)
@@ -136,8 +231,19 @@ class MainWindow(QMainWindow):
         self.current_ds = None
         self._all_tag_rows = []  # Store all tag rows for filtering
 
+        self.dicom_send_config_path = os.path.expanduser("~/.dicom_send_destinations.yaml")
+
         if start_path:
             self.load_path_on_start(start_path)
+
+    def _populate_new_value_on_edit(self, row, col):
+        """Auto-populate the 'New Value' cell with the current value when clicked if empty."""
+        if col != 3:  # Only handle clicks on the "New Value" column
+            return
+        new_value_item = self.tag_table.item(row, 3)
+        current_value_item = self.tag_table.item(row, 2)
+        if new_value_item and current_value_item and not new_value_item.text().strip():
+            new_value_item.setText(current_value_item.text())
 
     def load_path_on_start(self, path):
         path = os.path.expanduser(path)
@@ -664,6 +770,94 @@ class MainWindow(QMainWindow):
                     QMessageBox.information(self, "Export Complete", f"Exported {len(filepaths)} files to {out_zip}")
                 except Exception as e:
                     QMessageBox.critical(self, "Export Error", f"Failed to create ZIP: {e}")
+
+    def dicom_send(self):
+        print("Python executable:", sys.executable, file=sys.stderr)
+        print("sys.path:", sys.path, file=sys.stderr)
+        print("AE:", AE, "STORAGE_CONTEXTS:", STORAGE_CONTEXTS, file=sys.stderr)
+        if AE is None or not STORAGE_CONTEXTS or VERIFICATION_SOP_CLASS is None:
+            QMessageBox.critical(
+                self,
+                "Missing Dependency",
+                "pynetdicom is required for DICOM send.\n"
+                "Check your environment and restart the application.\n"
+                "Python executable: {}\n"
+                "sys.path: {}".format(sys.executable, sys.path)
+            )
+            return
+        selected = self.tree.selectedItems()
+        if not selected:
+            QMessageBox.warning(self, "No Selection", "Please select a node in the tree to send.")
+            return
+        tree_item = selected[0]
+        # Always traverse up to the patient node (depth 0)
+        while tree_item.parent():
+            tree_item = tree_item.parent()
+        filepaths = self._collect_instance_filepaths(tree_item)
+        if not filepaths:
+            QMessageBox.warning(self, "No Instances", "No DICOM instances found under this node.")
+            return
+
+        dlg = DicomSendDialog(self, config_path=self.dicom_send_config_path)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        calling_ae, remote_ae, host, port = dlg.get_params()
+
+        ae = AE(ae_title=calling_ae)
+        sop_classes = set()
+        for fp in filepaths:
+            try:
+                ds = pydicom.dcmread(fp, stop_before_pixels=True)
+                sop_classes.add(ds.SOPClassUID)
+            except Exception as e:
+                print(f"Failed to read SOPClassUID from {fp}: {e}", file=sys.stderr)
+        # If no SOP classes found, abort
+        if not sop_classes:
+            QMessageBox.critical(self, "DICOM Send", "No valid SOP Class UIDs found in selected files.")
+            return
+        # Print SOP classes for debugging
+        print("SOP Classes to request:", sop_classes, file=sys.stderr)
+        for cx in STORAGE_CONTEXTS:
+            if getattr(cx, "abstract_syntax", None) in sop_classes:
+                ae.add_requested_context(cx.abstract_syntax)
+        ae.add_requested_context(VERIFICATION_SOP_CLASS)
+
+        assoc = ae.associate(host, port, ae_title=remote_ae)
+        if not assoc.is_established:
+            QMessageBox.critical(self, "DICOM Send", f"Association to {host}:{port} ({remote_ae}) failed.")
+            return
+
+        sent = 0
+        failed = []
+        failed_details = []
+        for fp in filepaths:
+            try:
+                ds = pydicom.dcmread(fp)
+                status = assoc.send_c_store(ds)
+                status_code = getattr(status, "Status", None)
+                # Add more detailed status code explanations
+                status_meaning = {
+                    0x0000: "Success",
+                    0xB000: "Warning: Coercion of Data Elements",
+                    0xA700: "Refused: Out of Resources",
+                    0xA900: "Error: Data Set does not match SOP Class",
+                    0xC000: "Error: Cannot Understand",
+                    0xA778: "Refused: Move Destination unknown (check AE Title, Host, Port, or permissions)"
+                }
+                meaning = status_meaning.get(status_code, f"Unknown/Other (0x{status_code:04X})" if status_code is not None else "No status")
+                if status_code in [0x0000, 0xB000]:
+                    sent += 1
+                else:
+                    failed.append(fp)
+                    failed_details.append(f"{os.path.basename(fp)}: status=0x{status_code:04X} ({meaning})")
+            except Exception as e:
+                failed.append(fp)
+                failed_details.append(f"{os.path.basename(fp)}: {e}")
+        assoc.release()
+        msg = f"Sent: {sent}\nFailed: {len(failed)}"
+        if failed_details:
+            msg += "\n\nDetails:\n" + "\n".join(failed_details)
+        QMessageBox.information(self, "DICOM Send", msg)
 
     def _collect_instance_filepaths(self, tree_item):
         """Recursively collect all instance filepaths under the given tree item."""
