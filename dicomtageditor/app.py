@@ -31,6 +31,17 @@ except Exception as e:
     STORAGE_CONTEXTS = []
     VERIFICATION_SOP_CLASS = None
 
+# Add depth method to QTreeWidgetItem
+def depth(self):
+    """Return the depth of the item in the tree."""
+    depth = 0
+    while self.parent():
+        depth += 1
+        self = self.parent()
+    return depth
+
+QTreeWidgetItem.depth = depth
+
 def load_config(config_path=None):
     # Try user config, then local config, then defaults
     paths = []
@@ -270,6 +281,12 @@ class MainWindow(QMainWindow):
         self.merge_patients_btn.clicked.connect(self.merge_patients)
         btn_grid.addWidget(self.merge_patients_btn)
 
+        # Add Delete button to the button grid (after merge_patients_btn)
+        self.delete_btn = QPushButton("Delete")
+        self.delete_btn.setToolTip("Delete selected patients, studies, series, or instances")
+        self.delete_btn.clicked.connect(self.delete_selected_items)
+        btn_grid.addWidget(self.delete_btn)
+
         btn_grid.addLayout(col3)
 
         layout.addLayout(btn_grid)
@@ -291,6 +308,14 @@ class MainWindow(QMainWindow):
             self.load_path_on_start(start_path)
 
         logging.info("MainWindow initialized")
+
+    def tree_expand_all(self):
+        """Expand all items in the tree."""
+        self.tree.expandAll()
+
+    def tree_collapse_all(self):
+        """Collapse all items in the tree."""
+        self.tree.collapseAll()
 
     def _populate_new_value_on_edit(self, row, col):
         """Auto-populate the 'New Value' cell with the current value when clicked if empty."""
@@ -1242,22 +1267,102 @@ class MainWindow(QMainWindow):
         # Restore standard selection behavior
         self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
 
-    def tree_expand_all(self):
-        """Expand all items in the tree."""
-        self.tree.expandAll()
+    def delete_selected_items(self):
+        selected = self.tree.selectedItems()
+        if not selected:
+            QMessageBox.warning(self, "Delete", "Please select one or more items to delete.")
+            return
 
-    def tree_collapse_all(self):
-        """Collapse all items in the tree."""
-        self.tree.collapseAll()
+        # Collect all unique filepaths to delete, and count by type
+        files_to_delete = set()
+        patient_count = study_count = series_count = instance_count = 0
+        for item in selected:
+            depth = item.depth()
+            if depth == 0:
+                # Patient
+                patient_count += 1
+                files_to_delete.update(self._collect_instance_filepaths(item))
+            elif depth == 1:
+                # Study
+                study_count += 1
+                files_to_delete.update(self._collect_instance_filepaths(item))
+            elif depth == 2:
+                # Series
+                series_count += 1
+                files_to_delete.update(self._collect_instance_filepaths(item))
+            elif depth == 3:
+                # Instance
+                instance_count += 1
+                fp = item.data(0, 1000)
+                if fp:
+                    files_to_delete.add(fp)
 
-# Add this helper method to QTreeWidgetItem to get depth
-# (You can add this at the bottom of the file or near the class definition)
-def _qtreewidgetitem_depth(item):
-    """Return the depth of the item in the tree."""
-    depth = 0
-    while item.parent():
-        depth += 1
-        item = item.parent()
-    return depth
+        if not files_to_delete:
+            QMessageBox.warning(self, "Delete", "No files found to delete for the selected items.")
+            return
 
-QTreeWidgetItem.depth = _qtreewidgetitem_depth
+        # Confirmation dialog
+        msg = []
+        if patient_count:
+            msg.append(f"{patient_count} patient(s)")
+        if study_count:
+            msg.append(f"{study_count} study(ies)")
+        if series_count:
+            msg.append(f"{series_count} series")
+        if instance_count:
+            msg.append(f"{instance_count} instance(s)")
+        msg_str = ", ".join(msg)
+        confirm = QMessageBox.question(
+            self,
+            "Confirm Delete",
+            f"Delete {msg_str}?\nThis will permanently delete {len(files_to_delete)} file(s) from disk. This cannot be undone.\nContinue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        # Progress dialog for deletion
+        progress = QProgressDialog("Deleting files...", "Cancel", 0, len(files_to_delete), self)
+        progress.setWindowTitle("Deleting")
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        deleted = 0
+        failed = []
+        files_to_delete = list(files_to_delete)
+        for idx, fp in enumerate(files_to_delete):
+            if progress.wasCanceled():
+                break
+            try:
+                if os.path.exists(fp):
+                    os.remove(fp)
+                # Remove from loaded_files
+                self.loaded_files = [t for t in self.loaded_files if t[0] != fp]
+                deleted += 1
+            except Exception as e:
+                failed.append(f"{os.path.basename(fp)}: {e}")
+            progress.setValue(idx + 1)
+            QApplication.processEvents()
+        progress.close()
+
+        # Remove deleted nodes from tree
+        for item in selected:
+            parent = item.parent()
+            if parent:
+                parent.removeChild(item)
+            else:
+                idx = self.tree.indexOfTopLevelItem(item)
+                self.tree.takeTopLevelItem(idx)
+
+        # Refresh UI
+        self.populate_tree([f for f, _ in self.loaded_files])
+        self.tag_table.setRowCount(0)
+        self.image_label.clear()
+        self.image_label.setVisible(False)
+        self.current_filepath = None
+        self.current_ds = None
+
+        msg = f"Deleted {deleted} file(s)."
+        if failed:
+            msg += "\n\nFailed:\n" + "\n".join(failed)
+        QMessageBox.information(self, "Delete", msg)
+
