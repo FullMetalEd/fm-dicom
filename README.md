@@ -2,6 +2,11 @@
 
 A robust Python GUI for editing DICOM tags. This tool allows you to view and modify metadata in DICOM files, making it useful for medical imaging professionals, researchers, and developers working with DICOM datasets.
 
+I am not a programmer, I do understand alot of the concepts but AI has certainly helped make this possible for me.
+If there is something you think I should add  or maybe something you think needs modifying please let me know.
+
+ 
+
 ## Features
 
 - View DICOM file metadata in a user-friendly interface
@@ -71,49 +76,44 @@ nix develop
 
 This will provide you with Python, all required libraries, and any other tools needed for development.
 
-## Adding to Your NixOS System Configuration
+## Adding to Your NixOS System Configuration via FLAKES!!
 
 You can install `dicom-tag-editor` system-wide on NixOS so it is always available for all users. Here’s how:
 
 1. **Add the repository as an input to your `flake.nix`:**
 
-   Open your system's `flake.nix` (usually in `/etc/nixos/flake.nix` or your NixOS configuration repo) and add:
+   Open your system's `flake.nix` (usually in `/etc/nixos/flake.nix` or your NixOS configuration repo) and add the dicom-tag-editor github repo to your inputs section (it should looks something like below):
 
    ```nix
-   inputs.dicom-tag-editor.url = "github:yourusername/dicom-tag-editor";
+   inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
+    nixpkgs-unstable.url = "github:nixos/nixpkgs/nixpkgs-unstable";
+    zen-browser.url = "github:0xc000022070/zen-browser-flake";
+    dicom-tag-edtior.url = "github:fullmetaled/dicom-tag-editor";
+};
    ```
-
-   Place this line in the `inputs` section, alongside other inputs like `nixpkgs`.
 
 2. **Add the package to your system packages:**
 
-   In your `flake.nix` or `configuration.nix`, add the package to `environment.systemPackages`. For example, in a `flake.nix`:
+   In your `flake.nix` under 'nixosConfigurations' in the 'modules' list add the package to `environment.systemPackages`. For example:
 
    ```nix
-   outputs = { self, nixpkgs, ... }@inputs: {
-     nixosConfigurations.your-hostname = nixpkgs.lib.nixosSystem {
-       # ...existing code...
-       configuration = {
-         # ...existing code...
-         environment.systemPackages = with pkgs; [
-           inputs.dicom-tag-editor.packages.${system}.default
-         ];
-         # ...existing code...
-       };
-     };
-   };
+   modules = [
+            # List of the config files this profile needs.
+            ./configuration.nix
+            nixos-hardware.nixosModules.framework-12th-gen-intel
+            (
+              {nixpkgs, ...}:
+                {
+                  environment.systemPackages = [
+                    zen-browser.packages."${systemSettings.system}".default
+                    dicom-tag-edtior.packages."${systemSettings.system}".default
+                  ];
+                }
+            )
+          ];
    ```
 
-   Or in `configuration.nix` (if not using flakes):
-
-   ```nix
-   environment.systemPackages = with pkgs; [
-     # ...other packages...
-     dicom-tag-editor
-   ];
-   ```
-
-   (You may need to overlay or package it if not using flakes.)
 
 3. **Rebuild your system:**
 
@@ -127,7 +127,6 @@ You can install `dicom-tag-editor` system-wide on NixOS so it is always availabl
 
 After rebuilding, you can launch `dicom-tag-editor` from your terminal or application menu.
 
-**Tip:** If you’re new to NixOS flakes, see the [NixOS flake documentation](https://nixos.wiki/wiki/Flakes) for more details.
 
 ## Contributing
 
@@ -141,3 +140,8 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 
 - [pydicom](https://github.com/pydicom/pydicom) for DICOM file handling
 - [PyQt5](https://riverbankcomputing.com/software/pyqt/intro) or [Tkinter] for GUI (depending on implementation)
+
+
+## Docker Image
+
+**Docker** is not a viable option for this application since there is a GUI. If you really want to dockerize it, you can there is guides out there to allow you to remote  into the container and access the UI. But I would advise again that since this is also interacting dynamically with your file system. Unless you really want to limit the folders it can access to a bind mount.
