@@ -81,7 +81,7 @@ def load_config(config_path=None):
     # Defaults if no config found
     return {
         "log_path": os.path.expanduser("~/.dicomtageditor/dicomtageditor.log"),
-        "log_level": "INFO",
+        "log_level": "DEBUG",
         "show_image_preview": False,
         "ae_title": "DCMSCU",
         "destinations": [],

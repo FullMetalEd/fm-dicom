@@ -32,6 +32,7 @@
             pyqt6
             pynetdicom
             pyyaml
+            typer
           ];
                     
           # System dependencies for PyQt6
@@ -66,6 +67,7 @@
             python3Packages.pydicom
             python3Packages.pyqt6
             python3Packages.pynetdicom
+            python3Packages.typer
           ];
           
           shellHook = ''
