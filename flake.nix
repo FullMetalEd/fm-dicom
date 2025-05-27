@@ -12,8 +12,8 @@
         pkgs = nixpkgs.legacyPackages.${system};
         
         # Define the installable package
-        fm-dteditor = pkgs.python3Packages.buildPythonApplication {
-          pname = "fm_dteditor";
+        dicomtageditor = pkgs.python3Packages.buildPythonApplication {
+          pname = "dicomtageditor";
           version = "0.1.0";
           
           src = ./.;
@@ -33,17 +33,7 @@
             pynetdicom
             pyyaml
           ];
-          
-          # Override version checks since nixpkgs might have slightly different versions
-          pythonImportsCheck = [ "dicomtageditor" ];
-          
-          # Skip dependency version checks for packages where nixpkgs version is close enough
-          postPatch = ''
-            # Relax numpy version requirement to work with nixpkgs
-            substituteInPlace pyproject.toml \
-              --replace "numpy>=2.2.6" "numpy>=2.0.0"
-          '';
-          
+                    
           # System dependencies for PyQt6
           buildInputs = with pkgs; [
             qt6.qtbase
@@ -62,8 +52,8 @@
       {
         # Make the package available
         packages = {
-          default = fm-dteditor;
-          fm-dteditor = fm-dteditor;
+          default = dicomtageditor;
+          dicomtageditor = dicomtageditor;
         };
         
         # Development shell (your existing setup)
@@ -91,11 +81,11 @@
         # Make it available as an app you can run with nix run
         apps = {
           default = flake-utils.lib.mkApp {
-            drv = fm-dteditor;
+            drv = dicomtageditor;
             name = "dicomtageditor";
           };
           dicomtageditor = flake-utils.lib.mkApp {
-            drv = fm-dteditor;
+            drv = dicomtageditor;
             name = "dicomtageditor";
           };
         };
