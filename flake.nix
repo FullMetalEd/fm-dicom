@@ -32,8 +32,17 @@
             pyqt6
             pynetdicom
             pyyaml
-            # Note: pyinstaller not needed for Nix package
           ];
+          
+          # Override version checks since nixpkgs might have slightly different versions
+          pythonImportsCheck = [ "dicomtageditor" ];
+          
+          # Skip dependency version checks for packages where nixpkgs version is close enough
+          postPatch = ''
+            # Relax numpy version requirement to work with nixpkgs
+            substituteInPlace pyproject.toml \
+              --replace "numpy>=2.2.6" "numpy>=2.0.0"
+          '';
           
           # System dependencies for PyQt6
           buildInputs = with pkgs; [
@@ -75,7 +84,7 @@
             source .venv/bin/activate
             export PIP_REQUIRE_VIRTUALENV=true
             export PIP_USE_UV=1
-            uv pip install -e .
+            uv pip install -e .[dev]
           '';
         };
         

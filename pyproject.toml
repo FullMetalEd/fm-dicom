@@ -3,18 +3,23 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "dicomtageditor"
+name = "fm_dteditor"
 version = "0.1.0"
 description = "A basic wrapper for th pydicom commands. Lets you edit dicom tags, merge patients and then export/dicom send the changes"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "numpy>=2.2.6",
+    "numpy>=2.0.0",
     "pydicom>=3.0.1",
-    "pyinstaller>=6.13.0",
     "pynetdicom>=2.0.2",
     "pyqt6>=6.9.0",
     "pyyaml>=6.0.2",
+]
+
+# Optional dependencies for development/packaging
+[project.optional-dependencies]
+dev = [
+    "pyinstaller>=6.13.0",  
 ]
 
 [project.scripts]
