@@ -12,3 +12,7 @@ destinations:
     ae_title: "DCMLTSTORE"
     host: "192.168.16.72"
     port: 11112
+  - label: "CMHSPRIOR"
+    ae_title: "CMHSPRIOR"
+    host: "192.168.16.208"
+    port: 10002

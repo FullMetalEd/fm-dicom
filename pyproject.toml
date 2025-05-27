@@ -1,13 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
-name = "dicom-tag-editor"
+name = "dicomtageditor"
 version = "0.1.0"
-description = "Add your description here"
+description = "A basic wrapper for th pydicom commands. Lets you edit dicom tags, merge patients and then export/dicom send the changes"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "numpy>=2.2.6",
     "pydicom>=3.0.1",
+    "pyinstaller>=6.13.0",
     "pynetdicom>=2.0.2",
     "pyqt6>=6.9.0",
     "pyyaml>=6.0.2",
 ]
+
+[project.scripts]
+dicomtageditor = "dicomtageditor.main:main"
