@@ -1,4 +1,3 @@
-![FM-DICOM Logo](fm_dicom/fm-dicom.png)
 # FM-Dicom Tag Editor
 
 A robust Python GUI for editing DICOM tags. This tool allows you to view and modify metadata in DICOM files, making it useful for medical imaging professionals, researchers, and developers working with DICOM datasets.
@@ -6,7 +5,7 @@ A robust Python GUI for editing DICOM tags. This tool allows you to view and mod
 I am not a programmer, I do understand alot of the concepts but AI has certainly helped make this possible for me.
 If there is something you think I should add  or maybe something you think needs modifying please let me know.
 
-
+![FM-DICOM Logo](fm_dicom/fm-dicom.png)
 
 ## Features
 
