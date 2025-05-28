@@ -33,6 +33,7 @@
             pyqt6
             pynetdicom
             pyyaml
+            typer
           ];
 
           # System dependencies for PyQt6
@@ -48,7 +49,7 @@
               desktopName = "DICOM Tag Editor";
               comment = "Edit DICOM tags, merge patients and export/send changes";
               exec = "dicomtageditor %F";
-              icon = "dicomtageditor";
+              icon = "fm-dicom";
               categories = [ "Graphics" "MedicalSoftware" "Utility" ];
               mimeTypes = [ "application/dicom" ];
               keywords = [ "DICOM" "Medical" "Imaging" "Tags" "Editor" ];
@@ -57,20 +58,10 @@
             })
           ];
 
-          # Install icon if you have one
           postInstall = ''
             # Create icons directories
             mkdir -p $out/share/icons/hicolor/48x48/apps
-            mkdir -p $out/share/icons/hicolor/scalable/apps
-            
-            # If you have an icon file, copy it here
-            # For now, we'll create a placeholder or you can add your own icon
-            # cp ${./icons/dicomtageditor.png} $out/share/icons/hicolor/48x48/apps/dicomtageditor.png
-            # cp ${./icons/dicomtageditor.svg} $out/share/icons/hicolor/scalable/apps/dicomtageditor.svg
-            
-            # Alternative: Use a system icon as fallback
-            ln -sf ${pkgs.gnome.adwaita-icon-theme}/share/icons/Adwaita/48x48/mimetypes/text-x-generic.png \
-              $out/share/icons/hicolor/48x48/apps/dicomtageditor.png
+            cp ${dicomtageditor/fm-dicom.png} $out/share/icons/hicolor/48x48/apps/fm-dicom.png
           '';
 
           meta = with pkgs.lib; {
