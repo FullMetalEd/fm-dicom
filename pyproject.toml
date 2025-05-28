@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "dicomtageditor"
+name = "fm-dicom"
 version = "0.1.0"
-description = "A basic wrapper for th pydicom commands. Lets you edit dicom tags, merge patients and then export/dicom send the changes"
+description = "A basic wrapper for pydicom commands. Lets you edit DICOM tags, merge patients and then export/send the changes"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -24,4 +24,4 @@ dev = [
 ]
 
 [project.scripts]
-dicomtageditor = "dicomtageditor.main:main"
+fm-dicom = "fm_dicom.main:main"

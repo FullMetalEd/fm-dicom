@@ -1,5 +1,5 @@
 {
-  description = "Python Dev Environment for Nixos fm_dteditor";
+  description = "Python Dev Environment for Nixos fm_dicom";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -12,8 +12,8 @@
         pkgs = nixpkgs.legacyPackages.${system};
 
         # Define the installable package
-        dicomtageditor = pkgs.python3Packages.buildPythonApplication {
-          pname = "dicomtageditor";
+        fm_dicom = pkgs.python3Packages.buildPythonApplication {
+          pname = "fm-dicom";
           version = "0.1.0";
 
           src = ./.;
@@ -45,10 +45,10 @@
           # Desktop entry configuration
           desktopItems = [
             (pkgs.makeDesktopItem {
-              name = "dicomtageditor";
-              desktopName = "DICOM Tag Editor";
+              name = "fm-dicom";
+              desktopName = "FM DICOM Tag Editor";
               comment = "Edit DICOM tags, merge patients and export/send changes";
-              exec = "dicomtageditor %F";
+              exec = "fm-dicom %F";
               icon = "fm-dicom";
               categories = [ "Graphics" "MedicalSoftware" "Utility" ];
               mimeTypes = [ "application/dicom" ];
@@ -61,22 +61,22 @@
           postInstall = ''
             # Create icons directories
             mkdir -p $out/share/icons/hicolor/48x48/apps
-            cp ${dicomtageditor/fm-dicom.png} $out/share/icons/hicolor/48x48/apps/fm-dicom.png
+            cp ${./fm_dicom/fm-dicom.png} $out/share/icons/hicolor/48x48/apps/fm-dicom.png
           '';
 
           meta = with pkgs.lib; {
-            description = "A basic wrapper for pydicom commands. Lets you edit dicom tags, merge patients and then export/dicom send the changes";
+            description = "A basic wrapper for pydicom commands. Lets you edit DICOM tags, merge patients and then export/send the changes";
             license = licenses.mit;
             maintainers = [ ];
-            mainProgram = "dicomtageditor";
+            mainProgram = "fm-dicom";
           };
         };
       in
       {
         # Make the package available
         packages = {
-          default = dicomtageditor;
-          dicomtageditor = dicomtageditor;
+          default = fm_dicom;
+          fm_dicom = fm_dicom;
         };
 
         # Development shell
@@ -104,12 +104,12 @@
         # Make it available as an app you can run with nix run
         apps = {
           default = flake-utils.lib.mkApp {
-            drv = dicomtageditor;
-            name = "dicomtageditor";
+            drv = fm_dicom;
+            name = "fm-dicom";
           };
-          dicomtageditor = flake-utils.lib.mkApp {
-            drv = dicomtageditor;
-            name = "dicomtageditor";
+          fm_dicom = flake-utils.lib.mkApp {
+            drv = fm_dicom;
+            name = "fm-dicom";
           };
         };
       });

@@ -104,7 +104,7 @@ def load_config(config_path=None):
                 return yaml.safe_load(f) or {}
     # Defaults if no config found
     return {
-        "log_path": os.path.expanduser("~/.dicomtageditor/dicomtageditor.log"),
+        "log_path": os.path.expanduser("~/.config/fm-dicom/fm-dicom.log"),
         "log_level": "DEBUG",
         "show_image_preview": False,
         "ae_title": "DCMSCU",
@@ -199,7 +199,7 @@ class MainWindow(QMainWindow):
         self.default_import_dir = os.path.expanduser(self.config.get("default_import_dir", downloads_dir))
 
         super().__init__()
-        self.setWindowTitle("DICOM Tag Editor")
+        self.setWindowTitle("FM DICOM Tag Editor")
         w, h = self.config.get("window_size", [1200, 800])
         self.resize(w, h)
         central = QWidget()

@@ -1,12 +1,12 @@
-log_path: "./FM-DTEditor.log"
+log_path: "~/.config/fm-dicom/fm-dicom.log"
 log_level: "DEBUG"
 show_image_preview: true
 window_size: [1500, 1000]
 theme: "dark"
 language: "en"
-default_export_dir: ~/FM-DTEditor/exports
-default_import_dir: ~/FM-DTEditor/imports
-ae_title: "FM-DTEditor"
+default_export_dir: ~/.config/fm-dicom/exports
+default_import_dir: ~/.config/fm-dicom/imports
+ae_title: "FM-DICOM"
 destinations:
   - label: "DCMLTSTORE"
     ae_title: "DCMLTSTORE"
