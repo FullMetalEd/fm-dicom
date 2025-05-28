@@ -1,4 +1,4 @@
-# dicom-tag-editor
+# FM-Dicom Tag Editor
 
 A robust Python GUI for editing DICOM tags. This tool allows you to view and modify metadata in DICOM files, making it useful for medical imaging professionals, researchers, and developers working with DICOM datasets.
 
@@ -29,12 +29,12 @@ Simply run the `.exe` file—no installation is required.
 ### Nix test it without installing it!
 
 ```bash
-    nix run github:FullMetalEd/dicom-tag-editor
+    nix run github:FullMetalEd/fm-dicom
 ```
 
 ### Adding to Your NixOS System Configuration via FLAKES!!
 
-You can install `dicom-tag-editor` system-wide on NixOS so it is always available for all users. Here’s how:
+You can install `fm-dicom` system-wide on NixOS so it is always available for all users. Here’s how:
 
 1. **Add the repository as an input to your `flake.nix`:**
 
@@ -45,7 +45,7 @@ You can install `dicom-tag-editor` system-wide on NixOS so it is always availabl
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
     nixpkgs-unstable.url = "github:nixos/nixpkgs/nixpkgs-unstable";
     zen-browser.url = "github:0xc000022070/zen-browser-flake";
-    dicom-tag-edtior.url = "github:fullmetaled/dicom-tag-editor";
+    fm-dicom.url = "github:fullmetaled/fm-dicom";
 };
    ```
 
@@ -57,13 +57,12 @@ You can install `dicom-tag-editor` system-wide on NixOS so it is always availabl
    modules = [
             # List of the config files this profile needs.
             ./configuration.nix
-            nixos-hardware.nixosModules.framework-12th-gen-intel
             (
               {nixpkgs, ...}:
                 {
                   environment.systemPackages = [
                     zen-browser.packages."${systemSettings.system}".default
-                    dicom-tag-edtior.packages."${systemSettings.system}".default
+                    fm-dicom.packages."${systemSettings.system}".default
                   ];
                 }
             )
@@ -96,11 +95,11 @@ This will provide you with UV, Python, all required libraries, and any other too
 You can run the project with:
 
 ```bash
-uv run -m dicomtageditor.main 
+uv run -m fm-dicom.main 
 ```
 Optionally you can pass the path to a ```.dcm``` or ```.zip``` file:
 ```bash
-uv run -m dicomtageditor.main ~/Downloads/exported_study.zip
+uv run -m fm-dicom.main ~/Downloads/exported_study.zip
 ```
 
 ## Contributing
