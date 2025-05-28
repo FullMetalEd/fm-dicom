@@ -318,7 +318,7 @@ class DicomSendDialog(QDialog): # User's original DicomSendDialog
         )
 
 class MainWindow(QMainWindow):
-    def __init__(self, start_path=None, config_path_override=None): # Renamed arg
+    def __init__(self, start_path=None, config_path_override=None):
         super().__init__() # Call super constructor first
 
         # Load configuration FIRST
@@ -350,7 +350,12 @@ class MainWindow(QMainWindow):
             self.default_export_dir = os.path.join(get_default_user_dir(), "DICOM_Exports")
             logging.warning(f"default_export_dir was None after config load, fell back to: {self.default_export_dir}")
         if not self.default_import_dir:
-            self.default_import_dir = os.path.join(get_default_user_dir(), "Downloads")
+            # Default to user's Downloads folder if available
+            downloads_dir = os.path.join(get_default_user_dir(), "Downloads")
+            if os.path.isdir(downloads_dir):
+                self.default_import_dir = downloads_dir
+            else:
+                self.default_import_dir = get_default_user_dir()
             logging.warning(f"default_import_dir was None after config load, fell back to: {self.default_import_dir}")
 
         # --- User's Original UI Setup Starts Here ---
@@ -445,12 +450,17 @@ class MainWindow(QMainWindow):
 
         self.search_bar = QLineEdit()
         self.search_bar.setPlaceholderText("Search tags by ID or description...")
-        self.search_bar.textChanged.connect(self.filter_tag_table)
+        #self.search_bar.textChanged.connect(self.filter_tag_table)  # This expects filter_tag_table to exist
         right_layout.addWidget(self.search_bar)
 
         self.tag_table = QTableWidget()
         self.tag_table.setColumnCount(4)
         self.tag_table.setHorizontalHeaderLabels(["Tag ID", "Description", "Value", "New Value"])
+        # Set reasonable default column widths
+        self.tag_table.setColumnWidth(0, 110)   # Tag ID
+        self.tag_table.setColumnWidth(1, 220)   # Description
+        self.tag_table.setColumnWidth(2, 260)   # Value
+        self.tag_table.setColumnWidth(3, 160)   # New Value
         self.tag_table.horizontalHeader().setStretchLastSection(True)
         self.tag_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.tag_table.setAlternatingRowColors(True)
@@ -1055,9 +1065,6 @@ class MainWindow(QMainWindow):
             self._all_tag_rows.append({'elem_obj': elem, 'display_row': row_data}) 
         self.apply_tag_table_filter() # Call to apply filter/populate
 
-    def filter_tag_table(self, text): # User's original (text arg often passed by textChanged signal)
-        self.apply_tag_table_filter() # Relies on self.search_bar.text()
-
     def apply_tag_table_filter(self): # User's original logic, adapted to use _all_tag_rows structure
         filter_text = self.search_bar.text().lower()
         self.tag_table.setRowCount(0)
@@ -1080,8 +1087,12 @@ class MainWindow(QMainWindow):
                 if elem_obj.tag == (0x7fe0, 0x0010) or elem_obj.VR in ("OB", "OW", "UN", "SQ"): # SQ also not editable this way
                     new_value_item.setFlags(new_value_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.tag_table.setItem(row_idx, 3, new_value_item)
-        self.tag_table.resizeColumnsToContents()
-
+        # Set sensible default column widths after populating
+        self.tag_table.setColumnWidth(0, 110)   # Tag ID
+        self.tag_table.setColumnWidth(1, 220)   # Description
+        self.tag_table.setColumnWidth(2, 260)   # Value
+        self.tag_table.setColumnWidth(3, 160)   # New Value
+        # Do NOT call resizeColumnsToContents here, so user-resizing is preserved
 
     def save_tag_changes(self): # User's original
         if not self.current_ds or not self.current_filepath:
@@ -1893,7 +1904,7 @@ class MainWindow(QMainWindow):
                 failed_d_list.append(f"{os.path.basename(fp_d)}: {e_d_file}")
         progress_d.setValue(len(files_to_delete_list))
 
-        # Refresh tree from the updated self.loaded_files
+        # Refresh from the updated self.loaded_files
         remaining_files_after_delete = [f_info[0] for f_info in self.loaded_files if os.path.exists(f_info[0])]
         self._load_dicom_files_from_list(remaining_files_after_delete, "data after deletion")
         # Clear other UI elements that might refer to deleted items
