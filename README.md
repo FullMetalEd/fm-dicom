@@ -26,57 +26,13 @@ Simply run the `.exe` file—no installation is required.
 
 > **Note:** In the future, a `.msi` installer may also be provided for easier installation.
 
-### Using Nix (Recommended)
+### Nix test it without installing it!
 
-If you use [Nix](https://nixos.org/):
-
-```sh
-git clone https://github.com/yourusername/dicom-tag-editor.git
-cd dicom-tag-editor
-nix develop
+```bash
+    nix run github:FullMetalEd/dicom-tag-editor
 ```
 
-This will drop you into a shell with all dependencies available.
-
-### Manual Installation
-
-1. Clone the repository:
-    ```sh
-    git clone https://github.com/yourusername/dicom-tag-editor.git
-    cd dicom-tag-editor
-    ```
-2. Install Python (>=3.8) and pip if not already installed.
-3. Install dependencies:
-    ```sh
-    pip install -r requirements.txt
-    ```
-
-## Running the Application
-
-After installing dependencies, run:
-
-```sh
-python main.py
-```
-
-Or, if using the Nix development shell:
-
-```sh
-nix develop
-python main.py
-```
-
-## Nix Development Environment
-
-This project includes a `flake.nix` for reproducible development. To enter the development environment:
-
-```sh
-nix develop
-```
-
-This will provide you with Python, all required libraries, and any other tools needed for development.
-
-## Adding to Your NixOS System Configuration via FLAKES!!
+### Adding to Your NixOS System Configuration via FLAKES!!
 
 You can install `dicom-tag-editor` system-wide on NixOS so it is always available for all users. Here’s how:
 
@@ -127,6 +83,25 @@ You can install `dicom-tag-editor` system-wide on NixOS so it is always availabl
 
 After rebuilding, you can launch `dicom-tag-editor` from your terminal or application menu.
 
+## Nix Development Environment
+
+This project includes a `flake.nix` for reproducible development. To enter the development environment, clone the repo to your system and in the top directory run this:
+
+```sh
+nix develop
+```
+
+This will provide you with UV, Python, all required libraries, and any other tools needed for development.
+
+You can run the project with:
+
+```bash
+uv run -m dicomtageditor.main 
+```
+Optionally you can pass the path to a ```.dcm``` or ```.zip``` file:
+```bash
+uv run -m dicomtageditor.main ~/Downloads/exported_study.zip
+```
 
 ## Contributing
 

@@ -19,6 +19,7 @@ from pydicom.dataelem import DataElement
 from pydicom.uid import generate_uid
 import datetime
 import logging
+import platform
 
 # Add import for pynetdicom
 try:
@@ -68,12 +69,35 @@ def set_dark_palette(app):
     app.setPalette(palette)
 
 def load_config(config_path=None):
-    # Try user config, then local config, then defaults
+    """
+    Load configuration from the appropriate location depending on OS.
+    - Linux: ~/.config/fm-dicom/config.yml
+    - Windows: current exe dir (portable), install dir, or %APPDATA%\fm-dicom\config.yml
+    - Fallback: defaults
+    """
+    import sys
+
     paths = []
     if config_path:
         paths.append(config_path)
-    paths.append(os.path.expanduser("~/.dicomtageditor/config.yml"))
-    paths.append(os.path.join(os.path.dirname(__file__), "config.yml"))
+
+    system = platform.system()
+    if system == "Windows":
+        # 1. Directory of the running executable (for portable .exe)
+        exe_dir = os.path.dirname(sys.executable)
+        paths.append(os.path.join(exe_dir, "config.yml"))
+        # 2. %APPDATA%\fm-dicom\config.yml
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            paths.append(os.path.join(appdata, "fm-dicom", "config.yml"))
+        # 3. Directory of the installed package (if running from source)
+        paths.append(os.path.join(os.path.dirname(__file__), "config.yml"))
+    else:
+        # Linux/Unix: ~/.config/fm-dicom/config.yml
+        paths.append(os.path.expanduser("~/.config/fm-dicom/config.yml"))
+        # Fallback: local config
+        paths.append(os.path.join(os.path.dirname(__file__), "config.yml"))
+
     for path in paths:
         if os.path.exists(path):
             with open(path, "r") as f:
@@ -169,8 +193,10 @@ class MainWindow(QMainWindow):
         
         # Set config attributes early
         self.dicom_send_config = self.config
-        self.default_export_dir = os.path.expanduser(self.config.get("default_export_dir", str(QDir.homePath())))
-        self.default_import_dir = os.path.expanduser(self.config.get("default_import_dir", str(QDir.homePath())))
+        # Set default directories to Downloads
+        downloads_dir = os.path.join(QDir.homePath(), "Downloads")
+        self.default_export_dir = os.path.expanduser(self.config.get("default_export_dir", downloads_dir))
+        self.default_import_dir = os.path.expanduser(self.config.get("default_import_dir", downloads_dir))
 
         super().__init__()
         self.setWindowTitle("DICOM Tag Editor")
@@ -500,7 +526,12 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Not Found", f"Path does not exist: {path}")
 
     def open_file(self):
-        dialog = QFileDialog(self, "Open DICOM or ZIP File", self.default_import_dir, "DICOM Files (*.dcm);;ZIP Archives (*.zip);;All Files (*)")
+        dialog = QFileDialog(
+            self,
+            "Open DICOM or ZIP File",
+            self.default_import_dir,
+            "ZIP Archives (*.zip);;DICOM Files (*.dcm);;All Files (*)"
+        )
         dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
         if dialog.exec():
             file_paths = dialog.selectedFiles()
@@ -542,7 +573,11 @@ class MainWindow(QMainWindow):
                     self.populate_tree([file_path])
 
     def open_directory(self):
-        dir_path = QFileDialog.getExistingDirectory(self, "Open DICOM Directory", QDir.homePath())
+        dir_path = QFileDialog.getExistingDirectory(
+            self,
+            "Open DICOM Directory",
+            self.default_import_dir
+        )
         if dir_path:
             self.clear_loaded_files()
             dcm_files = []
@@ -1022,7 +1057,11 @@ class MainWindow(QMainWindow):
             return
 
         if export_type == "Directory":
-            dialog = QFileDialog(self, "Select Export Directory", self.default_export_dir)
+            dialog = QFileDialog(
+                self,
+                "Select Export Directory",
+                self.default_export_dir
+            )
             dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
             dialog.setFileMode(QFileDialog.FileMode.Directory)
             dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
@@ -1040,7 +1079,12 @@ class MainWindow(QMainWindow):
                         QMessageBox.warning(self, "Export Error", f"Failed to export {fp}: {e}")
                 QMessageBox.information(self, "Export Complete", f"Exported {len(filepaths)} files to {out_dir}")
         else:  # ZIP
-            dialog = QFileDialog(self, "Save ZIP Archive", self.default_export_dir, "ZIP Archives (*.zip)")
+            dialog = QFileDialog(
+                self,
+                "Save ZIP Archive",
+                self.default_export_dir,
+                "ZIP Archives (*.zip)"
+            )
             dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
             dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
             if dialog.exec():

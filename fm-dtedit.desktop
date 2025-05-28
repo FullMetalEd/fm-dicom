@@ -1,9 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=FM_DTEditor
-Comment=Edit and anonymise DICOM medical images
-Exec=fm_dtedit %f
-Icon=application-x-executable  # Placeholder icon, replace with your own PNG/SVG later
-Terminal=false
-Categories=Graphics;MedicalSoftware;
-MimeType=application/dicom;application/zip;application/octet-stream;
