@@ -450,7 +450,7 @@ class MainWindow(QMainWindow):
 
         self.search_bar = QLineEdit()
         self.search_bar.setPlaceholderText("Search tags by ID or description...")
-        #self.search_bar.textChanged.connect(self.filter_tag_table)  # This expects filter_tag_table to exist
+        self.search_bar.textChanged.connect(self.filter_tag_table)  # Ensure this is connected
         right_layout.addWidget(self.search_bar)
 
         self.tag_table = QTableWidget()
@@ -807,40 +807,58 @@ class MainWindow(QMainWindow):
             menu.addAction(merge_action)
         menu.exec(self.tree.viewport().mapToGlobal(pos))
 
-    def filter_tree_items(self, text): # User's original (basic filter)
-        # Simple filter: hide items that don't match text in any column
+    def filter_tree_items(self, text):
+        """Filter the study list tree based on the provided text."""
+        text = text.lower()
         def match(item):
             for col in range(item.columnCount()):
-                if text.lower() in item.text(col).lower():
+                if text in item.text(col).lower():
                     return True
-            # Recursively check children - if a child matches, parent should be visible
             for i in range(item.childCount()):
                 if match(item.child(i)):
-                    item.setExpanded(True) # Expand parent if child matches
+                    item.setExpanded(True)
                     return True
             return False
 
         def filter_item_recursive(item):
-            # If the item itself matches OR any of its children match, it's visible
             is_visible = match(item)
             item.setHidden(not is_visible)
-            
-            # Even if parent is hidden, children might need to be processed if filter is removed later
-            # But for current filtering, if parent is hidden, children are effectively hidden.
-            # If parent is visible, ensure its children's visibility is also updated.
             if is_visible:
                 for i in range(item.childCount()):
                     filter_item_recursive(item.child(i))
-            # If not text (filter cleared), show all items by making them not hidden
             if not text:
                 item.setHidden(False)
                 for i in range(item.childCount()):
                     filter_item_recursive(item.child(i))
 
-
         for i in range(self.tree.topLevelItemCount()):
             filter_item_recursive(self.tree.topLevelItem(i))
 
+    def filter_tag_table(self, text):
+        """Filter the tag table based on the provided text."""
+        filter_text = text.lower()
+        self.tag_table.setRowCount(0)
+        for row_info in self._all_tag_rows:
+            elem_obj = row_info['elem_obj']
+            display_row_data = row_info['display_row']
+            tag_id, desc, value, _ = display_row_data
+
+            if filter_text in tag_id.lower() or filter_text in desc.lower():
+                row_idx = self.tag_table.rowCount()
+                self.tag_table.insertRow(row_idx)
+                self.tag_table.setItem(row_idx, 0, QTableWidgetItem(tag_id))
+                self.tag_table.setItem(row_idx, 1, QTableWidgetItem(desc))
+                self.tag_table.setItem(row_idx, 2, QTableWidgetItem(value))
+                new_value_item = QTableWidgetItem("")
+                new_value_item.setData(Qt.ItemDataRole.UserRole, elem_obj)
+                if elem_obj.tag == (0x7fe0, 0x0010) or elem_obj.VR in ("OB", "OW", "UN", "SQ"):
+                    new_value_item.setFlags(new_value_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.tag_table.setItem(row_idx, 3, new_value_item)
+        # Set sensible default column widths after populating
+        self.tag_table.setColumnWidth(0, 110)
+        self.tag_table.setColumnWidth(1, 220)
+        self.tag_table.setColumnWidth(2, 260)
+        self.tag_table.setColumnWidth(3, 160)
 
     def populate_tree(self, files): # User's original populate_tree
         self.tree.clear()
