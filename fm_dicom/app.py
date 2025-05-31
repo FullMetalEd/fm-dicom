@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QTableWidget, QTableWidgetItem, QMessageBox, QLineEdit, QInputDialog, QComboBox, QLabel, QCheckBox, QSizePolicy, QSplitter,
     QDialog, QFormLayout, QDialogButtonBox, QProgressDialog,
     QApplication, QToolBar, QGroupBox, QFrame, QStatusBar, QStyle, QMenu,
-    QGridLayout
+    QGridLayout, QRadioButton, QButtonGroup
 )
 from PyQt6.QtGui import QPixmap, QImage, QIcon, QPalette, QColor, QFont, QAction
 from PyQt6.QtCore import QDir, Qt, QPoint, QSize
@@ -21,17 +21,15 @@ import datetime
 import logging
 import platform # Ensure this is here
 
-# Add import for pynetdicom
-try:
-    from pynetdicom import AE, AllStoragePresentationContexts
-    from pynetdicom.sop_class import Verification
-    VERIFICATION_SOP_CLASS = Verification
-    STORAGE_CONTEXTS = AllStoragePresentationContexts
-except Exception as e:
-    print(f"PYNETDICOM IMPORT ERROR: {e}", file=sys.stderr)
-    AE = None
-    STORAGE_CONTEXTS = []
-    VERIFICATION_SOP_CLASS = None
+from fm_dicom.validation.validation import DicomValidator
+from fm_dicom.validation.validation_ui import run_validation, ValidationResultsDialog
+from fm_dicom.anonymization.anonymization import TemplateManager, AnonymizationEngine
+from fm_dicom.anonymization.anonymization_ui import run_anonymization, TemplateSelectionDialog
+
+from pynetdicom import AE, AllStoragePresentationContexts
+from pynetdicom.sop_class import Verification
+VERIFICATION_SOP_CLASS = Verification
+STORAGE_CONTEXTS = AllStoragePresentationContexts
 
 # Add depth method to QTreeWidgetItem
 def depth(self):
@@ -239,6 +237,40 @@ def setup_logging(log_path_from_config, log_level_str_from_config): # Renamed pa
         logging.error(f"Could not set up file logger at {log_path_from_config}: {e}. Logging to stderr only.")
 
 
+# --- Primary Selection Dialog (NEW) ---
+class PrimarySelectionDialog(QDialog):
+    def __init__(self, parent, items, item_type):
+        super().__init__(parent)
+        self.setWindowTitle(f"Select Primary {item_type}")
+        self.setModal(True)
+        
+        layout = QVBoxLayout(self)
+        
+        label = QLabel(f"Select which {item_type.lower()} to use as primary (whose metadata will be kept):")
+        layout.addWidget(label)
+        
+        self.button_group = QButtonGroup()
+        self.radio_buttons = []
+        
+        for i, item in enumerate(items):
+            radio = QRadioButton(item.text(0))  # Display the tree item text
+            if i == 0:  # Default to first
+                radio.setChecked(True)
+            self.button_group.addButton(radio, i)
+            self.radio_buttons.append(radio)
+            layout.addWidget(radio)
+        
+        # OK/Cancel buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        
+    def get_selected_index(self):
+        """Return the index of the selected primary item"""
+        return self.button_group.checkedId()
+
+
 # --- Main Application Classes (User's Original Structure) ---
 
 class DicomSendDialog(QDialog): # User's original DicomSendDialog
@@ -338,6 +370,22 @@ class MainWindow(QMainWindow):
         else:
             set_light_palette(QApplication.instance()) # Assuming you have a light palette function
 
+        # Initialize anonymization template manager with proper config directory
+        system = platform.system()
+        app_name = "fm-dicom"
+        if system == "Windows":
+            appdata = os.environ.get("APPDATA")
+            config_dir = os.path.join(appdata if appdata else os.path.dirname(sys.executable), app_name)
+        elif system == "Darwin":  # macOS
+            config_dir = os.path.expanduser(f"~/Library/Application Support/{app_name}")
+        else:  # Linux/Unix
+            xdg_config_home = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+            config_dir = os.path.join(xdg_config_home, app_name)
+        
+        # Ensure template config directory exists
+        os.makedirs(config_dir, exist_ok=True)
+        self.template_manager = TemplateManager(config_dir)
+        
         # Set config attributes for other parts of the app
         self.dicom_send_config = self.config # DicomSendDialog uses this
         
@@ -405,7 +453,22 @@ class MainWindow(QMainWindow):
         act_collapse = QAction(collapse_icon, "Collapse All", self)
         act_collapse.triggered.connect(self.tree_collapse_all)
         toolbar.addAction(act_collapse)
-        toolbar.addSeparator() # User had this
+        toolbar.addSeparator()
+
+        # Add after the existing toolbar actions
+        toolbar.addSeparator()
+
+        validate_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton)
+        act_validate = QAction(validate_icon, "Validate", self)
+        act_validate.triggered.connect(self.validate_dicom_files)
+        toolbar.addAction(act_validate)
+
+        toolbar.addSeparator()
+
+        template_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView)
+        act_templates = QAction(template_icon, "Manage Templates", self)
+        act_templates.triggered.connect(self.manage_templates)
+        toolbar.addAction(act_templates)
 
         # Main Splitter (User's Original)
         main_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -630,6 +693,49 @@ class MainWindow(QMainWindow):
         logging.info("Application closing.")
         super().closeEvent(event) # Important to call the superclass method
 
+    def _are_studies_under_same_patient(self, study_nodes):
+        """Ensure all studies belong to same patient"""
+        if not study_nodes:
+            return False
+        # Compare patient text instead of QTreeWidgetItem objects
+        parent_patient_texts = {study.parent().text(0) if study.parent() else None for study in study_nodes}
+        return len(parent_patient_texts) == 1 and None not in parent_patient_texts
+
+    def _are_series_under_same_study(self, series_nodes):
+        """Ensure all series belong to same study"""
+        if not series_nodes:
+            return False
+        # Compare study text instead of QTreeWidgetItem objects
+        parent_study_texts = {series.parent().text(1) if series.parent() else None for series in series_nodes}
+        return len(parent_study_texts) == 1 and None not in parent_study_texts
+
+    def _load_dicom_files_from_list(self, filepaths, source_description="files"):
+        """Helper method to load DICOM files from a list"""
+        if not filepaths:
+            self.summary_label.setText("No files to load.")
+            self.statusBar().showMessage("No files to load.")
+            return
+        
+        # Clear existing data but preserve temp_dir info from original loaded_files
+        temp_dir_map = {f_info[0]: f_info[1] for f_info in self.loaded_files}
+        
+        self.tree.clear()
+        self.file_metadata = {}
+        self.tag_table.setRowCount(0)
+        self._all_tag_rows = []
+        self.image_label.clear()
+        self.image_label.setVisible(False)
+        self.current_filepath = None
+        self.current_ds = None
+        
+        # Update loaded_files, preserving temp_dir info
+        self.loaded_files = [(f, temp_dir_map.get(f, None)) for f in filepaths if os.path.exists(f)]
+        
+        # Repopulate tree
+        self.populate_tree(filepaths)
+        
+        logging.info(f"Refreshed tree view with {len(filepaths)} files from {source_description}")
+
     # --- User's Original Methods (Ensure these are exactly as user provided) ---
     def tree_expand_all(self):
         self.tree.expandAll()
@@ -793,19 +899,80 @@ class MainWindow(QMainWindow):
             self.loaded_files = [(f, None) for f in dcm_files]
             self.populate_tree(dcm_files)
 
-    def show_tree_context_menu(self, pos: QPoint): # User's original
+    def show_tree_context_menu(self, pos: QPoint): # Updated with study and series merge options
         item = self.tree.itemAt(pos)
         if not item:
             return
+        
+        selected = self.tree.selectedItems()
+        
+        # Analyze selection for different merge types
+        patient_nodes = [item for item in selected if item.depth() == 0]
+        study_nodes = [item for item in selected if item.depth() == 1]
+        series_nodes = [item for item in selected if item.depth() == 2]
+        
+        studies_same_patient = self._are_studies_under_same_patient(study_nodes)
+        series_same_study = self._are_series_under_same_study(series_nodes)
+        
         menu = QMenu(self)
+        
+        # Delete action (always available)
         delete_action = QAction(QIcon.fromTheme("edit-delete"), "Delete", self)
         delete_action.triggered.connect(self.delete_selected_items)
         menu.addAction(delete_action)
-        if item.depth() == 0:
-            merge_action = QAction("Merge Patients", self)
-            merge_action.triggered.connect(self.merge_patients)
-            menu.addAction(merge_action)
+
+        validate_action = QAction("Validate Selected", self)
+        validate_action.triggered.connect(self.validate_selected_items)
+        menu.addAction(validate_action)
+        
+        menu.addSeparator()
+        
+        # Merge actions based on selection
+        if len(patient_nodes) >= 2:
+            merge_patients_action = QAction("Merge Patients", self)
+            merge_patients_action.triggered.connect(self.merge_patients)
+            menu.addAction(merge_patients_action)
+        
+        if len(study_nodes) >= 2 and studies_same_patient:
+            merge_studies_action = QAction("Merge Studies", self)
+            merge_studies_action.triggered.connect(self.merge_studies)
+            menu.addAction(merge_studies_action)
+        
+        if len(series_nodes) >= 2 and series_same_study:
+            merge_series_action = QAction("Merge Series", self)
+            merge_series_action.triggered.connect(self.merge_series)
+            menu.addAction(merge_series_action)
+        
         menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def validate_selected_items(self):
+        """Validate only the selected items in the tree"""
+        selected = self.tree.selectedItems()
+        if not selected:
+            QMessageBox.warning(self, "No Selection", "Please select items to validate.")
+            return
+        
+        # Collect file paths from selected items
+        file_paths = []
+        for item in selected:
+            paths = self._collect_instance_filepaths(item)
+            file_paths.extend(paths)
+        
+        if not file_paths:
+            QMessageBox.warning(self, "No Files", "No DICOM files found in selection.")
+            return
+        
+        # Remove duplicates
+        file_paths = list(set(file_paths))
+        
+        logging.info(f"Starting validation of {len(file_paths)} selected files")
+        
+        try:
+            run_validation(file_paths, self)
+        except Exception as e:
+            logging.error(f"Validation error: {e}", exc_info=True)
+            QMessageBox.critical(self, "Validation Error", 
+                            f"An error occurred during validation:\n{str(e)}")
 
     def filter_tree_items(self, text):
         """Filter the study list tree based on the provided text."""
@@ -1368,10 +1535,13 @@ class MainWindow(QMainWindow):
         else:
             old_value_display = str(ds_sample[tag].value)
 
-        new_value, val_ok = QInputDialog.getText(self, "Batch Edit Tag", 
-                                                 f"Tag: {tag_str} ({tag})\n"
-                                                 f"Current value (from first file): {old_value_display}\n"
-                                                 f"Enter new value to apply to all ({len(filepaths)} files):")
+        new_value, val_ok = QInputDialog.getText(
+            self,
+            "Batch Edit Tag",
+            f"Tag: {tag_str} ({tag})\n"
+            f"Current value (from first file): {old_value_display}\n"
+            f"Enter new value to apply to all ({len(filepaths)} files):"
+        )
         if not val_ok: # User can enter empty string
             return
 
@@ -1386,6 +1556,7 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
             try:
                 ds_to_edit = pydicom.dcmread(fp_batch)
+
                 current_vr = vr_for_new_tag # For new tags
                 if tag in ds_to_edit: # Existing tag, use its VR for conversion
                     current_vr = ds_to_edit[tag].VR
@@ -1675,102 +1846,41 @@ class MainWindow(QMainWindow):
                 logging.error(f"Error cleaning up temp directory {self.temp_dir}: {e}", exc_info=True)
             self.temp_dir = None # Reset after cleanup
 
-    def anonymise_selected(self): # User's original
+    def anonymise_selected(self):
+        """Advanced anonymization using templates"""
         selected = self.tree.selectedItems()
         if not selected:
-            QMessageBox.warning(self, "No Selection", "Please select a node in the tree to anonymise.")
+            QMessageBox.warning(self, "No Selection", "Please select a node in the tree to anonymize.")
             return
-        tree_item = selected[0] # Anchor on the first selected item
-        # Traverse up to the patient node to anonymize the whole patient
-        while tree_item.parent():
-            tree_item = tree_item.parent()
-        
-        filepaths = self._collect_instance_filepaths(tree_item)
-        if not filepaths:
-            QMessageBox.warning(self, "No Instances", f"No DICOM instances found under patient: {tree_item.text(0)}")
+            
+        # Collect file paths from selected items
+        file_paths = []
+        for item in selected:
+            paths = self._collect_instance_filepaths(item)
+            file_paths.extend(paths)
+            
+        if not file_paths:
+            QMessageBox.warning(self, "No Files", "No DICOM files found in selection.")
             return
-
-        reply = QMessageBox.question(
-            self, "Confirm Anonymization",
-            f"This will irreversibly anonymize {len(filepaths)} files in-place for patient '{tree_item.text(0)}'.\nContinue?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No
-        )
-        if reply != QMessageBox.StandardButton.Yes: return
-
-        tags_to_blank = [ # User's list
-            (0x0010, 0x0010), (0x0010, 0x0020), (0x0010, 0x0030), (0x0010, 0x0032), (0x0010, 0x0040),
-            (0x0010, 0x1000), (0x0010, 0x1001), (0x0010, 0x2160), (0x0010, 0x4000), (0x0008, 0x0090),
-            (0x0008, 0x0050), (0x0008, 0x0080), (0x0008, 0x0081), (0x0008, 0x1040), (0x0008, 0x1070),
-            (0x0008, 0x1030), (0x0008, 0x103E), (0x0020, 0x0010) # StudyID
-            # UIDs (0x0020,0x000D), (0x0020,0x000E), (0x0008,0x0018) are handled separately below
-        ]
-        now = datetime.datetime.now()
-        anon_prefix = f"ANON_{now.strftime('%Y%m%d_%H%M%S')}"
+            
+        # Remove duplicates
+        file_paths = list(set(file_paths))
         
-        # Consistent new UIDs for this patient's anonymization batch
-        new_main_study_uid_for_patient = generate_uid() # One study UID for all studies of this anon patient
-        series_uid_map_anon = {} # old_series_uid -> new_anon_series_uid (within this patient's batch)
-
-        updated = 0; failed = []
-        progress = QProgressDialog(f"Anonymizing files for patient '{tree_item.text(0)}'...", "Cancel", 0, len(filepaths), self)
-        progress.setWindowTitle("Anonymizing"); progress.setMinimumDuration(0); progress.setValue(0)
-
-        for idx_anon, fp_anon in enumerate(filepaths):
-            progress.setValue(idx_anon)
-            if progress.wasCanceled(): break
-            QApplication.processEvents()
-            try:
-                ds = pydicom.dcmread(fp_anon)
-                # Apply consistent anonymized PatientName and PatientID
-                ds.PatientName = f"{anon_prefix}_PATIENT"
-                ds.PatientID = f"{anon_prefix}_PID"
-                
-                for tag_tuple in tags_to_blank:
-                    if tag_tuple in ds:
-                        elem = ds[tag_tuple]
-                        # More specific blanking based on VR
-                        if elem.VR == "DA": elem.value = "19000101"
-                        elif elem.VR == "TM": elem.value = "000000"
-                        elif elem.VR == "CS" and tag_tuple == (0x0010,0x0040): elem.value = "O" # PatientSex
-                        elif elem.VR == "PN": elem.value = f"{anon_prefix}_NAME" # For PN
-                        else: elem.value = "" # Default blanking for other text types
-
-                # UIDs: StudyInstanceUID becomes consistent for this patient's anonymized studies
-                # SeriesInstanceUID becomes consistent per original series (but new)
-                # SOPInstanceUID becomes new unique per instance
-                ds.StudyInstanceUID = new_main_study_uid_for_patient 
-                
-                old_series_uid_anon = str(ds.SeriesInstanceUID)
-                if old_series_uid_anon not in series_uid_map_anon:
-                    series_uid_map_anon[old_series_uid_anon] = generate_uid()
-                ds.SeriesInstanceUID = series_uid_map_anon[old_series_uid_anon]
-                
-                ds.SOPInstanceUID = generate_uid() # New unique SOP Instance UID
-                if hasattr(ds, "file_meta") and hasattr(ds.file_meta, "MediaStorageSOPInstanceUID"):
-                    ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
-                
-                # Optionally remove private tags, curves, overlays from config later
-                # ds.remove_private_tags()
-
-                ds.save_as(fp_anon)
-                updated += 1
-            except Exception as e_anon_file:
-                failed.append(f"{os.path.basename(fp_anon)}: {e_anon_file}")
-                logging.error(f"Failed to anonymize {fp_anon}: {e_anon_file}", exc_info=True)
-        progress.setValue(len(filepaths))
-
-        msg = f"Anonymization complete.\nFiles updated: {updated}\nFailed: {len(failed)}"
-        if failed: msg += "\n\nDetails:\n" + "\n".join(failed[:5]) # Show first 5 errors
-        QMessageBox.information(self, "Anonymization", msg)
+        logging.info(f"Starting template-based anonymization of {len(file_paths)} files")
         
-        # Refresh tree (important as identifiers have changed)
-        # This simplified refresh re-scans all currently known files.
-        all_current_fps_after_anon = [f_info[0] for f_info in self.loaded_files if os.path.exists(f_info[0])]
-        self.clear_loaded_files()
-        if all_current_fps_after_anon:
-            # Determine a source description or just pass the list
-            self._load_dicom_files_from_list(all_current_fps_after_anon, "data after anonymization")
-
+        try:
+            result = run_anonymization(file_paths, self.template_manager, self)
+            
+            if result and result.anonymized_count > 0:
+                # Refresh tree to show anonymized data
+                all_known_files = [f_info[0] for f_info in self.loaded_files if os.path.exists(f_info[0])]
+                if all_known_files:
+                    self._load_dicom_files_from_list(all_known_files, "data after anonymization")
+                    
+        except Exception as e:
+            logging.error(f"Anonymization error: {e}", exc_info=True)
+            QMessageBox.critical(self, "Anonymization Error", 
+                            f"An error occurred during anonymization:\n{str(e)}")
 
     def merge_patients(self): # User's original
         self.tree.setSelectionMode(QTreeWidget.SelectionMode.MultiSelection) # Allow multi-select for this op
@@ -1805,8 +1915,8 @@ class MainWindow(QMainWindow):
             ds_primary = pydicom.dcmread(primary_fp_sample, stop_before_pixels=True)
             primary_id_val = str(ds_primary.PatientID)
             primary_name_val = str(ds_primary.PatientName)
-        except Exception as e_merge_primary:
-            QMessageBox.critical(self, "Merge Patients", f"Failed to read primary patient file: {e_merge_primary}")
+        except Exception as e:
+            QMessageBox.critical(self, "Merge Patients", f"Failed to read primary patient file: {e}")
             self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection) # Restore
             return
 
@@ -1855,15 +1965,257 @@ class MainWindow(QMainWindow):
         msg_m = f"Merged patient data.\nFiles updated: {updated_m}\nFailed: {len(failed_m)}"
         if failed_m: msg_m += "\n\nDetails (first few):\n" + "\n".join(failed_m[:3])
         QMessageBox.information(self, "Merge Patients Complete", msg_m)
-        
-        # Refresh the tree from all known files to reflect the merge
-        all_known_files_after_merge = list(set(f_info[0] for f_info in self.loaded_files if os.path.exists(f_info[0])))
-        self.clear_loaded_files() # Clear UI and internal state
+
+        # Refresh the tree (corrected - don't call clear_loaded_files)
+        all_known_files_after_merge = [f_info[0] for f_info in self.loaded_files if os.path.exists(f_info[0])]
         if all_known_files_after_merge:
             self._load_dicom_files_from_list(all_known_files_after_merge, "data after merge")
 
-        self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection) # Restore selection mode
+        self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
 
+    # --- NEW: Study Merging ---
+    def merge_studies(self):
+        """Merge multiple studies under the same patient into a single study"""
+        logging.info("Study merge initiated")
+        
+        # Enable multi-selection temporarily
+        self.tree.setSelectionMode(QTreeWidget.SelectionMode.MultiSelection)
+        selected = self.tree.selectedItems()
+        study_nodes = [item for item in selected if item.depth() == 1]
+        
+        # Validate selection
+        if len(study_nodes) < 2:
+            QMessageBox.warning(self, "Merge Studies", "Select at least two study nodes to merge.\nHold Ctrl or Shift to select multiple studies.")
+            self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
+            return
+        
+        if not self._are_studies_under_same_patient(study_nodes):
+            QMessageBox.warning(self, "Merge Studies", "All selected studies must belong to the same patient.")
+            self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
+            return
+        
+        # Show primary selection dialog
+        primary_dialog = PrimarySelectionDialog(self, study_nodes, "Study")
+        if primary_dialog.exec() != QDialog.DialogCode.Accepted:
+            self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
+            return
+        
+        primary_index = primary_dialog.get_selected_index()
+        primary_study_node = study_nodes[primary_index]
+        
+        # Get primary study metadata
+        primary_study_files = self._collect_instance_filepaths(primary_study_node)
+        if not primary_study_files:
+            QMessageBox.warning(self, "Merge Studies", "Could not find any files in the primary study.")
+            self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
+            return
+        
+        try:
+            ds_primary = pydicom.dcmread(primary_study_files[0], stop_before_pixels=True)
+            primary_study_uid = str(ds_primary.StudyInstanceUID)
+            primary_study_desc = str(getattr(ds_primary, "StudyDescription", ""))
+            primary_study_id = str(getattr(ds_primary, "StudyID", ""))
+        except Exception as e:
+            QMessageBox.critical(self, "Merge Studies", f"Failed to read primary study metadata: {e}")
+            self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
+            return
+
+        files_to_update = []
+        secondary_nodes_to_process = [node for node in study_nodes if node is not primary_study_node]
+        for node_sec in secondary_nodes_to_process:
+            files_to_update.extend(self._collect_instance_filepaths(node_sec))
+
+        if not files_to_update:
+            QMessageBox.information(self, "Merge Studies", "No files found in the secondary studies to merge.")
+            self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
+            return
+        
+        # Confirmation dialog
+        reply = QMessageBox.question(
+            self, "Confirm Merge",
+            f"This will update {len(files_to_update)} files from other study(s) to merge into:\n"
+            f"Study UID: {primary_study_uid}\n"
+            f"Study Description: {primary_study_desc}\n"
+            f"Study ID: {primary_study_id}\n"
+            "This modifies files in-place. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
+            return
+
+        updated_m = 0; failed_m = []
+        progress_m = QProgressDialog("Merging studies...", "Cancel", 0, len(files_to_update), self)
+        progress_m.setWindowTitle("Merging Studies"); progress_m.setMinimumDuration(0); progress_m.setValue(0)
+        for idx_m, fp_m in enumerate(files_to_update):
+            progress_m.setValue(idx_m)
+            if progress_m.wasCanceled(): break
+            QApplication.processEvents()
+            try:
+                ds_m = pydicom.dcmread(fp_m)
+                ds_m.StudyInstanceUID = primary_study_uid
+                ds_m.StudyDescription = primary_study_desc
+                ds_m.StudyID = primary_study_id
+                ds_m.save_as(fp_m)
+                updated_m += 1
+            except Exception as e_m_file:
+                failed_m.append(f"{os.path.basename(fp_m)}: {e_m_file}")
+        progress_m.setValue(len(files_to_update))
+        
+        # Update self.loaded_files: StudyID/Description changed, but filepath is the same.
+        # The tree refresh will pick up new study grouping.
+
+        msg_m = f"Merged study data.\nFiles updated: {updated_m}\nFailed: {len(failed_m)}"
+        if failed_m: msg_m += "\n\nDetails (first few):\n" + "\n".join(failed_m[:3])
+        QMessageBox.information(self, "Merge Studies Complete", msg_m)
+
+        # Refresh the tree (corrected - don't call clear_loaded_files)
+        all_known_files_after_merge = [f_info[0] for f_info in self.loaded_files if os.path.exists(f_info[0])]
+        if all_known_files_after_merge:
+            self._load_dicom_files_from_list(all_known_files_after_merge, "data after merge")
+
+        self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
+        logging.info(f"Study merge completed. Updated {updated_m} files.")
+
+    # --- NEW: Series Merging ---
+    def merge_series(self):
+        """Merge multiple series under the same study into a single series"""
+        logging.info("Series merge initiated")
+        
+        # Enable multi-selection temporarily
+        self.tree.setSelectionMode(QTreeWidget.SelectionMode.MultiSelection)
+        selected = self.tree.selectedItems()
+        series_nodes = [item for item in selected if item.depth() == 2]
+        
+        # Validate selection
+        if len(series_nodes) < 2:
+            QMessageBox.warning(self, "Merge Series", "Select at least two series nodes to merge.\nHold Ctrl or Shift to select multiple series.")
+            self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
+            return
+        
+        if not self._are_series_under_same_study(series_nodes):
+            QMessageBox.warning(self, "Merge Series", "All selected series must belong to the same study.")
+            self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
+            return
+        
+        # Show primary selection dialog
+        primary_dialog = PrimarySelectionDialog(self, series_nodes, "Series")
+        if primary_dialog.exec() != QDialog.DialogCode.Accepted:
+            self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
+            return
+        
+        primary_index = primary_dialog.get_selected_index()
+        primary_series_node = series_nodes[primary_index]
+        
+        # Get primary series metadata
+        primary_series_files = self._collect_instance_filepaths(primary_series_node)
+        if not primary_series_files:
+            QMessageBox.warning(self, "Merge Series", "Could not find any files in the primary series.")
+            self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
+            return
+        
+        try:
+            ds_primary = pydicom.dcmread(primary_series_files[0], stop_before_pixels=True)
+            primary_series_uid = str(ds_primary.SeriesInstanceUID)
+            primary_series_desc = str(getattr(ds_primary, "SeriesDescription", ""))
+            primary_series_number = str(getattr(ds_primary, "SeriesNumber", ""))
+            primary_modality = str(getattr(ds_primary, "Modality", ""))
+        except Exception as e:
+            QMessageBox.critical(self, "Merge Series", f"Failed to read primary series metadata: {e}")
+            self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
+            return
+        
+        # Collect files from secondary series and check for modality conflicts
+        files_to_update = []
+        secondary_series = [node for node in series_nodes if node is not primary_series_node]
+        modality_conflicts = []
+        
+        for series_node in secondary_series:
+            series_files = self._collect_instance_filepaths(series_node)
+            if series_files:
+                try:
+                    ds_check = pydicom.dcmread(series_files[0], stop_before_pixels=True)
+                    secondary_modality = str(getattr(ds_check, "Modality", ""))
+                    if secondary_modality and primary_modality and secondary_modality != primary_modality:
+                        modality_conflicts.append(f"{secondary_modality} → {primary_modality}")
+                except:
+                    pass  # Continue even if we can't check modality
+                
+                files_to_update.extend(series_files)
+        
+        if not files_to_update:
+            QMessageBox.information(self, "Merge Series", "No files found in the secondary series to merge.")
+            self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
+            return
+        
+        # Warn about modality conflicts
+        warning_msg = ""
+        if modality_conflicts:
+            warning_msg = f"\nWarning: Modality conflicts detected: {', '.join(set(modality_conflicts))}\n"
+        
+        # Confirmation dialog
+        reply = QMessageBox.question(
+            self, "Confirm Series Merge",
+            f"This will update {len(files_to_update)} files from {len(secondary_series)} series to merge into:\n"
+            f"Series UID: {primary_series_uid}\n"
+            f"Series Description: {primary_series_desc}\n"
+            f"Series Number: {primary_series_number}\n"
+            f"Modality: {primary_modality}\n"
+            f"{warning_msg}\n"
+            "This modifies files in-place. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
+            return
+        
+        # Perform the merge
+        updated_count = 0
+        failed_files = []
+        progress = QProgressDialog("Merging series...", "Cancel", 0, len(files_to_update), self)
+        progress.setWindowTitle("Merging Series")
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        
+        for idx, filepath in enumerate(files_to_update):
+            progress.setValue(idx)
+            if progress.wasCanceled():
+                break
+            QApplication.processEvents()
+            
+            try:
+                ds = pydicom.dcmread(filepath)
+                
+                # Update series-level tags
+                ds.SeriesInstanceUID = primary_series_uid
+                if primary_series_desc:
+                    ds.SeriesDescription = primary_series_desc
+                if primary_series_number:
+                    ds.SeriesNumber = primary_series_number
+                # Note: We keep the original Modality unless explicitly requested to change it
+                
+                ds.save_as(filepath)
+                updated_count += 1
+                
+            except Exception as e:
+                failed_files.append(f"{os.path.basename(filepath)}: {e}")
+                logging.error(f"Failed to merge series for file {filepath}: {e}", exc_info=True)
+        
+        progress.setValue(len(files_to_update))
+        
+        # Show results
+        msg = f"Series merge complete.\nFiles updated: {updated_count}\nFailed: {len(failed_files)}"
+        if failed_files:
+            msg += "\n\nDetails (first few):\n" + "\n".join(failed_files[:3])
+        QMessageBox.information(self, "Merge Series Complete", msg)
+
+        # Refresh the tree (corrected - don't call clear_loaded_files)
+        all_known_files_after_merge = [f_info[0] for f_info in self.loaded_files if os.path.exists(f_info[0])]
+        if all_known_files_after_merge:
+            self._load_dicom_files_from_list(all_known_files_after_merge, "data after series merge")
+
+        self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
+        logging.info(f"Series merge completed. Updated {updated_count} files.")
 
     def delete_selected_items(self): # User's original
         selected = self.tree.selectedItems()
@@ -1934,6 +2286,38 @@ class MainWindow(QMainWindow):
         if failed_d_list: msg_d += "\n\nFailed to delete:\n" + "\n".join(failed_d_list[:3])
         QMessageBox.information(self, "Delete Complete", msg_d)
 
+    def validate_dicom_files(self):
+        """Run DICOM validation on loaded files"""
+        if not self.loaded_files:
+            QMessageBox.warning(self, "No Files", "No DICOM files loaded for validation.")
+            return
+        
+        # Get list of file paths
+        file_paths = [f_info[0] for f_info in self.loaded_files if os.path.exists(f_info[0])]
+        
+        if not file_paths:
+            QMessageBox.warning(self, "No Files", "No valid file paths found.")
+            return
+        
+        logging.info(f"Starting validation of {len(file_paths)} files")
+        
+        # Run validation
+        try:
+            run_validation(file_paths, self)
+        except Exception as e:
+            logging.error(f"Validation error: {e}", exc_info=True)
+            QMessageBox.critical(self, "Validation Error", 
+                               f"An error occurred during validation:\n{str(e)}")
+    
+    def manage_templates(self):
+        """Open template management dialog"""
+        try:
+            template_dialog = TemplateSelectionDialog(self.template_manager, self)
+            template_dialog.exec()
+        except Exception as e:
+            logging.error(f"Template management error: {e}", exc_info=True)
+            QMessageBox.critical(self, "Template Management Error", 
+                            f"An error occurred:\n{str(e)}")
 
 # --- Main Execution ---
 if __name__ == "__main__":
