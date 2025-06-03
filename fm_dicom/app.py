@@ -25,6 +25,7 @@ from fm_dicom.validation.validation import DicomValidator
 from fm_dicom.validation.validation_ui import run_validation, ValidationResultsDialog
 from fm_dicom.anonymization.anonymization import TemplateManager, AnonymizationEngine
 from fm_dicom.anonymization.anonymization_ui import run_anonymization, TemplateSelectionDialog
+from fm_dicom.tag_browser.tag_browser import TagSearchDialog, ValueEntryDialog
 
 from pynetdicom import AE, AllStoragePresentationContexts
 from pynetdicom.sop_class import Verification
@@ -1388,13 +1389,14 @@ class MainWindow(QMainWindow):
             self.tag_table.setRowCount(0) 
 
 
-    def edit_tag(self): # User's original
+    def edit_tag(self): # Enhanced with tag search
+        """Edit a tag using searchable interface"""
         selected = self.tree.selectedItems()
         if not selected:
             QMessageBox.warning(self, "No Selection", "Please select an instance in the tree.")
             return
         item = selected[0]
-        filepath = item.data(0, Qt.ItemDataRole.UserRole) # Corrected: UserRole
+        filepath = item.data(0, Qt.ItemDataRole.UserRole)
         if not filepath:
             QMessageBox.warning(self, "No Instance", "Please select an instance node.")
             return
@@ -1403,192 +1405,241 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Could not read file: {e}")
             return
-
-        tag_str, ok = QInputDialog.getText(self, "Edit Tag", "Enter tag name or (gggg,eeee):")
-        if not ok or not tag_str.strip():
-            return
-
-        tag = None
-        if ',' in tag_str and tag_str.startswith("(") and tag_str.endswith(")"): # Basic check for (g,e) format
-            try:
-                group, elem = tag_str[1:-1].split(',') # Remove parentheses before splitting
-                tag = (int(group, 16), int(elem, 16))
-            except ValueError: # Handles non-hex or incorrect split
-                QMessageBox.warning(self, "Invalid Tag", "Tag format should be (gggg,eeee) in hex, e.g., (0010,0010).")
-                return
-        else: # Try to find by name (keyword)
-            try:
-                # pydicom.tag.Tag can take a keyword string
-                tag = pydicom.tag.Tag(tag_str.strip())
-            except ValueError: # If keyword is not recognized by pydicom
-                 QMessageBox.warning(self, "Not Found", f"Tag keyword '{tag_str}' not recognized by pydicom or not found by name in this file.")
-                 return
-
-        # Check if tag exists (Tag object will be created even if not in ds)
-        if tag not in ds:
-            # Ask if user wants to add it - requires VR
-            reply = QMessageBox.question(self, "Tag Not Found", f"Tag {tag_str} ({tag}) not found in this file. Add it as a new tag?",
-                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if reply == QMessageBox.StandardButton.Yes:
-                vr, vr_ok = QInputDialog.getText(self, "Enter VR", "Enter VR for new tag (e.g., LO, SH, UI):")
-                if not vr_ok or not vr.strip():
-                    return
-                new_value, val_ok = QInputDialog.getText(self, "Enter Value", f"Enter value for new tag {tag_str} (VR: {vr.upper()}):")
-                if not val_ok: # User can enter empty string if intended
-                    return
-                try:
-                    # Type conversion based on VR for new tag (simplified)
-                    if vr.upper() == "UI": converted_val = new_value
-                    elif vr.upper() in ["IS", "SL", "SS", "UL", "US"]: converted_val = int(new_value)
-                    elif vr.upper() in ["FL", "FD", "DS"]: converted_val = float(new_value)
-                    else: converted_val = new_value # Default to string
-
-                    ds.add_new(tag, vr.upper(), converted_val)
-                    ds.save_as(filepath)
-                    QMessageBox.information(self, "Success", f"Tag {tag_str} added with value '{new_value}'.")
-                    self.display_selected_tree_file() # Refresh
-                except Exception as e_add:
-                    QMessageBox.critical(self, "Error", f"Failed to add new tag: {e_add}")
-            return # End here if tag was not found and not added
         
-        # If tag exists, proceed to edit
-        old_value = str(ds[tag].value)
-        new_value, ok = QInputDialog.getText(self, "Edit Tag", f"Tag: {ds[tag].name} {tag}\nCurrent value: {old_value}\nEnter new value:")
-        if not ok: # User cancelled or entered nothing they wanted to commit implicitly
+        # Show tag search dialog
+        tag_dialog = TagSearchDialog(self, "Select Tag to Edit")
+        if tag_dialog.exec() != QDialog.DialogCode.Accepted:
             return
-
-        try:
-            # Attempt to convert to original type
-            original_element = ds[tag]
-            original_py_type = type(original_element.value)
             
-            if original_element.VR == "UI": ds[tag].value = new_value
-            elif original_element.VR in ["IS", "SL", "SS", "UL", "US"]: ds[tag].value = int(new_value)
-            elif original_element.VR in ["FL", "FD", "DS"]: ds[tag].value = float(new_value)
-            elif original_element.VR == "DA": ds[tag].value = new_value.replace("-","")
-            elif original_element.VR == "TM": ds[tag].value = new_value.replace(":","")
-            elif isinstance(original_element.value, list): ds[tag].value = [v.strip() for v in new_value.split('\\')]
-            elif isinstance(original_element.value, pydicom.personname.PersonName): ds[tag].value = new_value
-            else: ds[tag].value = original_py_type(new_value) # General cast
-
-            ds.save_as(filepath)
-            QMessageBox.information(self, "Success", f"Tag {tag} updated.")
-            self.display_selected_tree_file()
-        except Exception as e_update:
-            logging.warning(f"Failed to update tag {tag} with value '{new_value}'. Error: {e_update}. Saving as string.")
-            try: # Fallback: try saving as string if conversion failed but tag is editable
-                ds[tag].value = new_value
-                ds.save_as(filepath)
-                QMessageBox.information(self, "Success (as string)", f"Tag {tag} updated as string value due to conversion issue.")
-                self.display_selected_tree_file()
-            except Exception as e_fallback:
-                QMessageBox.critical(self, "Error", f"Failed to update tag even as string: {e_fallback}")
-
-
-    def batch_edit_tag(self): # User's original
-        selected = self.tree.selectedItems()
-        if not selected:
-            QMessageBox.warning(self, "No Selection", "Please select a node in the tree.")
+        tag_info = tag_dialog.get_selected_tag_info()
+        if not tag_info['tag']:
             return
-        item = selected[0] # Anchor node for collecting files
-        filepaths = self._collect_instance_filepaths(item)
-        if not filepaths:
-            QMessageBox.warning(self, "No Instances", "No DICOM instances found under this node.")
-            return
-
-        tag_str, ok = QInputDialog.getText(self, "Batch Edit Tag", "Enter tag name or (gggg,eeee):")
-        if not ok or not tag_str.strip():
-            return
-
+            
+        # Parse the selected tag
         tag = None
-        ds_sample = None # To infer VR if tag exists
-        try:
-            ds_sample = pydicom.dcmread(filepaths[0], stop_before_pixels=True)
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Could not read sample file {filepaths[0]}: {e}")
-            return
-
+        tag_str = tag_info['tag']
+        
         if ',' in tag_str and tag_str.startswith("(") and tag_str.endswith(")"):
             try:
                 group, elem = tag_str[1:-1].split(',')
                 tag = (int(group, 16), int(elem, 16))
             except ValueError:
-                QMessageBox.warning(self, "Invalid Tag", "Tag format should be (gggg,eeee) in hex.")
+                QMessageBox.warning(self, "Invalid Tag", "Invalid tag format.")
                 return
         else:
             try:
                 tag = pydicom.tag.Tag(tag_str.strip())
             except ValueError:
-                QMessageBox.warning(self, "Not Found", f"Tag keyword '{tag_str}' not recognized.")
+                QMessageBox.warning(self, "Invalid Tag", f"Tag '{tag_str}' not recognized.")
                 return
 
-        # Check if tag exists in sample, determine if adding new or editing existing
-        vr_for_new_tag = None
-        is_new_tag_scenario = (tag not in ds_sample)
+        # Check if tag exists and get current value
+        current_value = ""
+        tag_exists = tag in ds
         
-        if is_new_tag_scenario:
-            vr_input, vr_ok = QInputDialog.getText(self, "Enter VR", f"Tag {tag_str} is new. Enter VR (e.g., LO, SH, UI):")
-            if not vr_ok or not vr_input.strip():
-                return
-            vr_for_new_tag = vr_input.strip().upper()
-            old_value_display = "<New Tag>"
+        if tag_exists:
+            current_value = str(ds[tag].value)
         else:
-            old_value_display = str(ds_sample[tag].value)
+            # Ask if user wants to add new tag
+            reply = QMessageBox.question(
+                self, "Tag Not Found", 
+                f"Tag {tag_info['name']} ({tag}) not found in this file. Add it as a new tag?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+                
+        # Show value entry dialog
+        value_dialog = ValueEntryDialog(tag_info, current_value, self)
+        if value_dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+            
+        new_value = value_dialog.new_value
+        
+        try:
+            if tag_exists:
+                # Modify existing tag
+                original_element = ds[tag]
+                
+                # Type conversion based on VR
+                if tag_info['vr']:
+                    converted_value = self._convert_value_by_vr(new_value, tag_info['vr'])
+                else:
+                    # Fall back to original type conversion
+                    if original_element.VR == "UI": 
+                        converted_value = new_value
+                    elif original_element.VR in ["IS", "SL", "SS", "UL", "US"]: 
+                        converted_value = int(new_value)
+                    elif original_element.VR in ["FL", "FD", "DS"]: 
+                        converted_value = float(new_value)
+                    elif original_element.VR == "DA": 
+                        converted_value = new_value.replace("-","")
+                    elif original_element.VR == "TM": 
+                        converted_value = new_value.replace(":","")
+                    else: 
+                        converted_value = new_value
+                        
+                ds[tag].value = converted_value
+                
+            else:
+                # Add new tag
+                vr = tag_info['vr'] or 'LO'  # Default to LO if VR unknown
+                converted_value = self._convert_value_by_vr(new_value, vr)
+                ds.add_new(tag, vr, converted_value)
+                
+            ds.save_as(filepath)
+            QMessageBox.information(self, "Success", f"Tag {tag_info['name']} updated successfully.")
+            self.display_selected_tree_file()
+            
+        except Exception as e:
+            logging.error(f"Failed to update tag {tag}: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to update tag: {str(e)}")
 
-        new_value, val_ok = QInputDialog.getText(
-            self,
-            "Batch Edit Tag",
-            f"Tag: {tag_str} ({tag})\n"
-            f"Current value (from first file): {old_value_display}\n"
-            f"Enter new value to apply to all ({len(filepaths)} files):"
-        )
-        if not val_ok: # User can enter empty string
+
+
+    def batch_edit_tag(self): # Enhanced with tag search
+        """Batch edit tags using searchable interface"""
+        selected = self.tree.selectedItems()
+        if not selected:
+            QMessageBox.warning(self, "No Selection", "Please select a node in the tree.")
+            return
+        item = selected[0]
+        filepaths = self._collect_instance_filepaths(item)
+        if not filepaths:
+            QMessageBox.warning(self, "No Instances", "No DICOM instances found under this node.")
             return
 
-        updated_count = 0
-        failed_files_info = {} # Store {filepath: error_message}
-        progress_batch = QProgressDialog(f"Batch editing tag {tag_str}...", "Cancel", 0, len(filepaths), self)
-        progress_batch.setWindowTitle("Batch Tag Edit"); progress_batch.setMinimumDuration(0); progress_batch.setValue(0)
-
-        for idx, fp_batch in enumerate(filepaths):
-            progress_batch.setValue(idx)
-            if progress_batch.wasCanceled(): break
-            QApplication.processEvents()
+        
+        # Show tag search dialog
+        tag_dialog = TagSearchDialog(self, "Select Tag for Batch Edit")
+        if tag_dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+            
+        tag_info = tag_dialog.get_selected_tag_info()
+        if not tag_info['tag']:
+            return
+            
+        # Parse the selected tag
+        tag = None
+        tag_str = tag_info['tag']
+        
+        if ',' in tag_str and tag_str.startswith("(") and tag_str.endswith(")"):
             try:
-                ds_to_edit = pydicom.dcmread(fp_batch)
+                group, elem = tag_str[1:-1].split(',')
+                tag = (int(group, 16), int(elem, 16))
+            except ValueError:
+                QMessageBox.warning(self, "Invalid Tag", "Invalid tag format.")
+                return
+        else:
+            try:
+                tag = pydicom.tag.Tag(tag_str.strip())
+            except ValueError:
+                QMessageBox.warning(self, "Invalid Tag", f"Tag '{tag_str}' not recognized.")
+                return
 
-                current_vr = vr_for_new_tag # For new tags
-                if tag in ds_to_edit: # Existing tag, use its VR for conversion
-                    current_vr = ds_to_edit[tag].VR
-                elif not vr_for_new_tag: # Should not happen if logic above is correct
-                    failed_files_info[fp_batch] = "VR missing for new tag scenario (internal error)."
-                    continue
-                
-                # Type conversion (simplified, expand as needed)
-                if current_vr == "UI": converted_batch_val = new_value
-                elif current_vr in ["IS", "SL", "SS", "UL", "US"]: converted_batch_val = int(new_value)
-                elif current_vr in ["FL", "FD", "DS"]: converted_batch_val = float(new_value)
-                # Add DA, TM, PN, multi-value list handling
-                else: converted_batch_val = new_value # Default to string
+        # Check if tag exists in sample file
+        current_value = ""
+        try:
+            ds_sample = pydicom.dcmread(filepaths[0], stop_before_pixels=True)
+            if tag in ds_sample:
+                current_value = str(ds_sample[tag].value)
+            else:
+                current_value = "<New Tag>"
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not read sample file: {e}")
+            return
 
-                if tag in ds_to_edit:
-                    ds_to_edit[tag].value = converted_batch_val
-                else: # Add as new tag
-                    ds_to_edit.add_new(tag, current_vr, converted_batch_val)
+        # Show value entry dialog
+        value_dialog = ValueEntryDialog(tag_info, current_value, self)
+        value_dialog.setWindowTitle(f"Batch Edit: {tag_info['name']}")
+        
+        if value_dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+            
+        new_value = value_dialog.new_value
+        
+        # Confirm batch operation
+        reply = QMessageBox.question(
+            self, "Confirm Batch Edit",
+            f"This will update the tag '{tag_info['name']}' in {len(filepaths)} files.\n"
+            f"New value: '{new_value}'\n\n"
+            "This operation cannot be undone. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Perform batch edit
+        updated_count = 0
+        failed_files = []
+        progress = QProgressDialog(f"Batch editing {tag_info['name']}...", "Cancel", 0, len(filepaths), self)
+        progress.setWindowTitle("Batch Tag Edit")
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+
+        for idx, filepath in enumerate(filepaths):
+            progress.setValue(idx)
+            if progress.wasCanceled():
+                break
+            QApplication.processEvents()
+            
+            try:
+                ds = pydicom.dcmread(filepath)
                 
-                ds_to_edit.save_as(fp_batch)
+                # Determine VR
+                if tag in ds:
+                    vr = ds[tag].VR
+                else:
+                    vr = tag_info['vr'] or 'LO'
+                    
+                # Convert value
+                converted_value = self._convert_value_by_vr(new_value, vr)
+                
+                # Update or add tag
+                if tag in ds:
+                    ds[tag].value = converted_value
+                else:
+                    ds.add_new(tag, vr, converted_value)
+                    
+                ds.save_as(filepath)
                 updated_count += 1
-            except Exception as e_batch_file:
-                failed_files_info[fp_batch] = str(e_batch_file)
-        progress_batch.setValue(len(filepaths))
-
-        msg_batch = f"Batch edit for tag {tag_str} complete.\nUpdated {updated_count} file(s)."
-        if failed_files_info:
-            msg_batch += f"\nFailed to update {len(failed_files_info)} file(s)."
-            # Optionally list some errors or refer to logs
-        QMessageBox.information(self, "Batch Edit Complete", msg_batch)
-        if self.current_filepath in filepaths: # Refresh if current file was affected
+                
+            except Exception as e:
+                failed_files.append(f"{os.path.basename(filepath)}: {str(e)}")
+                logging.error(f"Failed to update {filepath}: {e}")
+                
+        progress.setValue(len(filepaths))
+        
+        # Show results
+        msg = f"Batch edit complete.\nUpdated {updated_count} of {len(filepaths)} files."
+        if failed_files:
+            msg += f"\nFailed: {len(failed_files)} files."
+            
+        QMessageBox.information(self, "Batch Edit Complete", msg)
+        
+        if self.current_filepath in filepaths:
             self.display_selected_tree_file()
+    
+    def _convert_value_by_vr(self, value_str, vr):
+        """Convert string value to appropriate type based on VR"""
+        if not value_str:
+            return value_str
+            
+        try:
+            if vr in ["IS", "SL", "SS", "UL", "US"]:
+                return int(value_str)
+            elif vr in ["FL", "FD", "DS"]:
+                return float(value_str)
+            elif vr == "DA":
+                return value_str.replace("-", "")  # Remove dashes from dates
+            elif vr == "TM":
+                return value_str.replace(":", "")  # Remove colons from times
+            else:
+                return value_str  # String types
+        except ValueError:
+            # If conversion fails, return as string
+            return value_str
 
 
     def save_as(self): # User's original, ensure it uses self.default_export_dir
