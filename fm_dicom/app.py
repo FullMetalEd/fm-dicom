@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QGridLayout, QRadioButton, QButtonGroup
 )
 from PyQt6.QtGui import QPixmap, QImage, QIcon, QPalette, QColor, QFont, QAction
-from PyQt6.QtCore import QDir, Qt, QPoint, QSize
+from PyQt6.QtCore import QDir, Qt, QPoint, QSize, QThread, pyqtSignal, QTimer
 import pydicom
 import zipfile
 import tempfile
@@ -31,6 +31,105 @@ from pynetdicom import AE, AllStoragePresentationContexts
 from pynetdicom.sop_class import Verification
 VERIFICATION_SOP_CLASS = Verification
 STORAGE_CONTEXTS = AllStoragePresentationContexts
+
+
+class ZipExtractionWorker(QThread):
+    """Worker thread for ZIP extraction with progress updates"""
+    progress_updated = pyqtSignal(int, int, str)  # current, total, filename
+    extraction_complete = pyqtSignal(str, list)  # temp_dir, extracted_files
+    extraction_failed = pyqtSignal(str)  # error_message
+    
+    def __init__(self, zip_path, temp_dir):
+        super().__init__()
+        self.zip_path = zip_path
+        self.temp_dir = temp_dir
+        
+    def run(self):
+        try:
+            with zipfile.ZipFile(self.zip_path, 'r') as zip_ref:
+                file_list = zip_ref.namelist()
+                total_files = len(file_list)
+                extracted_files = []
+                
+                for i, filename in enumerate(file_list):
+                    # Emit progress update
+                    self.progress_updated.emit(i + 1, total_files, filename)
+                    
+                    # Extract individual file
+                    zip_ref.extract(filename, self.temp_dir)
+                    extracted_path = os.path.join(self.temp_dir, filename)
+                    extracted_files.append(extracted_path)
+                    
+                    # Allow thread to be interrupted
+                    if self.isInterruptionRequested():
+                        break
+                        
+                self.extraction_complete.emit(self.temp_dir, extracted_files)
+                
+        except Exception as e:
+            error_msg = f"Failed to extract ZIP file: {str(e)}"
+            self.extraction_failed.emit(error_msg)
+
+class ZipExtractionDialog(QProgressDialog):
+    """Progress dialog for ZIP extraction"""
+    
+    def __init__(self, zip_path, parent=None):
+        super().__init__("Preparing to extract ZIP...", "Cancel", 0, 100, parent)
+        self.setWindowTitle("Extracting ZIP Archive")
+        self.setMinimumDuration(0)
+        self.setAutoClose(False)
+        self.setAutoReset(False)
+        
+        self.zip_path = zip_path
+        self.temp_dir = tempfile.mkdtemp()
+        self.extracted_files = []
+        self.success = False
+        
+        # Start extraction in worker thread
+        self.worker = ZipExtractionWorker(zip_path, self.temp_dir)
+        self.worker.progress_updated.connect(self.update_progress)
+        self.worker.extraction_complete.connect(self.extraction_finished)
+        self.worker.extraction_failed.connect(self.extraction_error)
+        self.worker.start()
+        
+        # Cancel handling
+        self.canceled.connect(self.cancel_extraction)
+        
+    def update_progress(self, current, total, filename):
+        if total > 0:
+            progress_value = int((current / total) * 100)
+            self.setValue(progress_value)
+        self.setLabelText(f"Extracting: {os.path.basename(filename)} ({current}/{total})")
+        QApplication.processEvents()
+        
+    def extraction_finished(self, temp_dir, extracted_files):
+        self.temp_dir = temp_dir
+        self.extracted_files = extracted_files
+        self.success = True
+        self.setValue(100)
+        self.setLabelText("Extraction complete")
+        self.accept()
+        
+    def extraction_error(self, error_message):
+        self.success = False
+        QMessageBox.critical(self, "Extraction Error", error_message)
+        self.reject()
+        
+    def cancel_extraction(self):
+        if self.worker.isRunning():
+            self.worker.requestInterruption()
+            self.worker.wait(3000)
+            if self.worker.isRunning():
+                self.worker.terminate()
+                self.worker.wait()
+        
+        # Clean up temp directory
+        if self.temp_dir and os.path.exists(self.temp_dir):
+            try:
+                shutil.rmtree(self.temp_dir)
+            except:
+                pass
+        self.reject()
 
 # Add depth method to QTreeWidgetItem
 def depth(self):
@@ -646,10 +745,25 @@ class MainWindow(QMainWindow):
         self.current_ds = None
         self._all_tag_rows = []
 
+        self.pending_start_path = start_path  # Store for later loading
         if start_path:
-            self.load_path_on_start(start_path)
+            # Defer loading until window is shown
+            QTimer.singleShot(100, self.load_pending_start_path)
 
         logging.info("MainWindow UI initialized")
+
+    def load_pending_start_path(self):
+        """Load the pending start path after the window is shown"""
+        if hasattr(self, 'pending_start_path') and self.pending_start_path:
+            path = self.pending_start_path
+            self.pending_start_path = None  # Clear it
+            
+            # Ensure window is visible
+            if not self.isVisible():
+                self.show()
+                QApplication.processEvents()
+                
+            self.load_path_on_start(path)
         
     def save_preview_toggle_state_and_refresh_display(self, qt_state):
         # Convert Qt.CheckState enum to boolean
@@ -752,25 +866,27 @@ class MainWindow(QMainWindow):
         if new_value_item and current_value_item and not new_value_item.text().strip():
             new_value_item.setText(current_value_item.text())
 
-    def load_path_on_start(self, path): # User's original
+    def load_path_on_start(self, path): # Updated with ZIP progress
         path = os.path.expanduser(path)
         if os.path.isfile(path):
             if path.lower().endswith('.zip'):
                 self.clear_loaded_files()
-                self.temp_dir = tempfile.mkdtemp()
-                try:
-                    with zipfile.ZipFile(path, 'r') as zip_ref:
-                        zip_ref.extractall(self.temp_dir)
+                
+                # Show ZIP extraction progress
+                extraction_dialog = ZipExtractionDialog(path, self)
+                
+                if extraction_dialog.exec() == QDialog.DialogCode.Accepted and extraction_dialog.success:
+                    self.temp_dir = extraction_dialog.temp_dir
+                    all_extracted_files = extraction_dialog.extracted_files
+                    
+                    # Now scan for DICOM files with progress
                     dcm_files = []
-                    all_files = []
-                    for root, dirs, files in os.walk(self.temp_dir):
-                        for name in files:
-                            all_files.append(os.path.join(root, name))
-                    progress = QProgressDialog("Scanning ZIP for DICOM files...", "Cancel", 0, len(all_files), self)
+                    progress = QProgressDialog("Scanning extracted files for DICOM...", "Cancel", 0, len(all_extracted_files), self)
                     progress.setWindowTitle("Loading ZIP")
                     progress.setMinimumDuration(0)
                     progress.setValue(0)
-                    for idx, f in enumerate(all_files):
+                    
+                    for idx, f in enumerate(all_extracted_files):
                         if progress.wasCanceled():
                             break
                         if f.lower().endswith('.dcm'):
@@ -778,14 +894,18 @@ class MainWindow(QMainWindow):
                         progress.setValue(idx + 1)
                         QApplication.processEvents()
                     progress.close()
+                    
                     if not dcm_files:
                         QMessageBox.warning(self, "No DICOM", "No DICOM (.dcm) files found in ZIP archive.")
+                        self.cleanup_temp_dir()
                         return
+                        
                     self.loaded_files = [(f, self.temp_dir) for f in dcm_files]
                     self.populate_tree(dcm_files)
-                except Exception as e:
-                    QMessageBox.critical(self, "Error", f"Error reading ZIP: {e}")
-                    self.cleanup_temp_dir()
+                else:
+                    # Extraction was cancelled or failed
+                    return
+                    
             elif path.lower().endswith('.dcm'):
                 self.clear_loaded_files()
                 self.loaded_files = [(path, None)]
@@ -819,7 +939,7 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.warning(self, "Not Found", f"Path does not exist: {path}")
 
-    def open_file(self): # User's original
+    def open_file(self): # Updated with ZIP progress
         dialog = QFileDialog(
             self,
             "Open DICOM or ZIP File",
@@ -833,20 +953,21 @@ class MainWindow(QMainWindow):
                 file_path = file_paths[0]
                 self.clear_loaded_files()
                 if file_path.lower().endswith('.zip'):
-                    self.temp_dir = tempfile.mkdtemp()
-                    try:
-                        with zipfile.ZipFile(file_path, 'r') as zip_ref:
-                            zip_ref.extractall(self.temp_dir)
+                    # Show ZIP extraction progress
+                    extraction_dialog = ZipExtractionDialog(file_path, self)
+                    
+                    if extraction_dialog.exec() == QDialog.DialogCode.Accepted and extraction_dialog.success:
+                        self.temp_dir = extraction_dialog.temp_dir
+                        all_extracted_files = extraction_dialog.extracted_files
+                        
+                        # Now scan for DICOM files with progress
                         dcm_files = []
-                        all_files = []
-                        for root, dirs, files in os.walk(self.temp_dir):
-                            for name in files:
-                                all_files.append(os.path.join(root, name))
-                        progress = QProgressDialog("Scanning ZIP for DICOM files...", "Cancel", 0, len(all_files), self)
+                        progress = QProgressDialog("Scanning extracted files for DICOM...", "Cancel", 0, len(all_extracted_files), self)
                         progress.setWindowTitle("Loading ZIP")
                         progress.setMinimumDuration(0)
                         progress.setValue(0)
-                        for idx, f in enumerate(all_files):
+                        
+                        for idx, f in enumerate(all_extracted_files):
                             if progress.wasCanceled():
                                 break
                             if f.lower().endswith('.dcm'):
@@ -854,16 +975,17 @@ class MainWindow(QMainWindow):
                             progress.setValue(idx + 1)
                             QApplication.processEvents()
                         progress.close()
+                        
                         if not dcm_files:
-                            # User had self.tag_view.setText here, but tag_view isn't defined in their MainWindow snippet.
-                            # Using QMessageBox instead for consistency.
                             QMessageBox.warning(self, "No DICOM", "No DICOM (.dcm) files found in ZIP archive.")
+                            self.cleanup_temp_dir()
                             return
+                            
                         self.loaded_files = [(f, self.temp_dir) for f in dcm_files]
                         self.populate_tree(dcm_files)
-                    except Exception as e:
-                        QMessageBox.critical(self, "ZIP Error", f"Error reading ZIP: {e}")
-                        self.cleanup_temp_dir()
+                    else:
+                        # Extraction was cancelled or failed
+                        return
                 else:
                     self.loaded_files = [(file_path, None)]
                     self.populate_tree([file_path])
