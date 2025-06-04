@@ -3,10 +3,11 @@ from PyQt6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QTableWidget, QTableWidgetItem, QMessageBox, QLineEdit, QInputDialog, QComboBox, QLabel, QCheckBox, QSizePolicy, QSplitter,
     QDialog, QFormLayout, QDialogButtonBox, QProgressDialog,
     QApplication, QToolBar, QGroupBox, QFrame, QStatusBar, QStyle, QMenu,
-    QGridLayout, QRadioButton, QButtonGroup
+    QGridLayout, QRadioButton, QButtonGroup, QProgressBar
 )
-from PyQt6.QtGui import QPixmap, QImage, QIcon, QPalette, QColor, QFont, QAction
+from PyQt6.QtGui import QPixmap, QImage, QIcon, QPalette, QColor, QFont, QAction, QPainter
 from PyQt6.QtCore import QDir, Qt, QPoint, QSize, QThread, pyqtSignal, QTimer
+
 import pydicom
 import zipfile
 import tempfile
@@ -14,13 +15,12 @@ import os
 import shutil
 import numpy as np
 import sys
-import yaml # Ensure this is here
+import yaml
 from pydicom.dataelem import DataElement
 from pydicom.uid import generate_uid
-import datetime
+import time
 import logging
-import platform # Ensure this is here
-
+import platform
 from fm_dicom.validation.validation import DicomValidator
 from fm_dicom.validation.validation_ui import run_validation, ValidationResultsDialog
 from fm_dicom.anonymization.anonymization import TemplateManager, AnonymizationEngine
@@ -31,6 +31,28 @@ from pynetdicom import AE, AllStoragePresentationContexts
 from pynetdicom.sop_class import Verification
 VERIFICATION_SOP_CLASS = Verification
 STORAGE_CONTEXTS = AllStoragePresentationContexts
+
+
+# Force pydicom to recognize GDCM is available
+try:
+    import python_gdcm
+    sys.modules['gdcm'] = python_gdcm
+    
+    # Force set the HAVE_GDCM flag
+    from pydicom.pixel_data_handlers import gdcm_handler
+    gdcm_handler.HAVE_GDCM = True
+    
+    if gdcm_handler.is_available():
+        handlers = pydicom.config.pixel_data_handlers
+        if gdcm_handler in handlers:
+            handlers.remove(gdcm_handler)
+            handlers.insert(0, gdcm_handler)
+        print("✅ GDCM forced available and prioritized")
+    else:
+        print("❌ GDCM still not available")
+        
+except Exception as e:
+    print(f"❌ Error forcing GDCM: {e}")
 
 
 class ZipExtractionWorker(QThread):
@@ -130,6 +152,191 @@ class ZipExtractionDialog(QProgressDialog):
             except:
                 pass
         self.reject()
+
+class DicomdirReader:
+    """Reader for DICOMDIR files"""
+    
+    def __init__(self):
+        self.dicomdir_path = None
+        self.base_directory = None
+        
+    def find_dicomdir(self, search_path):
+        """Recursively search for DICOMDIR files"""
+        dicomdir_files = []
+        
+        for root, dirs, files in os.walk(search_path):
+            for file in files:
+                if file.upper() == 'DICOMDIR':
+                    dicomdir_path = os.path.join(root, file)
+                    dicomdir_files.append(dicomdir_path)
+                    
+        return dicomdir_files
+        
+    def read_dicomdir(self, dicomdir_path):
+        """Read DICOMDIR and extract file references"""
+        try:
+            self.dicomdir_path = dicomdir_path
+            self.base_directory = os.path.dirname(dicomdir_path)
+            
+            # Read the DICOMDIR file
+            ds = pydicom.dcmread(dicomdir_path)
+            
+            # Extract file references from directory records
+            file_paths = []
+            
+            if hasattr(ds, 'DirectoryRecordSequence'):
+                for record in ds.DirectoryRecordSequence:
+                    file_path = self._extract_file_path(record)
+                    if file_path:
+                        file_paths.append(file_path)
+                        
+            return file_paths
+            
+        except Exception as e:
+            logging.error(f"Failed to read DICOMDIR {dicomdir_path}: {e}")
+            return []
+            
+    def _extract_file_path(self, record):
+        """Extract file path from a directory record"""
+        try:
+            # Check if this is an IMAGE record (actual DICOM file)
+            if hasattr(record, 'DirectoryRecordType') and record.DirectoryRecordType == 'IMAGE':
+                # Get the referenced file ID
+                if hasattr(record, 'ReferencedFileID'):
+                    file_id = record.ReferencedFileID
+                    
+                    # Convert file ID to actual path
+                    # DICOM file IDs are typically arrays of path components
+                    # Handle both regular lists/tuples AND pydicom MultiValue objects
+                    if hasattr(file_id, '__iter__') and not isinstance(file_id, str):
+                        # Join the path components (works for lists, tuples, and MultiValue)
+                        relative_path = os.path.join(*file_id)
+                        print(f"DEBUG: Joined path components {list(file_id)} -> {relative_path}")
+                    else:
+                        relative_path = str(file_id)
+                        print(f"DEBUG: Used string conversion: {relative_path}")
+                    
+                    # Convert to absolute path
+                    full_path = os.path.join(self.base_directory, relative_path)
+                    
+                    # Normalize path separators for current OS
+                    full_path = os.path.normpath(full_path)
+                    
+                    print(f"DEBUG: Final path: {full_path}")
+                    
+                    # Check if file exists
+                    if os.path.exists(full_path):
+                        return full_path
+                    else:
+                        logging.warning(f"DICOMDIR references missing file: {full_path}")
+                        
+        except Exception as e:
+            logging.warning(f"Failed to extract file path from directory record: {e}")
+            
+        return None
+
+class DicomdirScanWorker(QThread):
+    """Worker thread for scanning DICOMDIR files"""
+    progress_updated = pyqtSignal(int, int, str)  # current, total, current_file
+    scan_complete = pyqtSignal(list)  # list of DICOM file paths
+    scan_failed = pyqtSignal(str)  # error message
+    
+    def __init__(self, extracted_files):
+        super().__init__()
+        self.extracted_files = extracted_files
+        
+    def run(self):
+        try:
+            # First, find all DICOMDIR files
+            dicomdir_files = []
+            for file_path in self.extracted_files:
+                if os.path.basename(file_path).upper() == 'DICOMDIR':
+                    dicomdir_files.append(file_path)
+                    
+            if not dicomdir_files:
+                self.scan_failed.emit("No DICOMDIR files found in extracted archive")
+                return
+                
+            # Process each DICOMDIR
+            all_dicom_files = []
+            reader = DicomdirReader()
+            
+            for idx, dicomdir_path in enumerate(dicomdir_files):
+                self.progress_updated.emit(idx + 1, len(dicomdir_files), 
+                                         f"Reading {os.path.basename(dicomdir_path)}")
+                
+                file_paths = reader.read_dicomdir(dicomdir_path)
+                all_dicom_files.extend(file_paths)
+                
+                if self.isInterruptionRequested():
+                    break
+                    
+            # Remove duplicates and verify files exist
+            unique_files = []
+            seen_files = set()
+            
+            for file_path in all_dicom_files:
+                if file_path not in seen_files and os.path.exists(file_path):
+                    unique_files.append(file_path)
+                    seen_files.add(file_path)
+                    
+            self.scan_complete.emit(unique_files)
+            
+        except Exception as e:
+            self.scan_failed.emit(f"DICOMDIR scanning failed: {str(e)}")
+
+class DicomdirScanDialog(QProgressDialog):
+    """Progress dialog for DICOMDIR scanning"""
+    
+    def __init__(self, extracted_files, parent=None):
+        super().__init__("Searching for DICOMDIR files...", "Cancel", 0, 100, parent)
+        self.setWindowTitle("Reading DICOMDIR")
+        self.setMinimumDuration(0)
+        self.setAutoClose(False)
+        self.setAutoReset(False)
+        
+        self.extracted_files = extracted_files
+        self.dicom_files = []
+        self.success = False
+        
+        # Start scanning in worker thread
+        self.worker = DicomdirScanWorker(extracted_files)
+        self.worker.progress_updated.connect(self.update_progress)
+        self.worker.scan_complete.connect(self.scan_finished)
+        self.worker.scan_failed.connect(self.scan_error)
+        self.worker.start()
+        
+        # Cancel handling
+        self.canceled.connect(self.cancel_scan)
+        
+    def update_progress(self, current, total, current_file):
+        if total > 0:
+            progress_value = int((current / total) * 100)
+            self.setValue(progress_value)
+        self.setLabelText(f"Reading DICOMDIR: {current_file}")
+        QApplication.processEvents()
+        
+    def scan_finished(self, dicom_files):
+        self.dicom_files = dicom_files
+        self.success = True
+        self.setValue(100)
+        self.setLabelText(f"Found {len(dicom_files)} DICOM files")
+        self.accept()
+        
+    def scan_error(self, error_message):
+        self.success = False
+        self.error_message = error_message
+        self.reject()
+        
+    def cancel_scan(self):
+        if self.worker.isRunning():
+            self.worker.requestInterruption()
+            self.worker.wait(3000)
+            if self.worker.isRunning():
+                self.worker.terminate()
+                self.worker.wait()
+        self.reject()
+
 
 # Add depth method to QTreeWidgetItem
 def depth(self):
@@ -704,6 +911,17 @@ class MainWindow(QMainWindow):
         self.delete_btn.setMinimumWidth(80)
         self.delete_btn.setMinimumHeight(36)
 
+        # Add these in your toolbar setup
+        debug_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+        act_debug = QAction(debug_icon, "Analyze Files", self)
+        act_debug.triggered.connect(self.analyze_all_loaded_files)
+        toolbar.addAction(act_debug)
+
+        timing_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton)
+        act_timing = QAction(timing_icon, "Test Performance", self)
+        act_timing.triggered.connect(self.test_loading_performance)
+        toolbar.addAction(act_timing)
+
         btn_grid.addWidget(edit_group, 0, 0, 2, 1)
         btn_grid.addWidget(export_group, 0, 1)
         btn_grid.addWidget(tag_group, 0, 2)
@@ -800,6 +1018,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         # Save window size before saving the rest of the config
+        if hasattr(self, 'button_widget') and self.button_widget:
+            self._remove_button_widget()
+                
         if self.config: # Ensure config object exists
             self.config["window_size"] = [self.size().width(), self.size().height()]
             self.save_configuration() # Save all pending config changes
@@ -823,6 +1044,207 @@ class MainWindow(QMainWindow):
         # Compare study text instead of QTreeWidgetItem objects
         parent_study_texts = {series.parent().text(1) if series.parent() else None for series in series_nodes}
         return len(parent_study_texts) == 1 and None not in parent_study_texts
+    
+
+    def load_path(self, path):
+        """
+        Universal file/directory loading function.
+        Handles: individual files (.dcm), ZIP archives, directories
+        Returns: True if successful, False if failed/cancelled
+        """
+        if not path:
+            return False
+            
+        path = os.path.expanduser(path)
+        self.clear_loaded_files()
+        
+        if os.path.isfile(path):
+            if path.lower().endswith('.zip'):
+                return self._load_zip_consolidated(path)
+            elif path.lower().endswith('.dcm'):
+                return self._load_single_file(path)
+            else:
+                QMessageBox.warning(self, "Unsupported", "Only .dcm and .zip files are supported.")
+                return False
+        elif os.path.isdir(path):
+            return self._load_directory_consolidated(path)
+        else:
+            QMessageBox.warning(self, "Not Found", f"Path does not exist: {path}")
+            return False
+
+    def _load_zip_consolidated(self, zip_path):
+        """Consolidated ZIP loading with DICOMDIR support"""
+        print(f"DEBUG: Loading ZIP file: {zip_path}")
+        
+        # Extract ZIP file
+        extraction_dialog = ZipExtractionDialog(zip_path, self)
+        if not (extraction_dialog.exec() == QDialog.DialogCode.Accepted and extraction_dialog.success):
+            return False
+        
+        self.temp_dir = extraction_dialog.temp_dir
+        all_extracted_files = extraction_dialog.extracted_files
+        
+        print(f"DEBUG: Extracted {len(all_extracted_files)} files")
+        
+        # Try DICOMDIR first
+        dicom_files = self._try_dicomdir_loading(self.temp_dir, all_extracted_files)
+        if dicom_files:
+            print(f"DEBUG: DICOMDIR loading successful: {len(dicom_files)} files")
+            self.loaded_files = [(f, self.temp_dir) for f in dicom_files]
+            self.populate_tree(dicom_files)
+            self.statusBar().showMessage(f"Loaded {len(dicom_files)} DICOM files from DICOMDIR in ZIP")
+            return True
+        
+        # Fallback to file scanning
+        print("DEBUG: DICOMDIR not found/failed, scanning all files")
+        dicom_files = self._scan_files_for_dicom(all_extracted_files, "Scanning ZIP contents...")
+        
+        if not dicom_files:
+            QMessageBox.warning(self, "No DICOM", 
+                            f"No DICOM files found in ZIP archive.\nExtracted {len(all_extracted_files)} files.")
+            self.cleanup_temp_dir()
+            return False
+        
+        self.loaded_files = [(f, self.temp_dir) for f in dicom_files]
+        self.populate_tree(dicom_files)
+        self.statusBar().showMessage(f"Loaded {len(dicom_files)} DICOM files from ZIP")
+        return True
+
+    def _load_directory_consolidated(self, dir_path):
+        """Consolidated directory loading with DICOMDIR support"""
+        print(f"DEBUG: Loading directory: {dir_path}")
+        
+        # Get all files in directory
+        all_files = []
+        for root, dirs, files in os.walk(dir_path):
+            for name in files:
+                all_files.append(os.path.join(root, name))
+        
+        # Try DICOMDIR first
+        dicom_files = self._try_dicomdir_loading(dir_path, all_files)
+        if dicom_files:
+            print(f"DEBUG: DICOMDIR loading successful: {len(dicom_files)} files")
+            self.loaded_files = [(f, None) for f in dicom_files]
+            self.populate_tree(dicom_files)
+            self.statusBar().showMessage(f"Loaded {len(dicom_files)} DICOM files from DICOMDIR")
+            return True
+        
+        # Fallback to file scanning
+        print("DEBUG: DICOMDIR not found/failed, scanning all files")
+        dicom_files = self._scan_files_for_dicom(all_files, "Scanning directory...")
+        
+        if not dicom_files:
+            QMessageBox.warning(self, "No DICOM", "No DICOM files found in directory.")
+            return False
+        
+        self.loaded_files = [(f, None) for f in dicom_files]
+        self.populate_tree(dicom_files)
+        self.statusBar().showMessage(f"Loaded {len(dicom_files)} DICOM files from directory")
+        return True
+
+    def _load_single_file(self, file_path):
+        """Load a single DICOM file"""
+        self.loaded_files = [(file_path, None)]
+        self.populate_tree([file_path])
+        self.statusBar().showMessage(f"Loaded single DICOM file")
+        return True
+
+    def _try_dicomdir_loading(self, base_path, all_files):
+        """
+        Try to find and use DICOMDIR files for loading.
+        Returns list of DICOM files if successful, empty list if failed/not found.
+        """
+        # Find DICOMDIR files
+        dicomdir_files = []
+        for file_path in all_files:
+            if os.path.basename(file_path).upper() == 'DICOMDIR':
+                dicomdir_files.append(file_path)
+                print(f"DEBUG: Found DICOMDIR: {file_path}")
+        
+        if not dicomdir_files:
+            return []
+        
+        # Use the first DICOMDIR found
+        dicomdir_path = dicomdir_files[0]
+        dicomdir_dir = os.path.dirname(dicomdir_path)
+        
+        print(f"DEBUG: Using DICOMDIR in directory: {dicomdir_dir}")
+        
+        try:
+            # Try using DicomdirReader
+            reader = DicomdirReader()
+            found_dicomdirs = reader.find_dicomdir(dicomdir_dir)
+            
+            print(f"DEBUG: DicomdirReader.find_dicomdir returned: {found_dicomdirs}")
+            
+            if found_dicomdirs:
+                # DicomdirScanDialog expects the list of all files, not the directory!
+                dicomdir_dialog = DicomdirScanDialog(all_files, self)  # <-- Fixed: pass all_files
+                
+                if dicomdir_dialog.exec() == QDialog.DialogCode.Accepted and dicomdir_dialog.success:
+                    print(f"DEBUG: DicomdirScanDialog loaded {len(dicomdir_dialog.dicom_files)} files")
+                    return dicomdir_dialog.dicom_files
+                else:
+                    error_msg = getattr(dicomdir_dialog, 'error_message', 'Unknown error')
+                    print(f"DEBUG: DicomdirScanDialog failed: {error_msg}")
+                    QMessageBox.warning(self, "DICOMDIR Error", 
+                                    f"Failed to read DICOMDIR: {error_msg}\n\nFalling back to file scanning...")
+            else:
+                print("DEBUG: DicomdirReader found no DICOMDIR files")
+                
+        except Exception as e:
+            print(f"DEBUG: Exception in DICOMDIR processing: {e}")
+            QMessageBox.warning(self, "DICOMDIR Error", 
+                            f"Error processing DICOMDIR: {str(e)}\n\nFalling back to file scanning...")
+        
+        return []
+
+    def _scan_files_for_dicom(self, files, progress_text="Scanning files..."):
+        """
+        Scan a list of files and return those that are DICOM files.
+        Shows progress dialog during scanning.
+        """
+        progress = QProgressDialog(progress_text, "Cancel", 0, len(files), self)
+        progress.setWindowTitle("Loading Files")
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        
+        dicom_files = []
+        for idx, file_path in enumerate(files):
+            if progress.wasCanceled():
+                break
+            
+            if self._is_dicom_file(file_path):
+                dicom_files.append(file_path)
+                
+            progress.setValue(idx + 1)
+            QApplication.processEvents()
+        
+        progress.close()
+        print(f"DEBUG: Found {len(dicom_files)} DICOM files out of {len(files)} total files")
+        return dicom_files
+
+    def _is_dicom_file(self, filepath):
+        """Helper method to check if a file is a DICOM file by reading its header"""
+        try:
+            # Quick check for .dcm extension first
+            if filepath.lower().endswith('.dcm'):
+                return True
+                
+            with open(filepath, 'rb') as f:
+                # Check for DICOM file signature
+                f.seek(128)  # Skip preamble
+                signature = f.read(4)
+                if signature == b'DICM':
+                    return True
+                
+                # Some DICOM files don't have preamble, check for common DICOM tags at start
+                f.seek(0)
+                data = f.read(256)
+                # Look for common DICOM patterns
+                return b'\x08\x00' in data[:32] or b'\x10\x00' in data[:32]
+        except:
+            return False
 
     def _load_dicom_files_from_list(self, filepaths, source_description="files"):
         """Helper method to load DICOM files from a list"""
@@ -866,80 +1288,8 @@ class MainWindow(QMainWindow):
         if new_value_item and current_value_item and not new_value_item.text().strip():
             new_value_item.setText(current_value_item.text())
 
-    def load_path_on_start(self, path): # Updated with ZIP progress
-        path = os.path.expanduser(path)
-        if os.path.isfile(path):
-            if path.lower().endswith('.zip'):
-                self.clear_loaded_files()
-                
-                # Show ZIP extraction progress
-                extraction_dialog = ZipExtractionDialog(path, self)
-                
-                if extraction_dialog.exec() == QDialog.DialogCode.Accepted and extraction_dialog.success:
-                    self.temp_dir = extraction_dialog.temp_dir
-                    all_extracted_files = extraction_dialog.extracted_files
-                    
-                    # Now scan for DICOM files with progress
-                    dcm_files = []
-                    progress = QProgressDialog("Scanning extracted files for DICOM...", "Cancel", 0, len(all_extracted_files), self)
-                    progress.setWindowTitle("Loading ZIP")
-                    progress.setMinimumDuration(0)
-                    progress.setValue(0)
-                    
-                    for idx, f in enumerate(all_extracted_files):
-                        if progress.wasCanceled():
-                            break
-                        if f.lower().endswith('.dcm'):
-                            dcm_files.append(f)
-                        progress.setValue(idx + 1)
-                        QApplication.processEvents()
-                    progress.close()
-                    
-                    if not dcm_files:
-                        QMessageBox.warning(self, "No DICOM", "No DICOM (.dcm) files found in ZIP archive.")
-                        self.cleanup_temp_dir()
-                        return
-                        
-                    self.loaded_files = [(f, self.temp_dir) for f in dcm_files]
-                    self.populate_tree(dcm_files)
-                else:
-                    # Extraction was cancelled or failed
-                    return
-                    
-            elif path.lower().endswith('.dcm'):
-                self.clear_loaded_files()
-                self.loaded_files = [(path, None)]
-                self.populate_tree([path])
-            else:
-                QMessageBox.warning(self, "Unsupported", "Only .dcm and .zip files are supported.")
-        elif os.path.isdir(path):
-            self.clear_loaded_files()
-            dcm_files = []
-            all_files = []
-            for root, dirs, files in os.walk(path):
-                for name in files:
-                    all_files.append(os.path.join(root, name))
-            progress = QProgressDialog("Scanning directory for DICOM files...", "Cancel", 0, len(all_files), self)
-            progress.setWindowTitle("Loading Directory")
-            progress.setMinimumDuration(0)
-            progress.setValue(0)
-            for idx, f in enumerate(all_files):
-                if progress.wasCanceled():
-                    break
-                if f.lower().endswith('.dcm'):
-                    dcm_files.append(f)
-                progress.setValue(idx + 1)
-                QApplication.processEvents()
-            progress.close()
-            if not dcm_files:
-                QMessageBox.warning(self, "No DICOM", "No DICOM (.dcm) files found in directory.")
-                return
-            self.loaded_files = [(f, None) for f in dcm_files]
-            self.populate_tree(dcm_files)
-        else:
-            QMessageBox.warning(self, "Not Found", f"Path does not exist: {path}")
-
-    def open_file(self): # Updated with ZIP progress
+    def open_file(self):
+        """GUI file picker"""
         dialog = QFileDialog(
             self,
             "Open DICOM or ZIP File",
@@ -950,77 +1300,34 @@ class MainWindow(QMainWindow):
         if dialog.exec():
             file_paths = dialog.selectedFiles()
             if file_paths:
-                file_path = file_paths[0]
-                self.clear_loaded_files()
-                if file_path.lower().endswith('.zip'):
-                    # Show ZIP extraction progress
-                    extraction_dialog = ZipExtractionDialog(file_path, self)
-                    
-                    if extraction_dialog.exec() == QDialog.DialogCode.Accepted and extraction_dialog.success:
-                        self.temp_dir = extraction_dialog.temp_dir
-                        all_extracted_files = extraction_dialog.extracted_files
-                        
-                        # Now scan for DICOM files with progress
-                        dcm_files = []
-                        progress = QProgressDialog("Scanning extracted files for DICOM...", "Cancel", 0, len(all_extracted_files), self)
-                        progress.setWindowTitle("Loading ZIP")
-                        progress.setMinimumDuration(0)
-                        progress.setValue(0)
-                        
-                        for idx, f in enumerate(all_extracted_files):
-                            if progress.wasCanceled():
-                                break
-                            if f.lower().endswith('.dcm'):
-                                dcm_files.append(f)
-                            progress.setValue(idx + 1)
-                            QApplication.processEvents()
-                        progress.close()
-                        
-                        if not dcm_files:
-                            QMessageBox.warning(self, "No DICOM", "No DICOM (.dcm) files found in ZIP archive.")
-                            self.cleanup_temp_dir()
-                            return
-                            
-                        self.loaded_files = [(f, self.temp_dir) for f in dcm_files]
-                        self.populate_tree(dcm_files)
-                    else:
-                        # Extraction was cancelled or failed
-                        return
-                else:
-                    self.loaded_files = [(file_path, None)]
-                    self.populate_tree([file_path])
+                self.load_path(file_paths[0])
 
-    def open_directory(self): # User's original
+    def open_directory(self):
+        """GUI directory picker"""
         dir_path = QFileDialog.getExistingDirectory(
             self,
             "Open DICOM Directory",
             self.default_import_dir
         )
         if dir_path:
-            self.clear_loaded_files()
-            dcm_files = []
-            all_files = []
-            for root, dirs, files in os.walk(dir_path):
-                for name in files:
-                    all_files.append(os.path.join(root, name))
-            progress = QProgressDialog("Scanning directory for DICOM files...", "Cancel", 0, len(all_files), self)
-            progress.setWindowTitle("Loading Directory")
-            progress.setMinimumDuration(0)
-            progress.setValue(0)
-            for idx, f in enumerate(all_files):
-                if progress.wasCanceled():
-                    break
-                if f.lower().endswith('.dcm'):
-                    dcm_files.append(f)
-                progress.setValue(idx + 1)
+            self.load_path(dir_path)
+
+    def load_pending_start_path(self):
+        """Load the pending start path after the window is shown"""
+        if hasattr(self, 'pending_start_path') and self.pending_start_path:
+            path = self.pending_start_path
+            self.pending_start_path = None  # Clear it
+            
+            # Ensure window is visible
+            if not self.isVisible():
+                self.show()
                 QApplication.processEvents()
-            progress.close()
-            if not dcm_files:
-                # User had self.tag_view.setText here. Using QMessageBox.
-                QMessageBox.warning(self, "No DICOM", "No DICOM (.dcm) files found in directory.")
-                return
-            self.loaded_files = [(f, None) for f in dcm_files]
-            self.populate_tree(dcm_files)
+                
+            self.load_path(path)
+
+    def load_path_on_start(self, path):
+        """CLI loading (now just calls load_path)"""
+        self.load_path(path)
 
     def show_tree_context_menu(self, pos: QPoint): # Updated with study and series merge options
         item = self.tree.itemAt(pos)
@@ -1259,7 +1566,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Error", f"Error reading file: {e}")
 
 
-    def display_selected_tree_file(self): # User's original method
+    def display_selected_tree_file(self): # User's original method with performance diagnosis
         selected = self.tree.selectedItems()
         if not selected:
             self.tag_table.setRowCount(0)
@@ -1287,11 +1594,26 @@ class MainWindow(QMainWindow):
             return
 
         try:
+            # Add performance timing
+            start_time = time.time()
+            
             ds = pydicom.dcmread(filepath) # Read full dataset for preview
+            
+            load_time = time.time() - start_time
+            
             self.current_filepath = filepath
             self.current_ds = ds
             self.populate_tag_table(ds)
+            
+            # Diagnose if loading was slow
+            if load_time > 0.5:  # If took more than 500ms
+                print(f"SLOW LOADING DETECTED ({load_time:.2f}s)")
+                self.diagnose_image_performance(ds, filepath)
+            elif load_time > 0.1:  # If took more than 100ms but less than 500ms
+                print(f"Moderate loading time: {load_time:.2f}s for {os.path.basename(filepath)}")
+            
             self._update_image_preview(ds) # Call helper for preview logic
+            
         except Exception as e:
             self.tag_table.setRowCount(0)
             self.current_filepath = None
@@ -1301,25 +1623,195 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Error", f"Error reading file: {filepath}\n{e}")
             logging.error(f"Error reading file {filepath}: {e}", exc_info=True)
 
-    # Helper for image preview logic (separated from display_selected_tree_file)
     def _update_image_preview(self, ds):
-        if self.preview_toggle.isChecked():
+        """Update image preview with proper clearing and load button for large images"""
+        # ALWAYS clear everything first, regardless of toggle state
+        self._clear_all_preview_content()
+        
+        if not self.preview_toggle.isChecked():
+            return
+        
+        # Check image size
+        rows = getattr(ds, 'Rows', 0)
+        cols = getattr(ds, 'Columns', 0)
+        bits = getattr(ds, 'BitsAllocated', 8)
+        samples = getattr(ds, 'SamplesPerPixel', 1)
+        estimated_size_mb = (rows * cols * bits * samples) / (8 * 1024 * 1024)
+        
+        if estimated_size_mb > 5:  # Show button for large images
+            self._show_load_button(ds, estimated_size_mb)
+        else:
+            # Load normally for small images
+            try:
+                pixmap = self._get_dicom_pixmap(ds)
+                if pixmap:
+                    # Scale pixmap to fit the label while maintaining aspect ratio
+                    scaled_pixmap = pixmap.scaledToHeight(self.image_label.height(), Qt.TransformationMode.SmoothTransformation)
+                    if scaled_pixmap.width() > self.image_label.width():
+                        scaled_pixmap = pixmap.scaledToWidth(self.image_label.width(), Qt.TransformationMode.SmoothTransformation)
+                    self.image_label.setPixmap(scaled_pixmap)
+                    self.image_label.setVisible(True)
+                else:
+                    self.image_label.setText("No preview available")
+                    self.image_label.setVisible(True)
+            except Exception as e:
+                logging.error(f"Error creating pixmap: {e}")
+                self.image_label.setText("Error loading image")
+                self.image_label.setVisible(True)
+
+    def _clear_all_preview_content(self):
+        """Clear all possible preview content (images, buttons, progress, etc.)"""
+        # Clear image label
+        self.image_label.clear()
+        self.image_label.setStyleSheet("")  # Reset any error styling
+        self.image_label.setVisible(False)
+        
+        # Remove button widget if it exists
+        if hasattr(self, 'button_widget') and self.button_widget:
+            self.button_widget.setParent(None)
+            self.button_widget.deleteLater()
+            self.button_widget = None
+        
+        # Remove progress widget if it exists
+        if hasattr(self, 'progress_widget') and self.progress_widget:
+            self.progress_widget.setParent(None)
+            self.progress_widget.deleteLater()
+            self.progress_widget = None
+        
+        # Cancel any running image loading
+        if hasattr(self, 'image_loader') and self.image_loader and self.image_loader.isRunning():
+            self.image_loader.cancel()
+            self.image_loader.wait(100)
+
+    def _show_load_button(self, ds, size_mb):
+        """Show load button for large images"""
+        # Make sure everything is cleared first
+        self._clear_all_preview_content()
+        
+        # Create button widget
+        button_widget = QWidget()
+        button_layout = QVBoxLayout(button_widget)
+        button_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        button_layout.setSpacing(10)
+        
+        # Info label
+        info_label = QLabel(f"Large Image\n{size_mb:.1f}MB\n{getattr(ds, 'Columns', '?')} x {getattr(ds, 'Rows', '?')} pixels")
+        info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        info_label.setStyleSheet("""
+            QLabel {
+                color: #f5f5f5;
+                font-size: 12px;
+                background-color: #2c2f33;
+                padding: 10px;
+                border-radius: 5px;
+            }
+        """)
+        
+        # Load button
+        load_btn = QPushButton("Load Image")
+        load_btn.setFixedSize(120, 40)
+        load_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #508cff;
+                color: white;
+                border: none;
+                border-radius: 5px;
+                font-size: 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #6ea3ff;
+            }
+            QPushButton:pressed {
+                background-color: #3d75e6;
+            }
+        """)
+        
+        # Connect button to loading function
+        load_btn.clicked.connect(lambda: self._load_large_image(ds, size_mb))
+        
+        button_layout.addWidget(info_label)
+        button_layout.addWidget(load_btn)
+        
+        # Store reference and add to layout
+        self.button_widget = button_widget
+        
+        # Find the image label's parent layout and insert button widget
+        parent_layout = self.image_label.parent().layout()
+        if parent_layout:
+            index = parent_layout.indexOf(self.image_label)
+            parent_layout.insertWidget(index, button_widget)
+
+    def _load_large_image(self, ds, size_mb):
+        """Load large image with progress dialog"""
+        # Clear button widget first
+        if hasattr(self, 'button_widget') and self.button_widget:
+            self.button_widget.setParent(None)
+            self.button_widget.deleteLater()
+            self.button_widget = None
+        
+        # Show progress dialog
+        progress = QProgressDialog(f"Loading {size_mb:.1f}MB image...", "Cancel", 0, 100, self)
+        progress.setWindowTitle("Loading Large Image")
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        progress.show()
+        
+        try:
+            # Update progress
+            progress.setValue(25)
+            QApplication.processEvents()
+            
+            if progress.wasCanceled():
+                self._show_cancelled_message()
+                return
+            
+            progress.setValue(50)
+            progress.setLabelText("Processing pixel data...")
+            QApplication.processEvents()
+            
+            # Load the image
             pixmap = self._get_dicom_pixmap(ds)
-            if pixmap:
-                # Scale pixmap to fit the label while maintaining aspect ratio
-                # Prefer scaling to height, but if it becomes wider than label, scale to width
+            
+            progress.setValue(100)
+            QApplication.processEvents()
+            
+            if pixmap and not progress.wasCanceled():
+                # Scale and display
                 scaled_pixmap = pixmap.scaledToHeight(self.image_label.height(), Qt.TransformationMode.SmoothTransformation)
                 if scaled_pixmap.width() > self.image_label.width():
                     scaled_pixmap = pixmap.scaledToWidth(self.image_label.width(), Qt.TransformationMode.SmoothTransformation)
                 self.image_label.setPixmap(scaled_pixmap)
                 self.image_label.setVisible(True)
             else:
-                self.image_label.setText("No preview available") # More informative than just clear
-                self.image_label.setVisible(True) # Show the label
-        else:
-            self.image_label.clear()
-            self.image_label.setVisible(False)
+                self._show_error_message("Failed to load image")
+                
+        except Exception as e:
+            logging.error(f"Error loading large image: {e}")
+            self._show_error_message(f"Error: {e}")
+        finally:
+            progress.close()
 
+    def _remove_button_widget(self):
+        """Remove button widget and restore image label"""
+        if hasattr(self, 'button_widget') and self.button_widget:
+            self.button_widget.setParent(None)
+            self.button_widget.deleteLater()
+            self.button_widget = None
+        
+        self.image_label.setVisible(True)
+
+    def _show_cancelled_message(self):
+        """Show cancelled message"""
+        self.image_label.setText("Loading Cancelled")
+        self.image_label.setStyleSheet("color: #f5f5f5; background-color: #444; padding: 20px;")
+        self.image_label.setVisible(True)
+
+    def _show_error_message(self, message):
+        """Show error message in image area"""
+        self.image_label.setText(f"Error Loading Image\n\n{message}")
+        self.image_label.setStyleSheet("color: #ff6b6b; background-color: #444; padding: 20px;")
+        self.image_label.setVisible(True)
 
     def _get_dicom_pixmap(self, ds): # User's original
         try:
@@ -2491,6 +2983,155 @@ class MainWindow(QMainWindow):
             logging.error(f"Template management error: {e}", exc_info=True)
             QMessageBox.critical(self, "Template Management Error", 
                             f"An error occurred:\n{str(e)}")
+            
+    def diagnose_image_performance(self, ds, filepath):
+        """Print key tags that affect image loading performance"""
+        
+        print(f"\n=== PERFORMANCE DIAGNOSIS: {os.path.basename(filepath)} ===")
+        
+        # Most important: Transfer Syntax (compression method)
+        transfer_syntax = getattr(ds.file_meta, 'TransferSyntaxUID', 'Unknown')
+        print(f"Transfer Syntax: {transfer_syntax}")
+        print(f"  Name: {getattr(transfer_syntax, 'name', 'Unknown')}")
+        
+        # Image format tags
+        print(f"Photometric Interpretation: {getattr(ds, 'PhotometricInterpretation', 'Unknown')}")
+        print(f"Samples Per Pixel: {getattr(ds, 'SamplesPerPixel', 'Unknown')}")
+        print(f"Bits Allocated: {getattr(ds, 'BitsAllocated', 'Unknown')}")
+        print(f"Bits Stored: {getattr(ds, 'BitsStored', 'Unknown')}")
+        print(f"Pixel Representation: {getattr(ds, 'PixelRepresentation', 'Unknown')}")
+        
+        # Image size
+        rows = getattr(ds, 'Rows', 'Unknown')
+        cols = getattr(ds, 'Columns', 'Unknown') 
+        print(f"Image Size: {cols} x {rows}")
+        
+        # Color/grayscale info
+        planar_config = getattr(ds, 'PlanarConfiguration', 'Unknown')
+        if planar_config != 'Unknown':
+            print(f"Planar Configuration: {planar_config}")
+        
+        print("=" * 50)
+
+    def analyze_all_loaded_files(self):
+        """Analyze performance characteristics of all loaded files"""
+        print("\n=== ANALYZING ALL LOADED FILES ===")
+        
+        file_details = []
+        
+        for filepath, _ in self.loaded_files:
+            try:
+                # Read WITH pixel data to see actual file sizes
+                ds = pydicom.dcmread(filepath)
+                
+                # Get detailed info
+                transfer_syntax = str(getattr(ds.file_meta, 'TransferSyntaxUID', 'Unknown'))
+                rows = getattr(ds, 'Rows', 0)
+                cols = getattr(ds, 'Columns', 0)
+                bits_allocated = getattr(ds, 'BitsAllocated', 0)
+                samples_per_pixel = getattr(ds, 'SamplesPerPixel', 1)
+                photometric = getattr(ds, 'PhotometricInterpretation', 'Unknown')
+                
+                # Calculate estimated uncompressed size
+                estimated_size = rows * cols * bits_allocated * samples_per_pixel // 8
+                
+                # Get actual file size
+                file_size = os.path.getsize(filepath)
+                
+                file_details.append({
+                    'filename': os.path.basename(filepath),
+                    'filepath': filepath,
+                    'transfer_syntax': transfer_syntax,
+                    'dimensions': f"{cols}x{rows}",
+                    'bits': bits_allocated,
+                    'samples': samples_per_pixel,
+                    'photometric': photometric,
+                    'estimated_uncompressed': estimated_size,
+                    'actual_file_size': file_size,
+                    'compression_ratio': estimated_size / file_size if file_size > 0 else 0
+                })
+                
+            except Exception as e:
+                print(f"Error reading {filepath}: {e}")
+        
+        # Sort by estimated uncompressed size (larger = potentially slower)
+        file_details.sort(key=lambda x: x['estimated_uncompressed'], reverse=True)
+        
+        print(f"\nDETAILED FILE ANALYSIS ({len(file_details)} files):")
+        print(f"{'Filename':<15} {'Dimensions':<10} {'Bits':<5} {'Photometric':<12} {'Uncompressed':<12} {'FileSize':<10} {'Compression':<10}")
+        print("-" * 90)
+        
+        for detail in file_details:
+            uncompressed_mb = detail['estimated_uncompressed'] / (1024*1024)
+            file_size_mb = detail['actual_file_size'] / (1024*1024)
+            compression_ratio = detail['compression_ratio']
+            
+            print(f"{detail['filename']:<15} {detail['dimensions']:<10} {detail['bits']:<5} "
+                f"{detail['photometric']:<12} {uncompressed_mb:<11.1f}M {file_size_mb:<9.1f}M {compression_ratio:<9.1f}x")
+        
+        # Show summary stats
+        print(f"\nSUMMARY:")
+        dimensions = [d['dimensions'] for d in file_details]
+        unique_dimensions = list(set(dimensions))
+        print(f"Unique image dimensions: {unique_dimensions}")
+        
+        sizes = [d['estimated_uncompressed'] for d in file_details]
+        print(f"Size range: {min(sizes)/(1024*1024):.1f}MB to {max(sizes)/(1024*1024):.1f}MB")
+        
+        # Identify likely slow files
+        large_files = [d for d in file_details if d['estimated_uncompressed'] > 10*1024*1024]  # >10MB
+        if large_files:
+            print(f"\nLIKELY SLOW FILES (>10MB uncompressed):")
+            for f in large_files:
+                print(f"  {f['filename']}: {f['dimensions']}, {f['estimated_uncompressed']/(1024*1024):.1f}MB")
+
+    def test_loading_performance(self):
+        """Test actual loading performance of all files"""
+        print("\n=== TESTING LOADING PERFORMANCE ===")
+        
+        import time
+        results = []
+        
+        print("Testing file loading times...")
+        for i, (filepath, _) in enumerate(self.loaded_files):
+            try:
+                start_time = time.time()
+                ds = pydicom.dcmread(filepath)
+                load_time = time.time() - start_time
+                
+                # Try to access pixel data to test full loading
+                try:
+                    pixel_start = time.time()
+                    _ = ds.pixel_array
+                    pixel_time = time.time() - pixel_start
+                    total_time = load_time + pixel_time
+                except:
+                    pixel_time = 0
+                    total_time = load_time
+                
+                results.append({
+                    'filename': os.path.basename(filepath),
+                    'load_time': load_time,
+                    'pixel_time': pixel_time,
+                    'total_time': total_time
+                })
+                
+                # Show progress
+                if (i + 1) % 10 == 0:
+                    print(f"  Tested {i + 1}/{len(self.loaded_files)} files...")
+                    
+            except Exception as e:
+                print(f"  Error testing {filepath}: {e}")
+        
+        # Sort by total time
+        results.sort(key=lambda x: x['total_time'], reverse=True)
+        
+        print(f"\nPERFORMANCE RESULTS (slowest first):")
+        print(f"{'Filename':<15} {'Load':<8} {'Pixels':<8} {'Total':<8}")
+        print("-" * 45)
+        
+        for result in results[:10]:  # Show top 10 slowest
+            print(f"{result['filename']:<15} {result['load_time']:<7.2f}s {result['pixel_time']:<7.2f}s {result['total_time']:<7.2f}s")
 
 # --- Main Execution ---
 if __name__ == "__main__":
