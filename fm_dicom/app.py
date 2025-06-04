@@ -578,56 +578,130 @@ class PrimarySelectionDialog(QDialog):
         return self.button_group.checkedId()
 
 
-# --- Main Application Classes (User's Original Structure) ---
 class DicomSendWorker(QThread):
-    """Background worker for DICOM sending"""
+    """Background worker for DICOM sending with auto-conversion on format rejection"""
     progress_updated = pyqtSignal(int, int, int, int, str)  # current, success, warnings, failed, current_file
-    send_complete = pyqtSignal(int, int, int, list)  # success, warnings, failed, error_details
+    send_complete = pyqtSignal(int, int, int, list, int)  # success, warnings, failed, error_details, converted_count
     send_failed = pyqtSignal(str)  # error message
     association_status = pyqtSignal(str)  # status messages
+    conversion_progress = pyqtSignal(int, int, str)  # current, total, filename
     
-    def __init__(self, filepaths, send_params, unique_sop_classes, temp_files):
+    def __init__(self, filepaths, send_params, unique_sop_classes):
         super().__init__()
         self.filepaths = filepaths
         self.calling_ae, self.remote_ae, self.host, self.port = send_params
         self.unique_sop_classes = unique_sop_classes
-        self.temp_files = temp_files
         self.cancelled = False
+        self.temp_files = []  # Track temp files for cleanup
+        self.converted_count = 0
         
     def run(self):
         try:
+            logging.info("DicomSendWorker: Starting run() method")
+            
+            # First attempt: try with original formats
+            self.association_status.emit("Testing server compatibility...")
+            logging.info("DicomSendWorker: About to attempt initial send")
+            
+            result = self._attempt_send_with_formats(self.filepaths, test_mode=True)
+            logging.info(f"DicomSendWorker: Initial send result: {result is not None}")
+            
+            if result is None:  # Cancelled
+                logging.info("DicomSendWorker: Send was cancelled")
+                return
+                
+            success, warnings, failed, error_details, incompatible_files = result
+            logging.info(f"DicomSendWorker: Initial results - Success: {success}, Failed: {failed}, Incompatible: {len(incompatible_files)}")
+            
+            # If some files failed due to format issues, try converting them
+            if incompatible_files:
+                logging.info(f"DicomSendWorker: Converting {len(incompatible_files)} incompatible files")
+                self.association_status.emit(f"Converting {len(incompatible_files)} incompatible files...")
+                converted_files = self._convert_incompatible_files(incompatible_files)
+                logging.info(f"DicomSendWorker: Conversion complete, got {len(converted_files)} converted files")
+                
+                if converted_files and not self.cancelled:
+                    # Retry with converted files
+                    logging.info("DicomSendWorker: Retrying with converted files")
+                    self.association_status.emit("Retrying with converted files...")
+                    retry_result = self._attempt_send_with_formats(converted_files, test_mode=False)
+                    
+                    if retry_result:
+                        retry_success, retry_warnings, retry_failed, retry_errors, _ = retry_result
+                        success += retry_success
+                        warnings += retry_warnings
+                        failed += retry_failed
+                        error_details.extend(retry_errors)
+                        logging.info(f"DicomSendWorker: Retry complete - Total success: {success}")
+            
+            logging.info("DicomSendWorker: About to emit send_complete signal")
+            # Send completion signal
+            self.send_complete.emit(success, warnings, failed, error_details, self.converted_count)
+            logging.info("DicomSendWorker: send_complete signal emitted")
+            
+        except Exception as e:
+            logging.error(f"DicomSendWorker: Exception in run(): {e}", exc_info=True)
+            self.send_failed.emit(f"DICOM send failed: {str(e)}")
+        finally:
+            logging.info("DicomSendWorker: Cleaning up temp files")
+            # Cleanup temp files
+            self._cleanup_temp_files()
+            logging.info("DicomSendWorker: run() method complete")
+    
+    def _attempt_send_with_formats(self, filepaths, test_mode=False):
+        """Attempt to send files and identify format incompatibilities"""
+        try:
+            logging.info(f"DicomSendWorker: _attempt_send_with_formats called with {len(filepaths)} files, test_mode={test_mode}")
+            
             # Create AE instance
             ae_instance = AE(ae_title=self.calling_ae)
+            logging.info("DicomSendWorker: Created AE instance")
             
             # Add presentation contexts
             for sop_uid in self.unique_sop_classes:
                 ae_instance.add_requested_context(sop_uid)
             ae_instance.add_requested_context(VERIFICATION_SOP_CLASS)
+            logging.info(f"DicomSendWorker: Added {len(self.unique_sop_classes)} presentation contexts")
             
             # Establish association
-            self.association_status.emit("Connecting to DICOM server...")
+            if test_mode:
+                self.association_status.emit("Testing server compatibility...")
+            else:
+                self.association_status.emit("Sending files to server...")
+            
+            logging.info(f"DicomSendWorker: Attempting association to {self.host}:{self.port}")
             assoc = ae_instance.associate(self.host, self.port, ae_title=self.remote_ae)
             
             if not assoc.is_established:
-                self.send_failed.emit(f"Failed to establish association with {self.host}:{self.port}")
-                return
+                logging.error(f"DicomSendWorker: Association failed: {assoc}")
+                if test_mode:
+                    self.send_failed.emit(f"Failed to establish association with {self.host}:{self.port}")
+                    return None
+                else:
+                    return 0, 0, len(filepaths), [f"Association failed for all {len(filepaths)} files"], []
+            
+            logging.info("DicomSendWorker: Association established successfully")
             
             # Set timeout
             assoc.dimse_timeout = 120
-            self.association_status.emit("Connection established, starting transfers...")
             
             # C-ECHO verification
+            logging.info("DicomSendWorker: Performing C-ECHO")
             echo_status = assoc.send_c_echo()
             if echo_status and getattr(echo_status, 'Status', None) == 0x0000:
-                logging.info("C-ECHO verification successful.")
+                logging.info("DicomSendWorker: C-ECHO verification successful.")
+            else:
+                logging.warning(f"DicomSendWorker: C-ECHO failed or status not 0x0000. Status: {echo_status}")
             
             # Send files
+            logging.info(f"DicomSendWorker: Starting to send {len(filepaths)} files")
             sent_ok = 0
             sent_warning = 0
             failed_send = 0
             failed_details_list = []
+            incompatible_files = []
             
-            for idx, fp_send in enumerate(self.filepaths):
+            for idx, fp_send in enumerate(filepaths):
                 if self.cancelled:
                     break
                 
@@ -641,7 +715,7 @@ class DicomSendWorker(QThread):
                             continue
                         assoc.dimse_timeout = 120
                     
-                    # Read and send file
+                    # Read file
                     ds_send = pydicom.dcmread(fp_send)
                     
                     # Check SOP class support
@@ -649,6 +723,16 @@ class DicomSendWorker(QThread):
                         err_msg = f"{os.path.basename(fp_send)}: SOP Class not accepted"
                         failed_details_list.append(err_msg)
                         failed_send += 1
+                        
+                        # This might be a format issue - add to incompatible list
+                        if test_mode:
+                            incompatible_files.append(fp_send)
+                        
+                        # UPDATE PROGRESS EVEN IN TEST MODE
+                        if test_mode:
+                            self.progress_updated.emit(idx + 1, sent_ok, sent_warning, failed_send, f"Testing {os.path.basename(fp_send)}")
+                        else:
+                            self.progress_updated.emit(idx + 1, sent_ok, sent_warning, failed_send, os.path.basename(fp_send))
                         continue
                     
                     # Send C-STORE
@@ -659,6 +743,7 @@ class DicomSendWorker(QThread):
                         status_code = getattr(status, "Status", -1)
                         if status_code == 0x0000:
                             sent_ok += 1
+                            logging.info(f"Successfully sent {os.path.basename(fp_send)}")
                         elif status_code in [0xB000, 0xB006, 0xB007]:
                             sent_warning += 1
                             warn_msg = f"{os.path.basename(fp_send)}: Warning 0x{status_code:04X}"
@@ -667,18 +752,38 @@ class DicomSendWorker(QThread):
                             failed_send += 1
                             err_msg = f"{os.path.basename(fp_send)}: Failed 0x{status_code:04X}"
                             failed_details_list.append(err_msg)
+                            
+                            # Check if this is a format-related failure
+                            if test_mode and self._is_format_error(status_code):
+                                incompatible_files.append(fp_send)
                     else:
                         failed_send += 1
                         failed_details_list.append(f"{os.path.basename(fp_send)}: No status returned")
+                        if test_mode:
+                            incompatible_files.append(fp_send)
                     
-                    # Update progress
-                    self.progress_updated.emit(idx + 1, sent_ok, sent_warning, failed_send, os.path.basename(fp_send))
+                    # UPDATE PROGRESS FOR BOTH TEST AND NORMAL MODE
+                    if test_mode:
+                        self.progress_updated.emit(idx + 1, sent_ok, sent_warning, failed_send, f"Testing {os.path.basename(fp_send)}")
+                    else:
+                        self.progress_updated.emit(idx + 1, sent_ok, sent_warning, failed_send, os.path.basename(fp_send))
                     
                 except Exception as e:
+                    error_str = str(e)
                     failed_send += 1
-                    err_msg = f"{os.path.basename(fp_send)}: {str(e)}"
+                    err_msg = f"{os.path.basename(fp_send)}: {error_str}"
                     failed_details_list.append(err_msg)
-                    self.progress_updated.emit(idx + 1, sent_ok, sent_warning, failed_send, os.path.basename(fp_send))
+                    
+                    # Check if this is a format/compression error
+                    if test_mode and self._is_format_exception(error_str):
+                        incompatible_files.append(fp_send)
+                        logging.info(f"Detected format incompatibility for {os.path.basename(fp_send)}: {error_str}")
+                    
+                    # UPDATE PROGRESS FOR BOTH TEST AND NORMAL MODE
+                    if test_mode:
+                        self.progress_updated.emit(idx + 1, sent_ok, sent_warning, failed_send, f"Testing {os.path.basename(fp_send)}")
+                    else:
+                        self.progress_updated.emit(idx + 1, sent_ok, sent_warning, failed_send, os.path.basename(fp_send))
             
             # Close association
             try:
@@ -686,11 +791,136 @@ class DicomSendWorker(QThread):
             except:
                 pass
             
-            # Send completion signal
-            self.send_complete.emit(sent_ok, sent_warning, failed_send, failed_details_list)
+            return sent_ok, sent_warning, failed_send, failed_details_list, incompatible_files
             
         except Exception as e:
-            self.send_failed.emit(f"DICOM send failed: {str(e)}")
+            logging.error(f"DicomSendWorker: Exception in _attempt_send_with_formats: {e}", exc_info=True)
+            raise
+    
+    def _is_format_error(self, status_code):
+        """Check if status code indicates a format/transfer syntax error"""
+        # Common DICOM status codes for format/transfer syntax issues
+        format_error_codes = [
+            0x0122,  # SOP Class not supported
+            0x0124,  # Not authorized
+            0xA900,  # Dataset does not match SOP Class
+            0xC000,  # Cannot understand
+        ]
+        return status_code in format_error_codes
+    
+    def _is_format_exception(self, error_str):
+        """Check if exception indicates a format/compression issue"""
+        format_keywords = [
+            'presentation context',
+            'transfer syntax',
+            'compression',
+            'jpeg',
+            'jpeg2000',
+            'not accepted',
+            'not supported',
+            'cannot decompress',
+            'no suitable presentation context'
+        ]
+        error_lower = error_str.lower()
+        return any(keyword in error_lower for keyword in format_keywords)
+    
+    def _convert_incompatible_files(self, filepaths):
+        """Convert incompatible files to uncompressed format"""
+        converted_files = []
+        total_files = len(filepaths)
+        
+        for idx, filepath in enumerate(filepaths):
+            if self.cancelled:
+                break
+            
+            # Emit conversion progress
+            self.conversion_progress.emit(idx, total_files, os.path.basename(filepath))
+            
+            try:
+                # Read the full dataset (including pixels)
+                ds = pydicom.dcmread(filepath)
+                
+                # Check if this is actually compressed
+                transfer_syntax = str(ds.file_meta.TransferSyntaxUID)
+                
+                # Only convert if it's actually compressed
+                if transfer_syntax in [
+                    '1.2.840.10008.1.2.4.90',  # JPEG 2000 Lossless
+                    '1.2.840.10008.1.2.4.91',  # JPEG 2000
+                    '1.2.840.10008.1.2.4.50',  # JPEG Baseline
+                    '1.2.840.10008.1.2.4.51',  # JPEG Extended
+                    '1.2.840.10008.1.2.4.57',  # JPEG Lossless
+                    '1.2.840.10008.1.2.4.70',  # JPEG Lossless SV1
+                ]:
+                    logging.info(f"Converting {os.path.basename(filepath)} from {transfer_syntax}")
+                    
+                    # Force pixel data access to decompress
+                    try:
+                        pixel_array = ds.pixel_array
+                        logging.info(f"Successfully accessed pixel data: {pixel_array.shape}")
+                    except Exception as e:
+                        logging.error(f"Failed to access pixel data for {filepath}: {e}")
+                        # Use original file if pixel access fails
+                        converted_files.append(filepath)
+                        continue
+                    
+                    # Create new dataset with uncompressed transfer syntax
+                    # Use the server's preferred transfer syntax: Deflated Explicit VR Little Endian
+                    ds.file_meta.TransferSyntaxUID = '1.2.840.10008.1.2.1.99'  # Deflated Explicit VR Little Endian
+                    
+                    # Ensure pixel data is uncompressed
+                    if hasattr(ds, 'PixelData'):
+                        # The pixel data should now be uncompressed due to pixel_array access
+                        pass
+                    
+                    # Create temp file with more specific naming
+                    temp_filepath = filepath + f"_converted_deflated.dcm"
+                    
+                    # Save with explicit format enforcement
+                    ds.save_as(temp_filepath, enforce_file_format=True)
+                    
+                    # Verify the conversion worked
+                    try:
+                        ds_verify = pydicom.dcmread(temp_filepath, stop_before_pixels=True)
+                        verify_ts = str(ds_verify.file_meta.TransferSyntaxUID)
+                        logging.info(f"Conversion verified: {verify_ts}")
+                        
+                        if verify_ts == '1.2.840.10008.1.2.1.99':
+                            converted_files.append(temp_filepath)
+                            self.temp_files.append(temp_filepath)
+                            self.converted_count += 1
+                            logging.info(f"Successfully converted {os.path.basename(filepath)}")
+                        else:
+                            logging.warning(f"Conversion failed, transfer syntax still: {verify_ts}")
+                            converted_files.append(filepath)  # Use original
+                            
+                    except Exception as e:
+                        logging.error(f"Failed to verify conversion for {filepath}: {e}")
+                        converted_files.append(filepath)  # Use original
+                        
+                else:
+                    # File doesn't need conversion
+                    logging.info(f"File {os.path.basename(filepath)} doesn't need conversion: {transfer_syntax}")
+                    converted_files.append(filepath)
+                    
+            except Exception as e:
+                logging.error(f"Failed to process {filepath}: {e}")
+                # Use original file if processing fails
+                converted_files.append(filepath)
+        
+        # Signal conversion complete
+        self.conversion_progress.emit(total_files, total_files, "Conversion complete")
+        
+        return converted_files
+    
+    def _cleanup_temp_files(self):
+        """Clean up temporary files"""
+        for temp_file in self.temp_files:
+            try:
+                os.remove(temp_file)
+                logging.info(f"Cleaned up temp file: {os.path.basename(temp_file)}")
+            except Exception as e:
+                logging.warning(f"Could not remove temp file {temp_file}: {e}")
     
     def cancel(self):
         """Cancel the sending operation"""
@@ -2467,29 +2697,13 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No Instances", "No DICOM instances found under the selected node.")
             return
 
-        # Ask about conversion
-        reply = QMessageBox.question(self, "DICOM Send", 
-                                    "Convert compressed images to uncompressed format for better compatibility?\n\n"
-                                    "This is recommended for JPEG 2000 compressed images.",
-                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                                    QMessageBox.StandardButton.Yes)
-        
-        temp_files = []
-        if reply == QMessageBox.StandardButton.Yes:
-            result = self._convert_for_dicom_send(filepaths)
-            if result is None:
-                return
-            filepaths, temp_files = result
-
         # Get send parameters
         dlg = DicomSendDialog(self, config=self.dicom_send_config)
         if dlg.exec() != QDialog.DialogCode.Accepted:
-            self._cleanup_temp_files(temp_files)
             return
         
         send_params = dlg.get_params()
         if send_params is None:
-            self._cleanup_temp_files(temp_files)
             return
 
         # Get unique SOP classes
@@ -2503,44 +2717,70 @@ class MainWindow(QMainWindow):
                 logging.warning(f"Could not read SOPClassUID from {fp_ctx}: {e_ctx}")
         
         if not unique_sop_classes_to_send:
-            self._cleanup_temp_files(temp_files)
             QMessageBox.critical(self, "DICOM Send Error", "No valid SOP Class UIDs found.")
             return
 
         # Create progress dialog
-        self.send_progress = QProgressDialog("Preparing DICOM send...", "Cancel", 0, len(filepaths), self)
+        self.send_progress = QProgressDialog("Starting DICOM send...", "Cancel", 0, len(filepaths), self)
         self.send_progress.setWindowTitle("DICOM Send Progress")
         self.send_progress.setMinimumDuration(0)
         self.send_progress.setValue(0)
         self.send_progress.canceled.connect(self._cancel_dicom_send)
         
+        logging.info("Main thread: About to create and start DicomSendWorker")
+        
         # Start background send
-        self.send_worker = DicomSendWorker(filepaths, send_params, unique_sop_classes_to_send, temp_files)
+        self.send_worker = DicomSendWorker(filepaths, send_params, unique_sop_classes_to_send)
+        
+        # Connect signals with debug logging
+        self.send_worker.progress_updated.connect(lambda *args: logging.info(f"progress_updated signal: {args}"))
+        self.send_worker.send_complete.connect(lambda *args: logging.info(f"send_complete signal: {args}"))
+        self.send_worker.send_failed.connect(lambda msg: logging.error(f"send_failed signal: {msg}"))
+        self.send_worker.association_status.connect(lambda msg: logging.info(f"association_status signal: {msg}"))
+        self.send_worker.conversion_progress.connect(lambda *args: logging.info(f"conversion_progress signal: {args}"))
+        
+        # Also connect to your actual handlers
         self.send_worker.progress_updated.connect(self._on_send_progress)
         self.send_worker.send_complete.connect(self._on_send_complete)
         self.send_worker.send_failed.connect(self._on_send_failed)
         self.send_worker.association_status.connect(self._on_association_status)
+        self.send_worker.conversion_progress.connect(self._on_conversion_progress)
+        
+        logging.info("Main thread: Starting worker thread")
         self.send_worker.start()
+        logging.info("Main thread: Worker thread started")
 
     def _on_send_progress(self, current, success, warnings, failed, current_file):
         """Handle progress updates from send worker"""
-        if hasattr(self, 'send_progress'):
+        logging.info(f"_on_send_progress called: {current}, {success}, {warnings}, {failed}, {current_file}")
+        if hasattr(self, 'send_progress') and self.send_progress:
             self.send_progress.setValue(current)
-            self.send_progress.setLabelText(f"Sending {current_file}\nSuccess: {success}, Warnings: {warnings}, Failed: {failed}")
+            
+            # Different messages for testing vs sending
+            if current_file.startswith("Testing "):
+                # Remove "Testing " prefix for display
+                display_file = current_file.replace("Testing ", "")
+                self.send_progress.setLabelText(f"Testing compatibility: {display_file}\nTested: {current}, Found incompatible: {failed}")
+            else:
+                # Normal sending
+                self.send_progress.setLabelText(f"Sending {current_file}\nSuccess: {success}, Warnings: {warnings}, Failed: {failed}")
 
-    def _on_send_complete(self, success, warnings, failed, error_details):
+    def _on_send_complete(self, success, warnings, failed, error_details, converted_count):
         """Handle successful completion of send"""
-        if hasattr(self, 'send_progress'):
+        logging.info(f"_on_send_complete called: {success}, {warnings}, {failed}, {converted_count}")
+        if hasattr(self, 'send_progress') and self.send_progress:
             self.send_progress.close()
+            self.send_progress = None
         
-        # Cleanup temp files
-        if hasattr(self.send_worker, 'temp_files'):
-            self._cleanup_temp_files(self.send_worker.temp_files)
+        # Close conversion progress if it exists
+        if hasattr(self, 'conversion_progress') and self.conversion_progress:
+            self.conversion_progress.close()
+            self.conversion_progress = None
         
         # Show results
         msg = f"DICOM Send Complete.\n\nSuccess: {success}\nWarnings: {warnings}\nFailed: {failed}"
-        if self.send_worker.temp_files:
-            msg += f"\n\nConverted {len(self.send_worker.temp_files)} compressed images."
+        if converted_count > 0:
+            msg += f"\n\nAutomatically converted {converted_count} incompatible files."
         if error_details:
             msg += "\n\nFirst few issues:\n" + "\n".join(error_details[:5])
             if len(error_details) > 5:
@@ -2551,33 +2791,86 @@ class MainWindow(QMainWindow):
 
     def _on_send_failed(self, error_message):
         """Handle send failure"""
-        if hasattr(self, 'send_progress'):
+        logging.error(f"_on_send_failed called: {error_message}")
+        if hasattr(self, 'send_progress') and self.send_progress:
             self.send_progress.close()
+            self.send_progress = None
         
-        if hasattr(self.send_worker, 'temp_files'):
-            self._cleanup_temp_files(self.send_worker.temp_files)
+        # Close conversion progress if it exists
+        if hasattr(self, 'conversion_progress') and self.conversion_progress:
+            self.conversion_progress.close()
+            self.conversion_progress = None
         
         QMessageBox.critical(self, "DICOM Send Failed", error_message)
         logging.error(error_message)
 
     def _on_association_status(self, status_message):
         """Handle association status updates"""
-        if hasattr(self, 'send_progress'):
-            self.send_progress.setLabelText(status_message)
+        logging.info(f"_on_association_status called: {status_message}")
+        if hasattr(self, 'send_progress') and self.send_progress:
+            # Check if we're starting conversion
+            if "Converting" in status_message and "incompatible" in status_message:
+                # Create conversion progress dialog
+                self.conversion_progress = QProgressDialog("Converting incompatible files...", "Cancel", 0, 100, self)
+                self.conversion_progress.setWindowTitle("Converting Images")
+                self.conversion_progress.setMinimumDuration(0)
+                self.conversion_progress.setValue(0)
+                self.conversion_progress.canceled.connect(self._cancel_dicom_send)
+                logging.info("Created conversion progress dialog")
+            elif "Sending files to server" in status_message:
+                # Reset the main progress bar for actual sending
+                self.send_progress.setValue(0)
+                self.send_progress.setLabelText("Starting file transfer...")
+            else:
+                # Normal status update
+                self.send_progress.setLabelText(status_message)
+
+    def _on_conversion_progress(self, current, total, filename):
+        """Handle conversion progress updates"""
+        logging.info(f"_on_conversion_progress called: {current}, {total}, {filename}")
+        if hasattr(self, 'conversion_progress') and self.conversion_progress:
+            if current < total:
+                progress_percent = int((current / total) * 100) if total > 0 else 0
+                self.conversion_progress.setValue(progress_percent)
+                self.conversion_progress.setLabelText(f"Converting {filename}\n({current + 1}/{total})")
+            else:
+                # Conversion complete - close conversion dialog but DON'T trigger cancel
+                logging.info("Conversion complete, closing conversion progress dialog")
+                if hasattr(self, 'conversion_progress') and self.conversion_progress:
+                    # Disconnect cancel signal before closing to prevent false cancellation
+                    self.conversion_progress.canceled.disconnect()
+                    self.conversion_progress.close()
+                    self.conversion_progress = None
+                    
+                # Update main progress
+                if hasattr(self, 'send_progress') and self.send_progress:
+                    self.send_progress.setLabelText("Conversion complete, retrying send...")
 
     def _cancel_dicom_send(self):
         """Cancel the DICOM send operation"""
-        if hasattr(self, 'send_worker') and self.send_worker.isRunning():
+        logging.info("_cancel_dicom_send called")
+        if hasattr(self, 'send_worker') and self.send_worker and self.send_worker.isRunning():
+            logging.info("Cancelling send worker")
             self.send_worker.cancel()
             self.send_worker.wait(3000)
             if self.send_worker.isRunning():
+                logging.warning("Send worker didn't stop, terminating")
                 self.send_worker.terminate()
             
-            if hasattr(self.send_worker, 'temp_files'):
-                self._cleanup_temp_files(self.send_worker.temp_files)
+            # Close progress dialogs
+            if hasattr(self, 'send_progress') and self.send_progress:
+                self.send_progress.close()
+                self.send_progress = None
+            
+            if hasattr(self, 'conversion_progress') and self.conversion_progress:
+                self.conversion_progress.close()
+                self.conversion_progress = None
+        
+        logging.info("DICOM send cancelled")
 
     def _cleanup_temp_files(self, temp_files):
         """Clean up temporary files"""
+        logging.info(f"Cleaning up {len(temp_files)} temp files")
         for temp_file in temp_files:
             try:
                 os.remove(temp_file)
