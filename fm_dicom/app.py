@@ -579,6 +579,122 @@ class PrimarySelectionDialog(QDialog):
 
 
 # --- Main Application Classes (User's Original Structure) ---
+class DicomSendWorker(QThread):
+    """Background worker for DICOM sending"""
+    progress_updated = pyqtSignal(int, int, int, int, str)  # current, success, warnings, failed, current_file
+    send_complete = pyqtSignal(int, int, int, list)  # success, warnings, failed, error_details
+    send_failed = pyqtSignal(str)  # error message
+    association_status = pyqtSignal(str)  # status messages
+    
+    def __init__(self, filepaths, send_params, unique_sop_classes, temp_files):
+        super().__init__()
+        self.filepaths = filepaths
+        self.calling_ae, self.remote_ae, self.host, self.port = send_params
+        self.unique_sop_classes = unique_sop_classes
+        self.temp_files = temp_files
+        self.cancelled = False
+        
+    def run(self):
+        try:
+            # Create AE instance
+            ae_instance = AE(ae_title=self.calling_ae)
+            
+            # Add presentation contexts
+            for sop_uid in self.unique_sop_classes:
+                ae_instance.add_requested_context(sop_uid)
+            ae_instance.add_requested_context(VERIFICATION_SOP_CLASS)
+            
+            # Establish association
+            self.association_status.emit("Connecting to DICOM server...")
+            assoc = ae_instance.associate(self.host, self.port, ae_title=self.remote_ae)
+            
+            if not assoc.is_established:
+                self.send_failed.emit(f"Failed to establish association with {self.host}:{self.port}")
+                return
+            
+            # Set timeout
+            assoc.dimse_timeout = 120
+            self.association_status.emit("Connection established, starting transfers...")
+            
+            # C-ECHO verification
+            echo_status = assoc.send_c_echo()
+            if echo_status and getattr(echo_status, 'Status', None) == 0x0000:
+                logging.info("C-ECHO verification successful.")
+            
+            # Send files
+            sent_ok = 0
+            sent_warning = 0
+            failed_send = 0
+            failed_details_list = []
+            
+            for idx, fp_send in enumerate(self.filepaths):
+                if self.cancelled:
+                    break
+                
+                try:
+                    # Check association
+                    if not assoc.is_established:
+                        assoc = ae_instance.associate(self.host, self.port, ae_title=self.remote_ae)
+                        if not assoc.is_established:
+                            failed_details_list.append(f"{os.path.basename(fp_send)}: Could not re-establish association")
+                            failed_send += 1
+                            continue
+                        assoc.dimse_timeout = 120
+                    
+                    # Read and send file
+                    ds_send = pydicom.dcmread(fp_send)
+                    
+                    # Check SOP class support
+                    if not any(ctx.abstract_syntax == ds_send.SOPClassUID and ctx.result == 0x00 for ctx in assoc.accepted_contexts):
+                        err_msg = f"{os.path.basename(fp_send)}: SOP Class not accepted"
+                        failed_details_list.append(err_msg)
+                        failed_send += 1
+                        continue
+                    
+                    # Send C-STORE
+                    status = assoc.send_c_store(ds_send)
+                    
+                    # Process result
+                    if status:
+                        status_code = getattr(status, "Status", -1)
+                        if status_code == 0x0000:
+                            sent_ok += 1
+                        elif status_code in [0xB000, 0xB006, 0xB007]:
+                            sent_warning += 1
+                            warn_msg = f"{os.path.basename(fp_send)}: Warning 0x{status_code:04X}"
+                            failed_details_list.append(warn_msg)
+                        else:
+                            failed_send += 1
+                            err_msg = f"{os.path.basename(fp_send)}: Failed 0x{status_code:04X}"
+                            failed_details_list.append(err_msg)
+                    else:
+                        failed_send += 1
+                        failed_details_list.append(f"{os.path.basename(fp_send)}: No status returned")
+                    
+                    # Update progress
+                    self.progress_updated.emit(idx + 1, sent_ok, sent_warning, failed_send, os.path.basename(fp_send))
+                    
+                except Exception as e:
+                    failed_send += 1
+                    err_msg = f"{os.path.basename(fp_send)}: {str(e)}"
+                    failed_details_list.append(err_msg)
+                    self.progress_updated.emit(idx + 1, sent_ok, sent_warning, failed_send, os.path.basename(fp_send))
+            
+            # Close association
+            try:
+                assoc.release()
+            except:
+                pass
+            
+            # Send completion signal
+            self.send_complete.emit(sent_ok, sent_warning, failed_send, failed_details_list)
+            
+        except Exception as e:
+            self.send_failed.emit(f"DICOM send failed: {str(e)}")
+    
+    def cancel(self):
+        """Cancel the sending operation"""
+        self.cancelled = True
 
 class DicomSendDialog(QDialog): # User's original DicomSendDialog
     def __init__(self, parent=None, config=None):
@@ -2329,14 +2445,14 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Export Complete", msg)
 
 
-    def dicom_send(self): # User's original (with minor logging/error message consistency)
+    def dicom_send(self):
         logging.info("DICOM send initiated")
         if AE is None or not STORAGE_CONTEXTS or VERIFICATION_SOP_CLASS is None:
             logging.error("pynetdicom not available or not fully imported.")
             QMessageBox.critical(self, "Missing Dependency",
-                                 "pynetdicom is required for DICOM send.\n"
-                                 "Check your environment and restart the application.\n"
-                                 f"Python executable: {sys.executable}\n")
+                                "pynetdicom is required for DICOM send.\n"
+                                "Check your environment and restart the application.\n"
+                                f"Python executable: {sys.executable}\n")
             return
         
         selected = self.tree.selectedItems()
@@ -2344,135 +2460,130 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No Selection", "Please select a node in the tree to send.")
             return
         
-        # Collect all instances under the first selected item (could be refined to send all selected items' children)
         tree_item_anchor = selected[0]
-        # For simplicity, let's assume we send all instances under this anchor, regardless of its level.
-        # To send only the patient of the selected item, traverse up first:
-        # while tree_item_anchor.parent():
-        #     tree_item_anchor = tree_item_anchor.parent()
         filepaths = self._collect_instance_filepaths(tree_item_anchor)
 
         if not filepaths:
             QMessageBox.warning(self, "No Instances", "No DICOM instances found under the selected node.")
             return
 
-        dlg = DicomSendDialog(self, config=self.dicom_send_config) # Pass full config
+        # Ask about conversion
+        reply = QMessageBox.question(self, "DICOM Send", 
+                                    "Convert compressed images to uncompressed format for better compatibility?\n\n"
+                                    "This is recommended for JPEG 2000 compressed images.",
+                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                    QMessageBox.StandardButton.Yes)
+        
+        temp_files = []
+        if reply == QMessageBox.StandardButton.Yes:
+            result = self._convert_for_dicom_send(filepaths)
+            if result is None:
+                return
+            filepaths, temp_files = result
+
+        # Get send parameters
+        dlg = DicomSendDialog(self, config=self.dicom_send_config)
         if dlg.exec() != QDialog.DialogCode.Accepted:
-            logging.info("DICOM send cancelled by user.")
+            self._cleanup_temp_files(temp_files)
             return
         
         send_params = dlg.get_params()
-        if send_params is None: return # Error handled in get_params
-        calling_ae, remote_ae, host, port = send_params
-        
-        logging.info(f"Sending {len(filepaths)} files to {host}:{port} (Remote AE: {remote_ae}, Calling AE: {calling_ae})")
+        if send_params is None:
+            self._cleanup_temp_files(temp_files)
+            return
 
-        ae_instance = AE(ae_title=calling_ae) # Renamed from ae to ae_instance
-        
-        # Dynamically add contexts based on files to be sent
+        # Get unique SOP classes
         unique_sop_classes_to_send = set()
         for fp_ctx in filepaths:
             try:
-                ds_ctx = pydicom.dcmread(fp_ctx, stop_before_pixels=True) # Only need header for SOPClassUID
+                ds_ctx = pydicom.dcmread(fp_ctx, stop_before_pixels=True)
                 if hasattr(ds_ctx, 'SOPClassUID'):
                     unique_sop_classes_to_send.add(ds_ctx.SOPClassUID)
             except Exception as e_ctx:
-                logging.warning(f"Could not read SOPClassUID from {fp_ctx} for context setup: {e_ctx}")
+                logging.warning(f"Could not read SOPClassUID from {fp_ctx}: {e_ctx}")
         
         if not unique_sop_classes_to_send:
-            QMessageBox.critical(self, "DICOM Send Error", "No valid SOP Class UIDs found in the selected files to determine transfer contexts.")
+            self._cleanup_temp_files(temp_files)
+            QMessageBox.critical(self, "DICOM Send Error", "No valid SOP Class UIDs found.")
             return
 
-        for sop_uid in unique_sop_classes_to_send:
-            ae_instance.add_requested_context(sop_uid) # Add specific SOP classes found in the files
-        ae_instance.add_requested_context(VERIFICATION_SOP_CLASS) # For C-ECHO
+        # Create progress dialog
+        self.send_progress = QProgressDialog("Preparing DICOM send...", "Cancel", 0, len(filepaths), self)
+        self.send_progress.setWindowTitle("DICOM Send Progress")
+        self.send_progress.setMinimumDuration(0)
+        self.send_progress.setValue(0)
+        self.send_progress.canceled.connect(self._cancel_dicom_send)
+        
+        # Start background send
+        self.send_worker = DicomSendWorker(filepaths, send_params, unique_sop_classes_to_send, temp_files)
+        self.send_worker.progress_updated.connect(self._on_send_progress)
+        self.send_worker.send_complete.connect(self._on_send_complete)
+        self.send_worker.send_failed.connect(self._on_send_failed)
+        self.send_worker.association_status.connect(self._on_association_status)
+        self.send_worker.start()
 
-        assoc = ae_instance.associate(host, port, ae_title=remote_ae)
-        if not assoc.is_established:
-            logging.error(f"Association to {host}:{port} ({remote_ae}) failed. Details: {assoc}")
-            QMessageBox.critical(self, "DICOM Send Failed", f"Association to {host}:{port} (Remote AE: {remote_ae}) failed.\nDetails: {assoc}")
-            return
+    def _on_send_progress(self, current, success, warnings, failed, current_file):
+        """Handle progress updates from send worker"""
+        if hasattr(self, 'send_progress'):
+            self.send_progress.setValue(current)
+            self.send_progress.setLabelText(f"Sending {current_file}\nSuccess: {success}, Warnings: {warnings}, Failed: {failed}")
 
-        logging.info("Association established.")
-        # C-ECHO (Verification)
-        echo_status = assoc.send_c_echo()
-        if echo_status and getattr(echo_status, 'Status', None) == 0x0000:
-            logging.info("C-ECHO verification successful.")
-        else:
-            logging.warning(f"C-ECHO verification failed or status not 0x0000. Status: {echo_status}")
-            # Optionally ask user if they want to proceed without successful C-ECHO
+    def _on_send_complete(self, success, warnings, failed, error_details):
+        """Handle successful completion of send"""
+        if hasattr(self, 'send_progress'):
+            self.send_progress.close()
+        
+        # Cleanup temp files
+        if hasattr(self.send_worker, 'temp_files'):
+            self._cleanup_temp_files(self.send_worker.temp_files)
+        
+        # Show results
+        msg = f"DICOM Send Complete.\n\nSuccess: {success}\nWarnings: {warnings}\nFailed: {failed}"
+        if self.send_worker.temp_files:
+            msg += f"\n\nConverted {len(self.send_worker.temp_files)} compressed images."
+        if error_details:
+            msg += "\n\nFirst few issues:\n" + "\n".join(error_details[:5])
+            if len(error_details) > 5:
+                msg += f"\n...and {len(error_details)-5} more."
+        
+        QMessageBox.information(self, "DICOM Send Report", msg)
+        logging.info(msg)
 
-        # Progress Dialog
-        total_files = len(filepaths)
-        # total_bytes = sum(os.path.getsize(fp) for fp in filepaths if os.path.exists(fp)) # Can be slow for many files
-        # mb_total = total_bytes / (1024 * 1024)
-        progress = QProgressDialog("Sending DICOM files...", "Cancel", 0, total_files, self)
-        progress.setWindowTitle("DICOM Send Progress"); progress.setMinimumDuration(0); progress.setValue(0)
-        # progress.setLabelText(f"Sent 0/{total_files} images, 0.0/{mb_total:.1f} MB")
+    def _on_send_failed(self, error_message):
+        """Handle send failure"""
+        if hasattr(self, 'send_progress'):
+            self.send_progress.close()
+        
+        if hasattr(self.send_worker, 'temp_files'):
+            self._cleanup_temp_files(self.send_worker.temp_files)
+        
+        QMessageBox.critical(self, "DICOM Send Failed", error_message)
+        logging.error(error_message)
 
-        sent_ok = 0; sent_warning = 0; failed_send = 0
-        failed_details_list = [] # For storing details of failures
-        # sent_bytes = 0
+    def _on_association_status(self, status_message):
+        """Handle association status updates"""
+        if hasattr(self, 'send_progress'):
+            self.send_progress.setLabelText(status_message)
 
-        for idx, fp_send in enumerate(filepaths):
-            progress.setValue(idx + 1)
-            # mb_sent = sent_bytes / (1024 * 1024)
-            # progress.setLabelText(f"Sent {sent_ok+sent_warning}/{total_files} images, {mb_sent:.1f}/{mb_total:.1f} MB. Failed: {failed_send}")
-            progress.setLabelText(f"Sending {idx+1}/{total_files}. Success: {sent_ok}, Warn: {sent_warning}, Fail: {failed_send}")
+    def _cancel_dicom_send(self):
+        """Cancel the DICOM send operation"""
+        if hasattr(self, 'send_worker') and self.send_worker.isRunning():
+            self.send_worker.cancel()
+            self.send_worker.wait(3000)
+            if self.send_worker.isRunning():
+                self.send_worker.terminate()
+            
+            if hasattr(self.send_worker, 'temp_files'):
+                self._cleanup_temp_files(self.send_worker.temp_files)
 
-            if progress.wasCanceled():
-                failed_details_list.append("User cancelled operation.")
-                break
-            QApplication.processEvents()
+    def _cleanup_temp_files(self, temp_files):
+        """Clean up temporary files"""
+        for temp_file in temp_files:
             try:
-                ds_send = pydicom.dcmread(fp_send)
-                # Check if the SOP Class for this dataset is supported by the association
-                if not any(ctx.abstract_syntax == ds_send.SOPClassUID and ctx.result == 0x00 for ctx in assoc.accepted_contexts):
-                    err_msg = f"{os.path.basename(fp_send)}: SOP Class {ds_send.SOPClassUID} not accepted by remote."
-                    logging.error(err_msg)
-                    failed_details_list.append(err_msg)
-                    failed_send += 1
-                    continue
-
-                status = assoc.send_c_store(ds_send)
-                # file_size = os.path.getsize(fp_send) if os.path.exists(fp_send) else 0 # For byte count
-
-                if status:
-                    status_code = getattr(status, "Status", -1) # Default to -1 if Status attr missing
-                    if status_code == 0x0000: # Success
-                        sent_ok += 1
-                        # sent_bytes += file_size
-                    elif status_code in [0xB000, 0xB006, 0xB007]: # Warnings considered "sent" but with issues
-                        sent_warning +=1
-                        # sent_bytes += file_size
-                        warn_msg = f"{os.path.basename(fp_send)}: Sent with warning, Status 0x{status_code:04X}"
-                        logging.warning(warn_msg)
-                        failed_details_list.append(warn_msg) # Also list warnings in details
-                    else: # Failure
-                        err_msg = f"{os.path.basename(fp_send)}: C-STORE failed, Status 0x{status_code:04X}"
-                        logging.error(err_msg + f" - {status}")
-                        failed_details_list.append(err_msg)
-                        failed_send += 1
-                else: # No status object returned
-                    err_msg = f"{os.path.basename(fp_send)}: C-STORE failed, no status returned."
-                    logging.error(err_msg)
-                    failed_details_list.append(err_msg)
-                    failed_send += 1
-            except Exception as e_store:
-                err_msg = f"{os.path.basename(fp_send)}: Exception - {e_store}"
-                logging.error(f"Send failed for {fp_send}: {e_store}", exc_info=True)
-                failed_details_list.append(err_msg)
-                failed_send += 1
-        
-        assoc.release()
-        progress.close() # Ensure progress dialog is closed
-        
-        msg_final = f"DICOM Send Complete.\n\nSuccess: {sent_ok}\nSent with Warnings: {sent_warning}\nFailed: {failed_send}"
-        if failed_details_list:
-            msg_final += "\n\nDetails (first few issues):\n" + "\n".join(failed_details_list[:5]) # Show first 5
-            if len(failed_details_list) > 5: msg_final += f"\n...and {len(failed_details_list)-5} more (see application logs)."
-        logging.info(msg_final) # Log the full summary
-        QMessageBox.information(self, "DICOM Send Report", msg_final)
+                os.remove(temp_file)
+                logging.info(f"Cleaned up temp file: {os.path.basename(temp_file)}")
+            except Exception as e:
+                logging.warning(f"Could not remove temp file {temp_file}: {e}")
 
 
     def _collect_instance_filepaths(self, tree_item): # User's original
@@ -3132,6 +3243,69 @@ class MainWindow(QMainWindow):
         
         for result in results[:10]:  # Show top 10 slowest
             print(f"{result['filename']:<15} {result['load_time']:<7.2f}s {result['pixel_time']:<7.2f}s {result['total_time']:<7.2f}s")
+
+    def _convert_for_dicom_send(self, filepaths, show_progress=True):
+        """Convert compressed images to uncompressed for better DICOM send compatibility"""
+        converted_files = []
+        temp_files = []  # Track temp files for cleanup
+        
+        if show_progress:
+            progress = QProgressDialog("Preparing files for DICOM send...", "Cancel", 0, len(filepaths), self)
+            progress.setWindowTitle("Converting Images")
+            progress.setMinimumDuration(0)
+            progress.setValue(0)
+        
+        for idx, filepath in enumerate(filepaths):
+            if show_progress:
+                progress.setValue(idx)
+                if progress.wasCanceled():
+                    # Cleanup temp files if cancelled
+                    for temp_file in temp_files:
+                        try:
+                            os.remove(temp_file)
+                        except:
+                            pass
+                    return None
+                QApplication.processEvents()
+            
+            try:
+                ds = pydicom.dcmread(filepath, stop_before_pixels=True)
+                transfer_syntax = str(ds.file_meta.TransferSyntaxUID)
+                
+                # Check if conversion is needed
+                if transfer_syntax in ['1.2.840.10008.1.2.4.90', '1.2.840.10008.1.2.4.91']:  # JPEG2000
+                    logging.info(f"Converting compressed file: {os.path.basename(filepath)}")
+                    
+                    # Read full dataset
+                    ds_full = pydicom.dcmread(filepath)
+                    
+                    # Force decompress pixel data
+                    _ = ds_full.pixel_array  # This decompresses the data
+                    
+                    # Change to uncompressed transfer syntax
+                    ds_full.file_meta.TransferSyntaxUID = '1.2.840.10008.1.2'  # Implicit VR Little Endian
+                    
+                    # Create temp file
+                    temp_filepath = filepath + "_temp_uncompressed.dcm"
+                    ds_full.save_as(temp_filepath, write_like_original=False)
+                    
+                    converted_files.append(temp_filepath)
+                    temp_files.append(temp_filepath)
+                    logging.info(f"Converted {os.path.basename(filepath)} to uncompressed")
+                else:
+                    # No conversion needed
+                    converted_files.append(filepath)
+                    
+            except Exception as e:
+                logging.error(f"Failed to process {filepath}: {e}")
+                # Use original file if conversion fails
+                converted_files.append(filepath)
+        
+        if show_progress:
+            progress.setValue(len(filepaths))
+            progress.close()
+        
+        return converted_files, temp_files
 
 # --- Main Execution ---
 if __name__ == "__main__":
