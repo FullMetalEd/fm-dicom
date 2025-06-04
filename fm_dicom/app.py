@@ -825,7 +825,7 @@ class DicomSendWorker(QThread):
         return any(keyword in error_lower for keyword in format_keywords)
     
     def _convert_incompatible_files(self, filepaths):
-        """Convert incompatible files to uncompressed format"""
+        """Convert incompatible files to standard uncompressed format with validation"""
         converted_files = []
         total_files = len(filepaths)
         
@@ -837,81 +837,166 @@ class DicomSendWorker(QThread):
             self.conversion_progress.emit(idx, total_files, os.path.basename(filepath))
             
             try:
-                # Read the full dataset (including pixels)
-                ds = pydicom.dcmread(filepath)
+                # Read original file
+                ds_original = pydicom.dcmread(filepath)
+                original_ts = str(ds_original.file_meta.TransferSyntaxUID)
                 
-                # Check if this is actually compressed
-                transfer_syntax = str(ds.file_meta.TransferSyntaxUID)
-                
-                # Only convert if it's actually compressed
-                if transfer_syntax in [
+                # Check if conversion is needed
+                compressed_syntaxes = [
                     '1.2.840.10008.1.2.4.90',  # JPEG 2000 Lossless
                     '1.2.840.10008.1.2.4.91',  # JPEG 2000
                     '1.2.840.10008.1.2.4.50',  # JPEG Baseline
                     '1.2.840.10008.1.2.4.51',  # JPEG Extended
                     '1.2.840.10008.1.2.4.57',  # JPEG Lossless
                     '1.2.840.10008.1.2.4.70',  # JPEG Lossless SV1
-                ]:
-                    logging.info(f"Converting {os.path.basename(filepath)} from {transfer_syntax}")
-                    
-                    # Force pixel data access to decompress
-                    try:
-                        pixel_array = ds.pixel_array
-                        logging.info(f"Successfully accessed pixel data: {pixel_array.shape}")
-                    except Exception as e:
-                        logging.error(f"Failed to access pixel data for {filepath}: {e}")
-                        # Use original file if pixel access fails
-                        converted_files.append(filepath)
-                        continue
-                    
-                    # Create new dataset with uncompressed transfer syntax
-                    # Use the server's preferred transfer syntax: Deflated Explicit VR Little Endian
-                    ds.file_meta.TransferSyntaxUID = '1.2.840.10008.1.2.1.99'  # Deflated Explicit VR Little Endian
-                    
-                    # Ensure pixel data is uncompressed
-                    if hasattr(ds, 'PixelData'):
-                        # The pixel data should now be uncompressed due to pixel_array access
-                        pass
-                    
-                    # Create temp file with more specific naming
-                    temp_filepath = filepath + f"_converted_deflated.dcm"
-                    
-                    # Save with explicit format enforcement
-                    ds.save_as(temp_filepath, enforce_file_format=True)
-                    
-                    # Verify the conversion worked
-                    try:
-                        ds_verify = pydicom.dcmread(temp_filepath, stop_before_pixels=True)
-                        verify_ts = str(ds_verify.file_meta.TransferSyntaxUID)
-                        logging.info(f"Conversion verified: {verify_ts}")
-                        
-                        if verify_ts == '1.2.840.10008.1.2.1.99':
-                            converted_files.append(temp_filepath)
-                            self.temp_files.append(temp_filepath)
-                            self.converted_count += 1
-                            logging.info(f"Successfully converted {os.path.basename(filepath)}")
-                        else:
-                            logging.warning(f"Conversion failed, transfer syntax still: {verify_ts}")
-                            converted_files.append(filepath)  # Use original
-                            
-                    except Exception as e:
-                        logging.error(f"Failed to verify conversion for {filepath}: {e}")
-                        converted_files.append(filepath)  # Use original
-                        
-                else:
-                    # File doesn't need conversion
-                    logging.info(f"File {os.path.basename(filepath)} doesn't need conversion: {transfer_syntax}")
+                    '1.2.840.10008.1.2.4.80',  # JPEG-LS Lossless
+                    '1.2.840.10008.1.2.4.81',  # JPEG-LS Lossy
+                ]
+                
+                if original_ts not in compressed_syntaxes:
+                    # No conversion needed
+                    logging.info(f"No conversion needed for {os.path.basename(filepath)}: {original_ts}")
                     converted_files.append(filepath)
+                    continue
+                
+                logging.info(f"Converting {os.path.basename(filepath)} from {original_ts}")
+                
+                # Create new dataset for conversion
+                ds_converted = pydicom.Dataset()
+                
+                # Copy all non-pixel data elements
+                for elem in ds_original:
+                    if elem.tag != (0x7fe0, 0x0010):  # Skip PixelData for now
+                        ds_converted[elem.tag] = elem
+                
+                # Handle pixel data conversion
+                try:
+                    # Force decompression by accessing pixel_array
+                    pixel_array = ds_original.pixel_array
+                    logging.info(f"Pixel array shape: {pixel_array.shape}, dtype: {pixel_array.dtype}")
+                    
+                    # Convert pixel array back to bytes in the correct format
+                    if pixel_array.dtype != np.uint16 and ds_original.BitsAllocated == 16:
+                        # Convert to uint16 if needed
+                        pixel_array = pixel_array.astype(np.uint16)
+                    elif pixel_array.dtype != np.uint8 and ds_original.BitsAllocated == 8:
+                        # Convert to uint8 if needed
+                        pixel_array = pixel_array.astype(np.uint8)
+                    
+                    # Convert back to bytes
+                    pixel_bytes = pixel_array.tobytes()
+                    
+                    # Set the uncompressed pixel data
+                    ds_converted.PixelData = pixel_bytes
+                    
+                    logging.info(f"Converted pixel data: {len(pixel_bytes)} bytes")
+                    
+                except Exception as e:
+                    logging.error(f"Failed to convert pixel data for {filepath}: {e}")
+                    converted_files.append(filepath)  # Use original
+                    continue
+                
+                # Create proper file meta information for uncompressed format
+                file_meta = pydicom.Dataset()
+                
+                # Copy essential file meta elements
+                if hasattr(ds_original, 'file_meta'):
+                    for elem in ds_original.file_meta:
+                        if elem.tag != (0x0002, 0x0010):  # Skip TransferSyntaxUID
+                            file_meta[elem.tag] = elem
+                
+                # Set transfer syntax to Explicit VR Little Endian (most compatible)
+                file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
+                file_meta.MediaStorageSOPClassUID = ds_converted.SOPClassUID
+                file_meta.MediaStorageSOPInstanceUID = ds_converted.SOPInstanceUID
+                
+                # Ensure required file meta elements
+                if not hasattr(file_meta, 'FileMetaInformationVersion'):
+                    file_meta.FileMetaInformationVersion = b'\x00\x01'
+                if not hasattr(file_meta, 'ImplementationClassUID'):
+                    file_meta.ImplementationClassUID = pydicom.uid.PYDICOM_IMPLEMENTATION_UID
+                if not hasattr(file_meta, 'ImplementationVersionName'):
+                    file_meta.ImplementationVersionName = 'PYDICOM ' + pydicom.__version__
+                
+                # Assign file meta to dataset
+                ds_converted.file_meta = file_meta
+                
+                # Update transfer syntax related elements in main dataset
+                ds_converted.file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
+                
+                # Create temp file
+                temp_filepath = filepath + "_converted_explicit_vr.dcm"
+                
+                # Save the converted file
+                ds_converted.save_as(temp_filepath, enforce_file_format=True)
+                
+                # Validate the converted file
+                if self._validate_converted_file(temp_filepath, filepath):
+                    converted_files.append(temp_filepath)
+                    self.temp_files.append(temp_filepath)
+                    self.converted_count += 1
+                    logging.info(f"Successfully converted and validated {os.path.basename(filepath)}")
+                else:
+                    logging.warning(f"Converted file failed validation: {os.path.basename(filepath)}")
+                    # Clean up failed conversion
+                    try:
+                        os.remove(temp_filepath)
+                    except:
+                        pass
+                    converted_files.append(filepath)  # Use original
                     
             except Exception as e:
-                logging.error(f"Failed to process {filepath}: {e}")
-                # Use original file if processing fails
-                converted_files.append(filepath)
+                logging.error(f"Failed to convert {filepath}: {e}", exc_info=True)
+                converted_files.append(filepath)  # Use original
         
         # Signal conversion complete
         self.conversion_progress.emit(total_files, total_files, "Conversion complete")
         
         return converted_files
+
+    def _validate_converted_file(self, converted_path, original_path):
+        """Validate that the converted file is readable and has correct pixel data"""
+        try:
+            # Read the converted file
+            ds_converted = pydicom.dcmread(converted_path)
+            ds_original = pydicom.dcmread(original_path)
+            
+            # Check basic DICOM validity
+            if not hasattr(ds_converted, 'SOPInstanceUID'):
+                logging.error("Converted file missing SOPInstanceUID")
+                return False
+            
+            # Check transfer syntax
+            converted_ts = str(ds_converted.file_meta.TransferSyntaxUID)
+            if converted_ts != pydicom.uid.ExplicitVRLittleEndian:
+                logging.error(f"Converted file has wrong transfer syntax: {converted_ts}")
+                return False
+            
+            # Check pixel data accessibility
+            try:
+                pixel_array_converted = ds_converted.pixel_array
+                pixel_array_original = ds_original.pixel_array
+                
+                # Check dimensions match
+                if pixel_array_converted.shape != pixel_array_original.shape:
+                    logging.error(f"Pixel array shapes don't match: {pixel_array_converted.shape} vs {pixel_array_original.shape}")
+                    return False
+                
+                # Check data types are reasonable
+                if pixel_array_converted.dtype not in [np.uint8, np.uint16, np.int16]:
+                    logging.error(f"Unexpected pixel data type: {pixel_array_converted.dtype}")
+                    return False
+                
+                logging.info(f"Validation passed: {pixel_array_converted.shape}, {pixel_array_converted.dtype}")
+                return True
+                
+            except Exception as e:
+                logging.error(f"Cannot access pixel data in converted file: {e}")
+                return False
+                
+        except Exception as e:
+            logging.error(f"Cannot read converted file {converted_path}: {e}")
+            return False
     
     def _cleanup_temp_files(self):
         """Clean up temporary files"""
