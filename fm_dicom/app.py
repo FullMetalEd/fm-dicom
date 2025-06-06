@@ -47,12 +47,12 @@ try:
         if gdcm_handler in handlers:
             handlers.remove(gdcm_handler)
             handlers.insert(0, gdcm_handler)
-        print("✅ GDCM forced available and prioritized")
+        logging.info("✅ GDCM forced available and prioritized")
     else:
-        print("❌ GDCM still not available")
+        logging.error("❌ GDCM still not available")
         
 except Exception as e:
-    print(f"❌ Error forcing GDCM: {e}")
+    logging.error(f"❌ Error forcing GDCM: {e}")
 
 
 class ZipExtractionWorker(QThread):
@@ -211,10 +211,10 @@ class DicomdirReader:
                     if hasattr(file_id, '__iter__') and not isinstance(file_id, str):
                         # Join the path components (works for lists, tuples, and MultiValue)
                         relative_path = os.path.join(*file_id)
-                        print(f"DEBUG: Joined path components {list(file_id)} -> {relative_path}")
+                        logging.debug(f"DEBUG: Joined path components {list(file_id)} -> {relative_path}")
                     else:
                         relative_path = str(file_id)
-                        print(f"DEBUG: Used string conversion: {relative_path}")
+                        logging.debug(f"DEBUG: Used string conversion: {relative_path}")
                     
                     # Convert to absolute path
                     full_path = os.path.join(self.base_directory, relative_path)
@@ -222,7 +222,7 @@ class DicomdirReader:
                     # Normalize path separators for current OS
                     full_path = os.path.normpath(full_path)
                     
-                    print(f"DEBUG: Final path: {full_path}")
+                    logging.debug(f"DEBUG: Final path: {full_path}")
                     
                     # Check if file exists
                     if os.path.exists(full_path):
@@ -393,7 +393,7 @@ def get_default_user_dir():
 def ensure_dir_exists(file_path):
     if not file_path:
         # Logging might not be set up when this is first called by load_config for default log path
-        print(f"Warning (ensure_dir_exists): Called with empty file_path.", file=sys.stderr)
+        logging.debug(f"Warning (ensure_dir_exists): Called with empty file_path.", file=sys.stderr)
         return False
     try:
         dir_name = os.path.dirname(file_path)
@@ -401,7 +401,7 @@ def ensure_dir_exists(file_path):
             os.makedirs(dir_name, exist_ok=True)
             return True
     except Exception as e:
-        print(f"Warning (ensure_dir_exists): Could not create directory for {file_path}: {e}", file=sys.stderr)
+        logging.error(f"Warning (ensure_dir_exists): Could not create directory for {file_path}: {e}", file=sys.stderr)
     return False
 
 def load_config(config_path_override=None):
@@ -465,11 +465,11 @@ def load_config(config_path_override=None):
                         if loaded_user_config is None: # If file had only comments or invalid YAML resulting in None
                             loaded_user_config = {}
                 # Use print here as logging might not be set up yet
-                print(f"INFO (load_config): Loaded configuration from {path_to_try}", file=sys.stderr)
+                logging.info(f"INFO (load_config): Loaded configuration from {path_to_try}", file=sys.stderr)
                 # loaded_config_source_path = path_to_try
                 break 
             except Exception as e:
-                print(f"Warning (load_config): Could not load/parse config from {path_to_try}: {e}", file=sys.stderr)
+                logging.critical(f"Warning (load_config): Could not load/parse config from {path_to_try}: {e}", file=sys.stderr)
                 loaded_user_config = None # Ensure reset
 
     final_config = default_config_data.copy()
@@ -482,13 +482,13 @@ def load_config(config_path_override=None):
             final_config[key] = os.path.expanduser(str(final_config[key]))
         elif key not in final_config: # Key missing entirely
              final_config[key] = default_config_data.get(key) # Fallback to default's default
-             print(f"Warning (load_config): Path key '{key}' missing, using default: {final_config[key]}", file=sys.stderr)
+             logging.critical(f"Warning (load_config): Path key '{key}' missing, using default: {final_config[key]}", file=sys.stderr)
         elif final_config[key] is None and key in default_config_data: # Key present but explicitly null
             final_config[key] = default_config_data[key] # Revert to default
-            print(f"Info (load_config): Path key '{key}' was null, reverted to default: {final_config[key]}", file=sys.stderr)
+            logging.info(f"Info (load_config): Path key '{key}' was null, reverted to default: {final_config[key]}", file=sys.stderr)
 
     if loaded_user_config is None: # No config file found or loaded successfully
-        print(f"INFO (load_config): No existing config found. Creating default at: {preferred_config_path}", file=sys.stderr)
+        logging.info(f"INFO (load_config): No existing config found. Creating default at: {preferred_config_path}", file=sys.stderr)
         if ensure_dir_exists(preferred_config_path): # Ensure config directory exists
             try:
                 with open(preferred_config_path, "w", encoding="utf-8") as f:
@@ -496,9 +496,9 @@ def load_config(config_path_override=None):
                 if final_config.get("log_path"): # Ensure default log directory exists
                     ensure_dir_exists(final_config["log_path"])
             except Exception as e:
-                print(f"ERROR (load_config): Could not create default config at {preferred_config_path}: {e}", file=sys.stderr)
+                logging.critical(f"ERROR (load_config): Could not create default config at {preferred_config_path}: {e}", file=sys.stderr)
         else:
-            print(f"ERROR (load_config): Could not create dir for default config: {os.path.dirname(preferred_config_path)}. Using in-memory defaults.", file=sys.stderr)
+            logging.critical(f"ERROR (load_config): Could not create dir for default config: {os.path.dirname(preferred_config_path)}. Using in-memory defaults.", file=sys.stderr)
     
     return final_config
 
@@ -1505,7 +1505,7 @@ class MainWindow(QMainWindow):
 
     def _load_zip_consolidated(self, zip_path):
         """Consolidated ZIP loading with DICOMDIR support"""
-        print(f"DEBUG: Loading ZIP file: {zip_path}")
+        logging.info(f"DEBUG: Loading ZIP file: {zip_path}")
         
         # Extract ZIP file
         extraction_dialog = ZipExtractionDialog(zip_path, self)
@@ -1515,19 +1515,19 @@ class MainWindow(QMainWindow):
         self.temp_dir = extraction_dialog.temp_dir
         all_extracted_files = extraction_dialog.extracted_files
         
-        print(f"DEBUG: Extracted {len(all_extracted_files)} files")
+        logging.info(f"DEBUG: Extracted {len(all_extracted_files)} files")
         
         # Try DICOMDIR first
         dicom_files = self._try_dicomdir_loading(self.temp_dir, all_extracted_files)
         if dicom_files:
-            print(f"DEBUG: DICOMDIR loading successful: {len(dicom_files)} files")
+            logging.debug(f"DEBUG: DICOMDIR loading successful: {len(dicom_files)} files")
             self.loaded_files = [(f, self.temp_dir) for f in dicom_files]
             self.populate_tree(dicom_files)
             self.statusBar().showMessage(f"Loaded {len(dicom_files)} DICOM files from DICOMDIR in ZIP")
             return True
         
         # Fallback to file scanning
-        print("DEBUG: DICOMDIR not found/failed, scanning all files")
+        logging.debug("DEBUG: DICOMDIR not found/failed, scanning all files")
         dicom_files = self._scan_files_for_dicom(all_extracted_files, "Scanning ZIP contents...")
         
         if not dicom_files:
@@ -1543,7 +1543,7 @@ class MainWindow(QMainWindow):
 
     def _load_directory_consolidated(self, dir_path):
         """Consolidated directory loading with DICOMDIR support"""
-        print(f"DEBUG: Loading directory: {dir_path}")
+        logging.info(f"DEBUG: Loading directory: {dir_path}")
         
         # Get all files in directory
         all_files = []
@@ -1554,14 +1554,14 @@ class MainWindow(QMainWindow):
         # Try DICOMDIR first
         dicom_files = self._try_dicomdir_loading(dir_path, all_files)
         if dicom_files:
-            print(f"DEBUG: DICOMDIR loading successful: {len(dicom_files)} files")
+            logging.debug(f"DEBUG: DICOMDIR loading successful: {len(dicom_files)} files")
             self.loaded_files = [(f, None) for f in dicom_files]
             self.populate_tree(dicom_files)
             self.statusBar().showMessage(f"Loaded {len(dicom_files)} DICOM files from DICOMDIR")
             return True
         
         # Fallback to file scanning
-        print("DEBUG: DICOMDIR not found/failed, scanning all files")
+        logging.debug("DEBUG: DICOMDIR not found/failed, scanning all files")
         dicom_files = self._scan_files_for_dicom(all_files, "Scanning directory...")
         
         if not dicom_files:
@@ -1590,7 +1590,7 @@ class MainWindow(QMainWindow):
         for file_path in all_files:
             if os.path.basename(file_path).upper() == 'DICOMDIR':
                 dicomdir_files.append(file_path)
-                print(f"DEBUG: Found DICOMDIR: {file_path}")
+                logging.debug(f"DEBUG: Found DICOMDIR: {file_path}")
         
         if not dicomdir_files:
             return []
@@ -1599,32 +1599,32 @@ class MainWindow(QMainWindow):
         dicomdir_path = dicomdir_files[0]
         dicomdir_dir = os.path.dirname(dicomdir_path)
         
-        print(f"DEBUG: Using DICOMDIR in directory: {dicomdir_dir}")
+        logging.debug(f"DEBUG: Using DICOMDIR in directory: {dicomdir_dir}")
         
         try:
             # Try using DicomdirReader
             reader = DicomdirReader()
             found_dicomdirs = reader.find_dicomdir(dicomdir_dir)
             
-            print(f"DEBUG: DicomdirReader.find_dicomdir returned: {found_dicomdirs}")
+            logging.debug(f"DEBUG: DicomdirReader.find_dicomdir returned: {found_dicomdirs}")
             
             if found_dicomdirs:
                 # DicomdirScanDialog expects the list of all files, not the directory!
                 dicomdir_dialog = DicomdirScanDialog(all_files, self)  # <-- Fixed: pass all_files
                 
                 if dicomdir_dialog.exec() == QDialog.DialogCode.Accepted and dicomdir_dialog.success:
-                    print(f"DEBUG: DicomdirScanDialog loaded {len(dicomdir_dialog.dicom_files)} files")
+                    logging.debug(f"DEBUG: DicomdirScanDialog loaded {len(dicomdir_dialog.dicom_files)} files")
                     return dicomdir_dialog.dicom_files
                 else:
                     error_msg = getattr(dicomdir_dialog, 'error_message', 'Unknown error')
-                    print(f"DEBUG: DicomdirScanDialog failed: {error_msg}")
+                    logging.debug(f"DEBUG: DicomdirScanDialog failed: {error_msg}")
                     QMessageBox.warning(self, "DICOMDIR Error", 
                                     f"Failed to read DICOMDIR: {error_msg}\n\nFalling back to file scanning...")
             else:
-                print("DEBUG: DicomdirReader found no DICOMDIR files")
+                logging.info("DEBUG: DicomdirReader found no DICOMDIR files")
                 
         except Exception as e:
-            print(f"DEBUG: Exception in DICOMDIR processing: {e}")
+            logging.error(f"DEBUG: Exception in DICOMDIR processing: {e}")
             QMessageBox.warning(self, "DICOMDIR Error", 
                             f"Error processing DICOMDIR: {str(e)}\n\nFalling back to file scanning...")
         
@@ -1652,7 +1652,7 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
         
         progress.close()
-        print(f"DEBUG: Found {len(dicom_files)} DICOM files out of {len(files)} total files")
+        logging.info(f"DEBUG: Found {len(dicom_files)} DICOM files out of {len(files)} total files")
         return dicom_files
 
     def _is_dicom_file(self, filepath):
@@ -2038,10 +2038,10 @@ class MainWindow(QMainWindow):
             
             # Diagnose if loading was slow
             if load_time > 0.5:  # If took more than 500ms
-                print(f"SLOW LOADING DETECTED ({load_time:.2f}s)")
+                logging.info(f"SLOW LOADING DETECTED ({load_time:.2f}s)")
                 self.diagnose_image_performance(ds, filepath)
             elif load_time > 0.1:  # If took more than 100ms but less than 500ms
-                print(f"Moderate loading time: {load_time:.2f}s for {os.path.basename(filepath)}")
+                logging.info(f"Moderate loading time: {load_time:.2f}s for {os.path.basename(filepath)}")
             
             self._update_image_preview(ds) # Call helper for preview logic
             
@@ -3476,35 +3476,35 @@ class MainWindow(QMainWindow):
     def diagnose_image_performance(self, ds, filepath):
         """Print key tags that affect image loading performance"""
         
-        print(f"\n=== PERFORMANCE DIAGNOSIS: {os.path.basename(filepath)} ===")
+        logging.info(f"\n=== PERFORMANCE DIAGNOSIS: {os.path.basename(filepath)} ===")
         
         # Most important: Transfer Syntax (compression method)
         transfer_syntax = getattr(ds.file_meta, 'TransferSyntaxUID', 'Unknown')
-        print(f"Transfer Syntax: {transfer_syntax}")
-        print(f"  Name: {getattr(transfer_syntax, 'name', 'Unknown')}")
+        logging.info(f"Transfer Syntax: {transfer_syntax}")
+        logging.info(f"  Name: {getattr(transfer_syntax, 'name', 'Unknown')}")
         
         # Image format tags
-        print(f"Photometric Interpretation: {getattr(ds, 'PhotometricInterpretation', 'Unknown')}")
-        print(f"Samples Per Pixel: {getattr(ds, 'SamplesPerPixel', 'Unknown')}")
-        print(f"Bits Allocated: {getattr(ds, 'BitsAllocated', 'Unknown')}")
-        print(f"Bits Stored: {getattr(ds, 'BitsStored', 'Unknown')}")
-        print(f"Pixel Representation: {getattr(ds, 'PixelRepresentation', 'Unknown')}")
+        logging.info(f"Photometric Interpretation: {getattr(ds, 'PhotometricInterpretation', 'Unknown')}")
+        logging.info(f"Samples Per Pixel: {getattr(ds, 'SamplesPerPixel', 'Unknown')}")
+        logging.info(f"Bits Allocated: {getattr(ds, 'BitsAllocated', 'Unknown')}")
+        logging.info(f"Bits Stored: {getattr(ds, 'BitsStored', 'Unknown')}")
+        logging.info(f"Pixel Representation: {getattr(ds, 'PixelRepresentation', 'Unknown')}")
         
         # Image size
         rows = getattr(ds, 'Rows', 'Unknown')
         cols = getattr(ds, 'Columns', 'Unknown') 
-        print(f"Image Size: {cols} x {rows}")
+        logging.info(f"Image Size: {cols} x {rows}")
         
         # Color/grayscale info
         planar_config = getattr(ds, 'PlanarConfiguration', 'Unknown')
         if planar_config != 'Unknown':
-            print(f"Planar Configuration: {planar_config}")
+            logging.info(f"Planar Configuration: {planar_config}")
         
-        print("=" * 50)
+        logging.info("=" * 50)
 
     def analyze_all_loaded_files(self):
         """Analyze performance characteristics of all loaded files"""
-        print("\n=== ANALYZING ALL LOADED FILES ===")
+        logging.info("\n=== ANALYZING ALL LOADED FILES ===")
         
         file_details = []
         
@@ -3541,47 +3541,47 @@ class MainWindow(QMainWindow):
                 })
                 
             except Exception as e:
-                print(f"Error reading {filepath}: {e}")
+                logging.info(f"Error reading {filepath}: {e}")
         
         # Sort by estimated uncompressed size (larger = potentially slower)
         file_details.sort(key=lambda x: x['estimated_uncompressed'], reverse=True)
         
-        print(f"\nDETAILED FILE ANALYSIS ({len(file_details)} files):")
-        print(f"{'Filename':<15} {'Dimensions':<10} {'Bits':<5} {'Photometric':<12} {'Uncompressed':<12} {'FileSize':<10} {'Compression':<10}")
-        print("-" * 90)
+        logging.info(f"\nDETAILED FILE ANALYSIS ({len(file_details)} files):")
+        logging.info(f"{'Filename':<15} {'Dimensions':<10} {'Bits':<5} {'Photometric':<12} {'Uncompressed':<12} {'FileSize':<10} {'Compression':<10}")
+        logging.info("-" * 90)
         
         for detail in file_details:
             uncompressed_mb = detail['estimated_uncompressed'] / (1024*1024)
             file_size_mb = detail['actual_file_size'] / (1024*1024)
             compression_ratio = detail['compression_ratio']
             
-            print(f"{detail['filename']:<15} {detail['dimensions']:<10} {detail['bits']:<5} "
+            logging.info(f"{detail['filename']:<15} {detail['dimensions']:<10} {detail['bits']:<5} "
                 f"{detail['photometric']:<12} {uncompressed_mb:<11.1f}M {file_size_mb:<9.1f}M {compression_ratio:<9.1f}x")
         
         # Show summary stats
-        print(f"\nSUMMARY:")
+        logging.info(f"\nSUMMARY:")
         dimensions = [d['dimensions'] for d in file_details]
         unique_dimensions = list(set(dimensions))
-        print(f"Unique image dimensions: {unique_dimensions}")
+        logging.info(f"Unique image dimensions: {unique_dimensions}")
         
         sizes = [d['estimated_uncompressed'] for d in file_details]
-        print(f"Size range: {min(sizes)/(1024*1024):.1f}MB to {max(sizes)/(1024*1024):.1f}MB")
+        logging.info(f"Size range: {min(sizes)/(1024*1024):.1f}MB to {max(sizes)/(1024*1024):.1f}MB")
         
         # Identify likely slow files
         large_files = [d for d in file_details if d['estimated_uncompressed'] > 10*1024*1024]  # >10MB
         if large_files:
-            print(f"\nLIKELY SLOW FILES (>10MB uncompressed):")
+            logging.info(f"\nLIKELY SLOW FILES (>10MB uncompressed):")
             for f in large_files:
-                print(f"  {f['filename']}: {f['dimensions']}, {f['estimated_uncompressed']/(1024*1024):.1f}MB")
+                logging.info(f"  {f['filename']}: {f['dimensions']}, {f['estimated_uncompressed']/(1024*1024):.1f}MB")
 
     def test_loading_performance(self):
         """Test actual loading performance of all files"""
-        print("\n=== TESTING LOADING PERFORMANCE ===")
+        logging.info("\n=== TESTING LOADING PERFORMANCE ===")
         
         import time
         results = []
         
-        print("Testing file loading times...")
+        logging.info("Testing file loading times...")
         for i, (filepath, _) in enumerate(self.loaded_files):
             try:
                 start_time = time.time()
@@ -3607,20 +3607,20 @@ class MainWindow(QMainWindow):
                 
                 # Show progress
                 if (i + 1) % 10 == 0:
-                    print(f"  Tested {i + 1}/{len(self.loaded_files)} files...")
+                    logging.info(f"  Tested {i + 1}/{len(self.loaded_files)} files...")
                     
             except Exception as e:
-                print(f"  Error testing {filepath}: {e}")
+                logging.info(f"  Error testing {filepath}: {e}")
         
         # Sort by total time
         results.sort(key=lambda x: x['total_time'], reverse=True)
         
-        print(f"\nPERFORMANCE RESULTS (slowest first):")
-        print(f"{'Filename':<15} {'Load':<8} {'Pixels':<8} {'Total':<8}")
-        print("-" * 45)
+        logging.info(f"\nPERFORMANCE RESULTS (slowest first):")
+        logging.info(f"{'Filename':<15} {'Load':<8} {'Pixels':<8} {'Total':<8}")
+        logging.info("-" * 45)
         
         for result in results[:10]:  # Show top 10 slowest
-            print(f"{result['filename']:<15} {result['load_time']:<7.2f}s {result['pixel_time']:<7.2f}s {result['total_time']:<7.2f}s")
+            logging.info(f"{result['filename']:<15} {result['load_time']:<7.2f}s {result['pixel_time']:<7.2f}s {result['total_time']:<7.2f}s")
 
     def _convert_for_dicom_send(self, filepaths, show_progress=True):
         """Convert compressed images to uncompressed for better DICOM send compatibility"""
