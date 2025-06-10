@@ -134,7 +134,7 @@ class ZipExtractionDialog(QProgressDialog):
         
     def extraction_error(self, error_message):
         self.success = False
-        QMessageBox.critical(self, "Extraction Error", error_message)
+        FocusAwareMessageBox.critical(self, "Extraction Error", error_message)
         self.reject()
         
     def cancel_extraction(self):
@@ -337,6 +337,293 @@ class DicomdirScanDialog(QProgressDialog):
                 self.worker.wait()
         self.reject()
 
+class ExportWorker(QThread):
+    """Background worker for file export operations"""
+    progress_updated = pyqtSignal(int, int, str)  # current, total, current_operation
+    stage_changed = pyqtSignal(str)  # stage_description
+    export_complete = pyqtSignal(str, dict)  # output_path, statistics
+    export_failed = pyqtSignal(str)  # error_message
+    
+    def __init__(self, filepaths, export_type, output_path, temp_dir=None):
+        super().__init__()
+        self.filepaths = filepaths
+        self.export_type = export_type  # "directory", "zip", "dicomdir_zip"
+        self.output_path = output_path
+        self.temp_dir = temp_dir
+        self.cancelled = False
+        
+    def run(self):
+        try:
+            if self.export_type == "directory":
+                self._export_directory()
+            elif self.export_type == "zip":
+                self._export_zip()
+            elif self.export_type == "dicomdir_zip":
+                self._export_dicomdir_zip()
+            else:
+                raise ValueError(f"Unknown export type: {self.export_type}")
+                
+        except Exception as e:
+            logging.error(f"Export worker failed: {e}", exc_info=True)
+            self.export_failed.emit(str(e))
+    
+    def cancel(self):
+        """Cancel the export operation"""
+        self.cancelled = True
+        
+    def _export_directory(self):
+        """Export files to directory"""
+        self.stage_changed.emit("Exporting files to directory...")
+        
+        exported_count = 0
+        errors = []
+        total_files = len(self.filepaths)
+        
+        for idx, fp in enumerate(self.filepaths):
+            if self.cancelled:
+                return
+                
+            try:
+                out_path = os.path.join(self.output_path, os.path.basename(fp))
+                shutil.copy2(fp, out_path)
+                exported_count += 1
+                
+                # Emit progress
+                self.progress_updated.emit(idx + 1, total_files, f"Copying {os.path.basename(fp)}")
+                
+            except Exception as e:
+                errors.append(f"Failed to export {os.path.basename(fp)}: {e}")
+                logging.error(f"Failed to copy {fp}: {e}")
+        
+        # Calculate statistics
+        stats = {
+            'exported_count': exported_count,
+            'total_files': total_files,
+            'errors': errors,
+            'export_type': 'Directory'
+        }
+        
+        self.export_complete.emit(self.output_path, stats)
+        
+    def _export_zip(self):
+        """Export files to ZIP archive"""
+        self.stage_changed.emit("Creating ZIP archive...")
+        
+        zipped_count = 0
+        errors = []
+        total_files = len(self.filepaths)
+        
+        try:
+            with zipfile.ZipFile(self.output_path, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
+                for idx, fp in enumerate(self.filepaths):
+                    if self.cancelled:
+                        return
+                        
+                    try:
+                        zipf.write(fp, arcname=os.path.basename(fp))
+                        zipped_count += 1
+                        
+                        # Emit progress
+                        self.progress_updated.emit(idx + 1, total_files, f"Adding {os.path.basename(fp)}")
+                        
+                    except Exception as e:
+                        errors.append(f"Failed to add {os.path.basename(fp)}: {e}")
+                        logging.error(f"Failed to add to ZIP {fp}: {e}")
+                        
+        except Exception as e:
+            self.export_failed.emit(f"Failed to create ZIP: {e}")
+            return
+        
+        # Calculate statistics
+        stats = {
+            'exported_count': zipped_count,
+            'total_files': total_files,
+            'errors': errors,
+            'export_type': 'ZIP'
+        }
+        
+        self.export_complete.emit(self.output_path, stats)
+        
+    def _export_dicomdir_zip(self):
+        """Export files as ZIP with DICOMDIR"""
+        try:
+            # Step 1: Analyze files (10%)
+            self.stage_changed.emit("Analyzing DICOM files...")
+            self.progress_updated.emit(10, 100, "Analyzing file structure...")
+            
+            if self.cancelled:
+                return
+                
+            path_generator = DicomPathGenerator()
+            file_mapping = path_generator.generate_paths(self.filepaths)
+            
+            if not file_mapping:
+                raise Exception("No valid DICOM files found for export")
+            
+            # Step 2: Copy files to structure (20-70%)
+            self.stage_changed.emit("Creating DICOM directory structure...")
+            copied_mapping = self._copy_files_to_dicom_structure(file_mapping)
+            
+            if self.cancelled:
+                return
+            
+            # Step 3: Generate DICOMDIR (70-80%)
+            self.stage_changed.emit("Generating DICOMDIR...")
+            self.progress_updated.emit(75, 100, "Creating DICOMDIR file...")
+            
+            builder = DicomdirBuilder("DICOM_EXPORT")
+            builder.add_dicom_files(copied_mapping)
+            dicomdir_path = os.path.join(self.temp_dir, "DICOMDIR")
+            builder.generate_dicomdir(dicomdir_path)
+            
+            if self.cancelled:
+                return
+            
+            # Step 4: Create ZIP (80-100%)
+            self.stage_changed.emit("Creating ZIP archive...")
+            self._create_zip_from_temp_directory()
+            
+            # Calculate statistics
+            total_size = sum(os.path.getsize(f) for f in self.filepaths if os.path.exists(f))
+            stats = {
+                'exported_count': len(file_mapping),
+                'total_files': len(self.filepaths),
+                'total_size_mb': total_size / (1024 * 1024),
+                'patients': len(set(self._extract_patient_ids())),
+                'errors': [],
+                'export_type': 'DICOMDIR ZIP'
+            }
+            
+            self.export_complete.emit(self.output_path, stats)
+            
+        except Exception as e:
+            self.export_failed.emit(f"DICOMDIR ZIP export failed: {e}")
+    
+    def _copy_files_to_dicom_structure(self, file_mapping):
+        """Copy files to DICOM standard structure with progress updates"""
+        copied_mapping = {}
+        total_files = len(file_mapping)
+        
+        for idx, (original_path, dicom_path) in enumerate(file_mapping.items()):
+            if self.cancelled:
+                break
+                
+            full_target_path = os.path.join(self.temp_dir, dicom_path)
+            
+            try:
+                # Create directory structure
+                os.makedirs(os.path.dirname(full_target_path), exist_ok=True)
+                
+                # Copy file
+                shutil.copy2(original_path, full_target_path)
+                copied_mapping[original_path] = full_target_path
+                
+            except Exception as e:
+                logging.error(f"Failed to copy {original_path}: {e}")
+                continue
+            
+            # Update progress (20% to 70% range)
+            file_progress = 20 + int((idx + 1) / total_files * 50)
+            self.progress_updated.emit(file_progress, 100, f"Copying {os.path.basename(original_path)}")
+        
+        return copied_mapping
+    
+    def _create_zip_from_temp_directory(self):
+        """Create ZIP from temporary directory with progress"""
+        # Get all files in temp directory
+        all_files = []
+        for root, dirs, files in os.walk(self.temp_dir):
+            for file in files:
+                all_files.append(os.path.join(root, file))
+        
+        total_files = len(all_files)
+        
+        with zipfile.ZipFile(self.output_path, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
+            for idx, file_path in enumerate(all_files):
+                if self.cancelled:
+                    break
+                    
+                arcname = os.path.relpath(file_path, self.temp_dir)
+                zipf.write(file_path, arcname)
+                
+                # Update progress (80% to 100% range)
+                zip_progress = 80 + int((idx + 1) / total_files * 20)
+                self.progress_updated.emit(zip_progress, 100, f"Adding {os.path.basename(file_path)} to ZIP")
+    
+    def _extract_patient_ids(self):
+        """Extract unique patient IDs from file list"""
+        patient_ids = []
+        for fp in self.filepaths:
+            try:
+                ds = pydicom.dcmread(fp, stop_before_pixels=True)
+                patient_id = str(getattr(ds, 'PatientID', 'UNKNOWN'))
+                patient_ids.append(patient_id)
+            except:
+                pass
+        return patient_ids
+
+
+class FocusAwareMessageBox(QMessageBox):
+    """QMessageBox that doesn't steal focus unless app is already active"""
+    
+    def __init__(self, icon, title, text, buttons=QMessageBox.StandardButton.Ok, parent=None):
+        super().__init__(icon, title, text, buttons, parent)
+        
+        # If app doesn't have focus, prevent focus stealing
+        if not self._app_has_focus():
+            self.setWindowFlags(
+                self.windowFlags() | 
+                Qt.WindowType.WindowDoesNotAcceptFocus
+            )
+    
+    def _app_has_focus(self):
+        """Check if our app currently has focus"""
+        return QApplication.activeWindow() is not None
+    
+    @staticmethod
+    def information(parent, title, text, *args, **kwargs):
+        """Drop-in replacement for QMessageBox.information"""
+        msgbox = FocusAwareMessageBox(QMessageBox.Icon.Information, title, text, parent=parent)
+        return msgbox.exec()
+    
+    @staticmethod
+    def warning(parent, title, text, *args, **kwargs):
+        """Drop-in replacement for QMessageBox.warning"""
+        msgbox = FocusAwareMessageBox(QMessageBox.Icon.Warning, title, text, parent=parent)
+        return msgbox.exec()
+    
+    @staticmethod
+    def critical(parent, title, text, *args, **kwargs):
+        """Drop-in replacement for QMessageBox.critical"""
+        msgbox = FocusAwareMessageBox(QMessageBox.Icon.Critical, title, text, parent=parent)
+        return msgbox.exec()
+    
+    @staticmethod
+    def question(parent, title, text, buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, defaultButton=QMessageBox.StandardButton.NoButton, *args, **kwargs):
+        """Drop-in replacement for QMessageBox.question"""
+        msgbox = FocusAwareMessageBox(QMessageBox.Icon.Question, title, text, buttons, parent)
+        if defaultButton != QMessageBox.StandardButton.NoButton:
+            msgbox.setDefaultButton(defaultButton)
+        return msgbox.exec()
+
+
+class FocusAwareProgressDialog(QProgressDialog):
+    """QProgressDialog that doesn't steal focus unless app is already active"""
+    
+    def __init__(self, labelText, cancelButtonText, minimum, maximum, parent=None):
+        super().__init__(labelText, cancelButtonText, minimum, maximum, parent)
+        
+        # If app doesn't have focus, prevent focus stealing
+        if not self._app_has_focus():
+            self.setWindowFlags(
+                self.windowFlags() | 
+                Qt.WindowType.WindowDoesNotAcceptFocus
+            )
+            self.setModal(False)  # Don't block other apps
+    
+    def _app_has_focus(self):
+        """Check if our app currently has focus"""
+        return QApplication.activeWindow() is not None
 
 # Add depth method to QTreeWidgetItem
 def depth(self):
@@ -1077,7 +1364,7 @@ class DicomSendDialog(QDialog): # User's original DicomSendDialog
             if not (0 < port_val < 65536):
                 raise ValueError("Port out of range")
         except ValueError:
-            QMessageBox.critical(self, "Invalid Port", "Port must be a number between 1 and 65535.")
+            FocusAwareMessageBox.critical(self, "Invalid Port", "Port must be a number between 1 and 65535.")
             return None # Indicate error
         
         return (
@@ -1927,6 +2214,13 @@ class MainWindow(QMainWindow):
         # Save window size before saving the rest of the config
         if hasattr(self, 'button_widget') and self.button_widget:
             self._remove_button_widget()
+
+        # Clean up export worker if running
+        if hasattr(self, 'export_worker') and self.export_worker and self.export_worker.isRunning():
+            self.export_worker.cancel()
+            self.export_worker.wait(3000)
+            if self.export_worker.isRunning():
+                self.export_worker.terminate()
                 
         if self.config: # Ensure config object exists
             self.config["window_size"] = [self.size().width(), self.size().height()]
@@ -1971,12 +2265,12 @@ class MainWindow(QMainWindow):
             elif path.lower().endswith('.dcm'):
                 return self._load_single_file(path)
             else:
-                QMessageBox.warning(self, "Unsupported", "Only .dcm and .zip files are supported.")
+                FocusAwareMessageBox.warning(self, "Unsupported", "Only .dcm and .zip files are supported.")
                 return False
         elif os.path.isdir(path):
             return self._load_directory_consolidated(path)
         else:
-            QMessageBox.warning(self, "Not Found", f"Path does not exist: {path}")
+            FocusAwareMessageBox.warning(self, "Not Found", f"Path does not exist: {path}")
             return False
 
     def _load_zip_consolidated(self, zip_path):
@@ -2007,7 +2301,7 @@ class MainWindow(QMainWindow):
         dicom_files = self._scan_files_for_dicom(all_extracted_files, "Scanning ZIP contents...")
         
         if not dicom_files:
-            QMessageBox.warning(self, "No DICOM", 
+            FocusAwareMessageBox.warning(self, "No DICOM", 
                             f"No DICOM files found in ZIP archive.\nExtracted {len(all_extracted_files)} files.")
             self.cleanup_temp_dir()
             return False
@@ -2041,7 +2335,7 @@ class MainWindow(QMainWindow):
         dicom_files = self._scan_files_for_dicom(all_files, "Scanning directory...")
         
         if not dicom_files:
-            QMessageBox.warning(self, "No DICOM", "No DICOM files found in directory.")
+            FocusAwareMessageBox.warning(self, "No DICOM", "No DICOM files found in directory.")
             return False
         
         self.loaded_files = [(f, None) for f in dicom_files]
@@ -2094,14 +2388,14 @@ class MainWindow(QMainWindow):
                 else:
                     error_msg = getattr(dicomdir_dialog, 'error_message', 'Unknown error')
                     logging.debug(f"DEBUG: DicomdirScanDialog failed: {error_msg}")
-                    QMessageBox.warning(self, "DICOMDIR Error", 
+                    FocusAwareMessageBox.warning(self, "DICOMDIR Error", 
                                     f"Failed to read DICOMDIR: {error_msg}\n\nFalling back to file scanning...")
             else:
                 logging.info("DEBUG: DicomdirReader found no DICOMDIR files")
                 
         except Exception as e:
             logging.error(f"DEBUG: Exception in DICOMDIR processing: {e}")
-            QMessageBox.warning(self, "DICOMDIR Error", 
+            FocusAwareMessageBox.warning(self, "DICOMDIR Error", 
                             f"Error processing DICOMDIR: {str(e)}\n\nFalling back to file scanning...")
         
         return []
@@ -2111,7 +2405,7 @@ class MainWindow(QMainWindow):
         Scan a list of files and return those that are DICOM files.
         Shows progress dialog during scanning.
         """
-        progress = QProgressDialog(progress_text, "Cancel", 0, len(files), self)
+        progress = FocusAwareProgressDialog(progress_text, "Cancel", 0, len(files), self)
         progress.setWindowTitle("Loading Files")
         progress.setMinimumDuration(0)
         progress.setValue(0)
@@ -2286,7 +2580,7 @@ class MainWindow(QMainWindow):
         """Validate only the selected items in the tree"""
         selected = self.tree.selectedItems()
         if not selected:
-            QMessageBox.warning(self, "No Selection", "Please select items to validate.")
+            FocusAwareMessageBox.warning(self, "No Selection", "Please select items to validate.")
             return
         
         # Collect file paths from selected items
@@ -2296,7 +2590,7 @@ class MainWindow(QMainWindow):
             file_paths.extend(paths)
         
         if not file_paths:
-            QMessageBox.warning(self, "No Files", "No DICOM files found in selection.")
+            FocusAwareMessageBox.warning(self, "No Files", "No DICOM files found in selection.")
             return
         
         # Remove duplicates
@@ -2308,7 +2602,7 @@ class MainWindow(QMainWindow):
             run_validation(file_paths, self)
         except Exception as e:
             logging.error(f"Validation error: {e}", exc_info=True)
-            QMessageBox.critical(self, "Validation Error", 
+            FocusAwareMessageBox.critical(self, "Validation Error", 
                             f"An error occurred during validation:\n{str(e)}")
 
     def filter_tree_items(self, text):
@@ -2369,7 +2663,7 @@ class MainWindow(QMainWindow):
         hierarchy = {}
         self.file_metadata = {}
         modalities = set()
-        progress = QProgressDialog("Loading DICOM headers...", "Cancel", 0, len(files), self)
+        progress = FocusAwareProgressDialog("Loading DICOM headers...", "Cancel", 0, len(files), self)
         progress.setWindowTitle("Loading DICOM Files")
         progress.setMinimumDuration(0)
         progress.setValue(0)
@@ -2470,7 +2764,7 @@ class MainWindow(QMainWindow):
             # self.tag_view.setText("\n".join(tags)) # tag_view not defined
         except Exception as e:
             # self.tag_view.setText(f"Error reading file: {e}") # tag_view not defined
-            QMessageBox.critical(self, "Error", f"Error reading file: {e}")
+            FocusAwareMessageBox.critical(self, "Error", f"Error reading file: {e}")
 
 
     def display_selected_tree_file(self): # User's original method with performance diagnosis
@@ -2527,7 +2821,7 @@ class MainWindow(QMainWindow):
             self.current_ds = None
             self.image_label.clear()
             self.image_label.setVisible(False)
-            QMessageBox.critical(self, "Error", f"Error reading file: {filepath}\n{e}")
+            FocusAwareMessageBox.critical(self, "Error", f"Error reading file: {filepath}\n{e}")
             logging.error(f"Error reading file {filepath}: {e}", exc_info=True)
 
     def _update_image_preview(self, ds):
@@ -2658,7 +2952,7 @@ class MainWindow(QMainWindow):
             self.button_widget = None
         
         # Show progress dialog
-        progress = QProgressDialog(f"Loading {size_mb:.1f}MB image...", "Cancel", 0, 100, self)
+        progress = FocusAwareProgressDialog(f"Loading {size_mb:.1f}MB image...", "Cancel", 0, 100, self)
         progress.setWindowTitle("Loading Large Image")
         progress.setMinimumDuration(0)
         progress.setValue(0)
@@ -2803,13 +3097,13 @@ class MainWindow(QMainWindow):
 
     def save_tag_changes(self): # User's original
         if not self.current_ds or not self.current_filepath:
-            QMessageBox.warning(self, "No File", "No DICOM file selected.")
+            FocusAwareMessageBox.warning(self, "No File", "No DICOM file selected.")
             return
 
         level = self.edit_level_combo.currentText()
         selected = self.tree.selectedItems()
         if not selected:
-            QMessageBox.warning(self, "No Selection", "Please select a node in the tree.")
+            FocusAwareMessageBox.warning(self, "No Selection", "Please select a node in the tree.")
             return
         tree_item = selected[0]
 
@@ -2826,7 +3120,7 @@ class MainWindow(QMainWindow):
 
         filepaths = self._collect_instance_filepaths(node_at_target_level) # Use the adjusted node
         if not filepaths:
-            QMessageBox.warning(self, "No Instances", "No DICOM instances found under this node for the selected level.")
+            FocusAwareMessageBox.warning(self, "No Instances", "No DICOM instances found under this node for the selected level.")
             return
 
         edits = []
@@ -2843,17 +3137,17 @@ class MainWindow(QMainWindow):
                     # Use original_elem to guide type conversion
                     edits.append({'tag': tag_tuple, 'value_str': new_value_item.text(), 'original_elem': original_elem})
                 except Exception as e:
-                    QMessageBox.warning(self, "Error", f"Failed to parse tag {tag_id_str} or get original element: {e}")
+                    FocusAwareMessageBox.warning(self, "Error", f"Failed to parse tag {tag_id_str} or get original element: {e}")
                     logging.error(f"Error parsing tag {tag_id_str}: {e}", exc_info=True)
 
 
         if not edits:
-            QMessageBox.information(self, "No Changes", "No tags were changed.")
+            FocusAwareMessageBox.information(self, "No Changes", "No tags were changed.")
             return
 
         updated_count = 0
         failed_files = []
-        progress = QProgressDialog(f"Saving changes to {level}...", "Cancel", 0, len(filepaths), self)
+        progress = FocusAwareProgressDialog(f"Saving changes to {level}...", "Cancel", 0, len(filepaths), self)
         progress.setWindowTitle("Saving Tag Changes"); progress.setMinimumDuration(0); progress.setValue(0)
 
         for idx, fp in enumerate(filepaths):
@@ -2901,7 +3195,7 @@ class MainWindow(QMainWindow):
         msg = f"Updated {updated_count} of {len(filepaths)} file(s) at the {level} level."
         if failed_files:
             msg += f"\nFailed to update: {', '.join(failed_files)}"
-        QMessageBox.information(self, "Batch Edit Complete", msg)
+        FocusAwareMessageBox.information(self, "Batch Edit Complete", msg)
         
         # Refresh view if the currently displayed file was part of the batch
         if self.current_filepath in filepaths:
@@ -2914,17 +3208,17 @@ class MainWindow(QMainWindow):
         """Edit a tag using searchable interface"""
         selected = self.tree.selectedItems()
         if not selected:
-            QMessageBox.warning(self, "No Selection", "Please select an instance in the tree.")
+            FocusAwareMessageBox.warning(self, "No Selection", "Please select an instance in the tree.")
             return
         item = selected[0]
         filepath = item.data(0, Qt.ItemDataRole.UserRole)
         if not filepath:
-            QMessageBox.warning(self, "No Instance", "Please select an instance node.")
+            FocusAwareMessageBox.warning(self, "No Instance", "Please select an instance node.")
             return
         try:
             ds = pydicom.dcmread(filepath)
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Could not read file: {e}")
+            FocusAwareMessageBox.critical(self, "Error", f"Could not read file: {e}")
             return
         
         # Show tag search dialog
@@ -2945,13 +3239,13 @@ class MainWindow(QMainWindow):
                 group, elem = tag_str[1:-1].split(',')
                 tag = (int(group, 16), int(elem, 16))
             except ValueError:
-                QMessageBox.warning(self, "Invalid Tag", "Invalid tag format.")
+                FocusAwareMessageBox.warning(self, "Invalid Tag", "Invalid tag format.")
                 return
         else:
             try:
                 tag = pydicom.tag.Tag(tag_str.strip())
             except ValueError:
-                QMessageBox.warning(self, "Invalid Tag", f"Tag '{tag_str}' not recognized.")
+                FocusAwareMessageBox.warning(self, "Invalid Tag", f"Tag '{tag_str}' not recognized.")
                 return
 
         # Check if tag exists and get current value
@@ -2962,12 +3256,12 @@ class MainWindow(QMainWindow):
             current_value = str(ds[tag].value)
         else:
             # Ask if user wants to add new tag
-            reply = QMessageBox.question(
+            reply = FocusAwareMessageBox.question(
                 self, "Tag Not Found", 
                 f"Tag {tag_info['name']} ({tag}) not found in this file. Add it as a new tag?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                FocusAwareMessageBox.StandardButton.Yes | FocusAwareMessageBox.StandardButton.No
             )
-            if reply != QMessageBox.StandardButton.Yes:
+            if reply != FocusAwareMessageBox.StandardButton.Yes:
                 return
                 
         # Show value entry dialog
@@ -3009,12 +3303,12 @@ class MainWindow(QMainWindow):
                 ds.add_new(tag, vr, converted_value)
                 
             ds.save_as(filepath)
-            QMessageBox.information(self, "Success", f"Tag {tag_info['name']} updated successfully.")
+            FocusAwareMessageBox.information(self, "Success", f"Tag {tag_info['name']} updated successfully.")
             self.display_selected_tree_file()
             
         except Exception as e:
             logging.error(f"Failed to update tag {tag}: {e}")
-            QMessageBox.critical(self, "Error", f"Failed to update tag: {str(e)}")
+            FocusAwareMessageBox.critical(self, "Error", f"Failed to update tag: {str(e)}")
 
 
 
@@ -3022,12 +3316,12 @@ class MainWindow(QMainWindow):
         """Batch edit tags using searchable interface"""
         selected = self.tree.selectedItems()
         if not selected:
-            QMessageBox.warning(self, "No Selection", "Please select a node in the tree.")
+            FocusAwareMessageBox.warning(self, "No Selection", "Please select a node in the tree.")
             return
         item = selected[0]
         filepaths = self._collect_instance_filepaths(item)
         if not filepaths:
-            QMessageBox.warning(self, "No Instances", "No DICOM instances found under this node.")
+            FocusAwareMessageBox.warning(self, "No Instances", "No DICOM instances found under this node.")
             return
 
         
@@ -3049,13 +3343,13 @@ class MainWindow(QMainWindow):
                 group, elem = tag_str[1:-1].split(',')
                 tag = (int(group, 16), int(elem, 16))
             except ValueError:
-                QMessageBox.warning(self, "Invalid Tag", "Invalid tag format.")
+                FocusAwareMessageBox.warning(self, "Invalid Tag", "Invalid tag format.")
                 return
         else:
             try:
                 tag = pydicom.tag.Tag(tag_str.strip())
             except ValueError:
-                QMessageBox.warning(self, "Invalid Tag", f"Tag '{tag_str}' not recognized.")
+                FocusAwareMessageBox.warning(self, "Invalid Tag", f"Tag '{tag_str}' not recognized.")
                 return
 
         # Check if tag exists in sample file
@@ -3067,7 +3361,7 @@ class MainWindow(QMainWindow):
             else:
                 current_value = "<New Tag>"
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Could not read sample file: {e}")
+            FocusAwareMessageBox.critical(self, "Error", f"Could not read sample file: {e}")
             return
 
         # Show value entry dialog
@@ -3080,21 +3374,21 @@ class MainWindow(QMainWindow):
         new_value = value_dialog.new_value
         
         # Confirm batch operation
-        reply = QMessageBox.question(
+        reply = FocusAwareMessageBox.question(
             self, "Confirm Batch Edit",
             f"This will update the tag '{tag_info['name']}' in {len(filepaths)} files.\n"
             f"New value: '{new_value}'\n\n"
             "This operation cannot be undone. Continue?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
+            FocusAwareMessageBox.StandardButton.Yes | FocusAwareMessageBox.StandardButton.No,
+            FocusAwareMessageBox.StandardButton.No
         )
-        if reply != QMessageBox.StandardButton.Yes:
+        if reply != FocusAwareMessageBox.StandardButton.Yes:
             return
 
         # Perform batch edit
         updated_count = 0
         failed_files = []
-        progress = QProgressDialog(f"Batch editing {tag_info['name']}...", "Cancel", 0, len(filepaths), self)
+        progress = FocusAwareProgressDialog(f"Batch editing {tag_info['name']}...", "Cancel", 0, len(filepaths), self)
         progress.setWindowTitle("Batch Tag Edit")
         progress.setMinimumDuration(0)
         progress.setValue(0)
@@ -3137,7 +3431,7 @@ class MainWindow(QMainWindow):
         if failed_files:
             msg += f"\nFailed: {len(failed_files)} files."
             
-        QMessageBox.information(self, "Batch Edit Complete", msg)
+        FocusAwareMessageBox.information(self, "Batch Edit Complete", msg)
         
         if self.current_filepath in filepaths:
             self.display_selected_tree_file()
@@ -3163,29 +3457,29 @@ class MainWindow(QMainWindow):
             return value_str
 
 
-    def save_as(self): # User's original, now with DICOMDIR ZIP option
+    def save_as(self): 
         selected = self.tree.selectedItems()
         if not selected:
-            QMessageBox.warning(self, "No Selection", "Please select a node in the tree to export.")
+            FocusAwareMessageBox.warning(self, "No Selection", "Please select a node in the tree to export.")
             return
         
-        # FIXED: Collect files from ALL selected items, not just the first one
+        # Collect files from ALL selected items
         filepaths = []
         for tree_item in selected:
             item_files = self._collect_instance_filepaths(tree_item)
             filepaths.extend(item_files)
         
-        # Remove duplicates (in case of overlapping selections)
+        # Remove duplicates
         filepaths = list(set(filepaths))
 
         if not filepaths:
-            QMessageBox.warning(self, "No Instances", "No DICOM instances found under the selected nodes.")
+            FocusAwareMessageBox.warning(self, "No Instances", "No DICOM instances found under the selected nodes.")
             return
 
         # Show selection summary
         logging.info(f"Collected {len(filepaths)} files from {len(selected)} selected items")
 
-        # MODIFIED: Add DICOMDIR ZIP option
+        # Get export type
         export_type, ok = QInputDialog.getItem(
             self, "Export Type", "Export as:", 
             ["Directory", "ZIP", "ZIP with DICOMDIR"], 0, False
@@ -3193,62 +3487,153 @@ class MainWindow(QMainWindow):
         if not ok:
             return
 
+        # Get output path based on export type
         if export_type == "Directory":
-            out_dir = QFileDialog.getExistingDirectory(self, "Select Export Directory", self.default_export_dir)
-            if not out_dir: return
-
-            exported_count = 0; errors = []
-            progress = QProgressDialog("Exporting files to directory...", "Cancel", 0, len(filepaths), self)
-            progress.setWindowTitle("Exporting to Directory"); progress.setMinimumDuration(0); progress.setValue(0)
-            for idx, fp in enumerate(filepaths):
-                progress.setValue(idx)
-                if progress.wasCanceled(): break
-                QApplication.processEvents()
-                try:
-                    out_path = os.path.join(out_dir, os.path.basename(fp))
-                    shutil.copy2(fp, out_path) 
-                    exported_count +=1
-                except Exception as e:
-                    errors.append(f"Failed to export {os.path.basename(fp)}: {e}")
-            progress.setValue(len(filepaths))
-            msg = f"Exported {exported_count} files to {out_dir}."
-            if errors: msg += "\n\nErrors:\n" + "\n".join(errors)
-            QMessageBox.information(self, "Export Complete", msg)
+            output_path = QFileDialog.getExistingDirectory(
+                self, "Select Export Directory", self.default_export_dir
+            )
+            if not output_path:
+                return
+            worker_export_type = "directory"
             
         elif export_type == "ZIP":
-            out_zip_path, _ = QFileDialog.getSaveFileName(self, "Save ZIP Archive", self.default_export_dir, "ZIP Archives (*.zip)")
-            if not out_zip_path: return
-            if not out_zip_path.lower().endswith('.zip'): out_zip_path += '.zip'
-
-            zipped_count = 0; errors = []
-            progress_zip = QProgressDialog("Creating ZIP archive...", "Cancel", 0, len(filepaths), self)
-            progress_zip.setWindowTitle("Creating ZIP"); progress_zip.setMinimumDuration(0); progress_zip.setValue(0)
-            try:
-                with zipfile.ZipFile(out_zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zipf:
-                    for idx, fp in enumerate(filepaths):
-                        progress_zip.setValue(idx)
-                        if progress_zip.wasCanceled(): break
-                        QApplication.processEvents()
-                        zipf.write(fp, arcname=os.path.basename(fp))
-                        zipped_count += 1
-                msg = f"Exported {zipped_count} files to {out_zip_path}."
-            except Exception as e:
-                msg = f"Failed to create ZIP: {e}"
-                logging.error(msg, exc_info=True)
-            progress_zip.setValue(len(filepaths))
-            if errors: msg += "\n\nErrors during zipping:\n" + "\n".join(errors)
-            QMessageBox.information(self, "Export Complete", msg)
+            output_path, _ = QFileDialog.getSaveFileName(
+                self, "Save ZIP Archive", self.default_export_dir, "ZIP Archives (*.zip)"
+            )
+            if not output_path:
+                return
+            if not output_path.lower().endswith('.zip'):
+                output_path += '.zip'
+            worker_export_type = "zip"
             
         elif export_type == "ZIP with DICOMDIR":
-            # NEW: DICOMDIR ZIP export
-            self._export_dicomdir_zip(filepaths)
+            output_path, _ = QFileDialog.getSaveFileName(
+                self, "Save DICOMDIR ZIP Archive", self.default_export_dir, "ZIP Archives (*.zip)"
+            )
+            if not output_path:
+                return
+            if not output_path.lower().endswith('.zip'):
+                output_path += '.zip'
+            worker_export_type = "dicomdir_zip"
+        
+        # Start non-blocking export
+        self._start_export_worker(filepaths, worker_export_type, output_path)
+
+    def _start_export_worker(self, filepaths, export_type, output_path):
+        """Start the export worker thread"""
+        
+        # Create progress dialog
+        self.export_progress = FocusAwareProgressDialog("Preparing export...", "Cancel", 0, 100, self)
+        self.export_progress.setWindowTitle("Export Progress")
+        self.export_progress.setMinimumDuration(0)
+        self.export_progress.setValue(0)
+        self.export_progress.canceled.connect(self._cancel_export)
+        
+        # Create temporary directory for DICOMDIR exports
+        temp_dir = None
+        if export_type == "dicomdir_zip":
+            temp_dir = tempfile.mkdtemp()
+        
+        # Create and start worker
+        self.export_worker = ExportWorker(filepaths, export_type, output_path, temp_dir)
+        self.export_worker.progress_updated.connect(self._on_export_progress)
+        self.export_worker.stage_changed.connect(self._on_export_stage_changed)
+        self.export_worker.export_complete.connect(self._on_export_complete)
+        self.export_worker.export_failed.connect(self._on_export_failed)
+        
+        logging.info(f"Starting {export_type} export to {output_path}")
+        self.export_worker.start()
+
+    def _on_export_progress(self, current, total, operation):
+        """Handle export progress updates"""
+        if hasattr(self, 'export_progress') and self.export_progress:
+            if total > 0:
+                progress_value = int((current / total) * 100)
+                self.export_progress.setValue(progress_value)
+            self.export_progress.setLabelText(f"{operation}\n({current}/{total})")
+
+    def _on_export_stage_changed(self, stage_description):
+        """Handle export stage changes"""
+        if hasattr(self, 'export_progress') and self.export_progress:
+            self.export_progress.setLabelText(stage_description)
+            logging.info(f"Export stage: {stage_description}")
+
+    def _on_export_complete(self, output_path, statistics):
+        """Handle successful export completion"""
+        if hasattr(self, 'export_progress') and self.export_progress:
+            self.export_progress.close()
+            self.export_progress = None
+        
+        # Clean up worker
+        if hasattr(self, 'export_worker'):
+            self.export_worker = None
+        
+        # Create completion message
+        stats = statistics
+        export_type = stats.get('export_type', 'Export')
+        exported_count = stats.get('exported_count', 0)
+        total_files = stats.get('total_files', 0)
+        errors = stats.get('errors', [])
+        
+        msg = f"{export_type} completed successfully!\n\n"
+        msg += f"Files exported: {exported_count}/{total_files}\n"
+        
+        if 'total_size_mb' in stats:
+            msg += f"Total size: {stats['total_size_mb']:.1f} MB\n"
+        if 'patients' in stats:
+            msg += f"Patients: {stats['patients']}\n"
+            
+        msg += f"Output: {output_path}"
+        
+        if errors:
+            msg += f"\n\nErrors ({len(errors)}):\n" + "\n".join(errors[:3])
+            if len(errors) > 3:
+                msg += f"\n...and {len(errors) - 3} more."
+        
+        FocusAwareMessageBox.information(self, "Export Complete", msg)
+        logging.info(f"Export completed: {output_path}")
+
+    def _on_export_failed(self, error_message):
+        """Handle export failure"""
+        if hasattr(self, 'export_progress') and self.export_progress:
+            self.export_progress.close()
+            self.export_progress = None
+        
+        # Clean up worker
+        if hasattr(self, 'export_worker'):
+            self.export_worker = None
+        
+        # CHANGED: Use focus-aware dialog
+        FocusAwareMessageBox.information(self, "Export Failed", 
+                                    f"Export failed:\n\n{error_message}")
+        
+        logging.error(f"Export failed: {error_message}")
+
+    def _cancel_export(self):
+        """Cancel the export operation"""
+        logging.info("Export cancellation requested")
+        
+        if hasattr(self, 'export_worker') and self.export_worker and self.export_worker.isRunning():
+            logging.info("Cancelling export worker")
+            self.export_worker.cancel()
+            self.export_worker.wait(3000)
+            if self.export_worker.isRunning():
+                logging.warning("Export worker didn't stop, terminating")
+                self.export_worker.terminate()
+            
+            # Close progress dialog
+            if hasattr(self, 'export_progress') and self.export_progress:
+                self.export_progress.close()
+                self.export_progress = None
+        
+        logging.info("Export cancelled")
 
 
     def dicom_send(self):
         logging.info("DICOM send initiated")
         if AE is None or not STORAGE_CONTEXTS or VERIFICATION_SOP_CLASS is None:
             logging.error("pynetdicom not available or not fully imported.")
-            QMessageBox.critical(self, "Missing Dependency",
+            FocusAwareMessageBox.critical(self, "Missing Dependency",
                                 "pynetdicom is required for DICOM send.\n"
                                 "Check your environment and restart the application.\n"
                                 f"Python executable: {sys.executable}\n")
@@ -3256,14 +3641,14 @@ class MainWindow(QMainWindow):
         
         selected = self.tree.selectedItems()
         if not selected:
-            QMessageBox.warning(self, "No Selection", "Please select a node in the tree to send.")
+            FocusAwareMessageBox.warning(self, "No Selection", "Please select a node in the tree to send.")
             return
         
         tree_item_anchor = selected[0]
         filepaths = self._collect_instance_filepaths(tree_item_anchor)
 
         if not filepaths:
-            QMessageBox.warning(self, "No Instances", "No DICOM instances found under the selected node.")
+            FocusAwareMessageBox.warning(self, "No Instances", "No DICOM instances found under the selected node.")
             return
 
         # Get send parameters
@@ -3286,11 +3671,11 @@ class MainWindow(QMainWindow):
                 logging.warning(f"Could not read SOPClassUID from {fp_ctx}: {e_ctx}")
         
         if not unique_sop_classes_to_send:
-            QMessageBox.critical(self, "DICOM Send Error", "No valid SOP Class UIDs found.")
+            FocusAwareMessageBox.critical(self, "DICOM Send Error", "No valid SOP Class UIDs found.")
             return
 
         # Create progress dialog
-        self.send_progress = QProgressDialog("Starting DICOM send...", "Cancel", 0, len(filepaths), self)
+        self.send_progress = FocusAwareProgressDialog("Starting DICOM send...", "Cancel", 0, len(filepaths), self)
         self.send_progress.setWindowTitle("DICOM Send Progress")
         self.send_progress.setMinimumDuration(0)
         self.send_progress.setValue(0)
@@ -3355,7 +3740,7 @@ class MainWindow(QMainWindow):
             if len(error_details) > 5:
                 msg += f"\n...and {len(error_details)-5} more."
         
-        QMessageBox.information(self, "DICOM Send Report", msg)
+        FocusAwareMessageBox.information(self, "DICOM Send Report", msg)
         logging.info(msg)
 
     def _on_send_failed(self, error_message):
@@ -3370,7 +3755,7 @@ class MainWindow(QMainWindow):
             self.conversion_progress.close()
             self.conversion_progress = None
         
-        QMessageBox.critical(self, "DICOM Send Failed", error_message)
+        FocusAwareMessageBox.critical(self, "DICOM Send Failed", error_message)
         logging.error(error_message)
 
     def _on_association_status(self, status_message):
@@ -3380,7 +3765,7 @@ class MainWindow(QMainWindow):
             # Check if we're starting conversion
             if "Converting" in status_message and "incompatible" in status_message:
                 # Create conversion progress dialog
-                self.conversion_progress = QProgressDialog("Converting incompatible files...", "Cancel", 0, 100, self)
+                self.conversion_progress = FocusAwareProgressDialog("Converting incompatible files...", "Cancel", 0, 100, self)
                 self.conversion_progress.setWindowTitle("Converting Images")
                 self.conversion_progress.setMinimumDuration(0)
                 self.conversion_progress.setValue(0)
@@ -3488,7 +3873,7 @@ class MainWindow(QMainWindow):
         """Advanced anonymization using templates"""
         selected = self.tree.selectedItems()
         if not selected:
-            QMessageBox.warning(self, "No Selection", "Please select a node in the tree to anonymize.")
+            FocusAwareMessageBox.warning(self, "No Selection", "Please select a node in the tree to anonymize.")
             return
             
         # Collect file paths from selected items
@@ -3498,7 +3883,7 @@ class MainWindow(QMainWindow):
             file_paths.extend(paths)
             
         if not file_paths:
-            QMessageBox.warning(self, "No Files", "No DICOM files found in selection.")
+            FocusAwareMessageBox.warning(self, "No Files", "No DICOM files found in selection.")
             return
             
         # Remove duplicates
@@ -3517,7 +3902,7 @@ class MainWindow(QMainWindow):
                     
         except Exception as e:
             logging.error(f"Anonymization error: {e}", exc_info=True)
-            QMessageBox.critical(self, "Anonymization Error", 
+            FocusAwareMessageBox.critical(self, "Anonymization Error", 
                             f"An error occurred during anonymization:\n{str(e)}")
 
     def merge_patients(self): # User's original
@@ -3526,7 +3911,7 @@ class MainWindow(QMainWindow):
         patient_nodes = [item for item in selected if item.depth() == 0]
         
         if len(patient_nodes) < 2:
-            QMessageBox.warning(self, "Merge Patients", "Select at least two patient nodes to merge.\nHold Ctrl or Shift to select multiple patients.")
+            FocusAwareMessageBox.warning(self, "Merge Patients", "Select at least two patient nodes to merge.\nHold Ctrl or Shift to select multiple patients.")
             self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection) # Restore selection mode
             return
 
@@ -3546,7 +3931,7 @@ class MainWindow(QMainWindow):
         if primary_node_fps: primary_fp_sample = primary_node_fps[0]
 
         if not primary_fp_sample:
-            QMessageBox.warning(self, "Merge Patients", f"Could not find any DICOM file for the primary patient '{primary_label_selected}' to get ID/Name.")
+            FocusAwareMessageBox.warning(self, "Merge Patients", f"Could not find any DICOM file for the primary patient '{primary_label_selected}' to get ID/Name.")
             self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection) # Restore
             return
         try:
@@ -3554,7 +3939,7 @@ class MainWindow(QMainWindow):
             primary_id_val = str(ds_primary.PatientID)
             primary_name_val = str(ds_primary.PatientName)
         except Exception as e:
-            QMessageBox.critical(self, "Merge Patients", f"Failed to read primary patient file: {e}")
+            FocusAwareMessageBox.critical(self, "Merge Patients", f"Failed to read primary patient file: {e}")
             self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection) # Restore
             return
 
@@ -3564,24 +3949,24 @@ class MainWindow(QMainWindow):
             files_to_update.extend(self._collect_instance_filepaths(node_sec))
 
         if not files_to_update:
-             QMessageBox.information(self, "Merge Patients", "No files found in the secondary patient(s) to merge.")
+             FocusAwareMessageBox.information(self, "Merge Patients", "No files found in the secondary patient(s) to merge.")
              self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection) # Restore
              return
 
 
-        reply = QMessageBox.question(
+        reply = FocusAwareMessageBox.question(
             self, "Confirm Merge",
             f"This will update {len(files_to_update)} files from other patient(s) to PatientID '{primary_id_val}' and PatientName '{primary_name_val}'.\n"
             "The original patient entries for these merged studies will be removed from the tree view.\n"
             "This modifies files in-place. Continue?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No
+            FocusAwareMessageBox.StandardButton.Yes | FocusAwareMessageBox.StandardButton.No, FocusAwareMessageBox.StandardButton.No
         )
-        if reply != QMessageBox.StandardButton.Yes:
+        if reply != FocusAwareMessageBox.StandardButton.Yes:
             self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection) # Restore
             return
 
         updated_m = 0; failed_m = []
-        progress_m = QProgressDialog("Merging patients...", "Cancel", 0, len(files_to_update), self)
+        progress_m = FocusAwareProgressDialog("Merging patients...", "Cancel", 0, len(files_to_update), self)
         progress_m.setWindowTitle("Merging Patients"); progress_m.setMinimumDuration(0); progress_m.setValue(0)
         for idx_m, fp_m in enumerate(files_to_update):
             progress_m.setValue(idx_m)
@@ -3602,7 +3987,7 @@ class MainWindow(QMainWindow):
 
         msg_m = f"Merged patient data.\nFiles updated: {updated_m}\nFailed: {len(failed_m)}"
         if failed_m: msg_m += "\n\nDetails (first few):\n" + "\n".join(failed_m[:3])
-        QMessageBox.information(self, "Merge Patients Complete", msg_m)
+        FocusAwareMessageBox.information(self, "Merge Patients Complete", msg_m)
 
         # Refresh the tree (corrected - don't call clear_loaded_files)
         all_known_files_after_merge = [f_info[0] for f_info in self.loaded_files if os.path.exists(f_info[0])]
@@ -3623,12 +4008,12 @@ class MainWindow(QMainWindow):
         
         # Validate selection
         if len(study_nodes) < 2:
-            QMessageBox.warning(self, "Merge Studies", "Select at least two study nodes to merge.\nHold Ctrl or Shift to select multiple studies.")
+            FocusAwareMessageBox.warning(self, "Merge Studies", "Select at least two study nodes to merge.\nHold Ctrl or Shift to select multiple studies.")
             self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
             return
         
         if not self._are_studies_under_same_patient(study_nodes):
-            QMessageBox.warning(self, "Merge Studies", "All selected studies must belong to the same patient.")
+            FocusAwareMessageBox.warning(self, "Merge Studies", "All selected studies must belong to the same patient.")
             self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
             return
         
@@ -3644,7 +4029,7 @@ class MainWindow(QMainWindow):
         # Get primary study metadata
         primary_study_files = self._collect_instance_filepaths(primary_study_node)
         if not primary_study_files:
-            QMessageBox.warning(self, "Merge Studies", "Could not find any files in the primary study.")
+            FocusAwareMessageBox.warning(self, "Merge Studies", "Could not find any files in the primary study.")
             self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
             return
         
@@ -3654,7 +4039,7 @@ class MainWindow(QMainWindow):
             primary_study_desc = str(getattr(ds_primary, "StudyDescription", ""))
             primary_study_id = str(getattr(ds_primary, "StudyID", ""))
         except Exception as e:
-            QMessageBox.critical(self, "Merge Studies", f"Failed to read primary study metadata: {e}")
+            FocusAwareMessageBox.critical(self, "Merge Studies", f"Failed to read primary study metadata: {e}")
             self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
             return
 
@@ -3664,26 +4049,26 @@ class MainWindow(QMainWindow):
             files_to_update.extend(self._collect_instance_filepaths(node_sec))
 
         if not files_to_update:
-            QMessageBox.information(self, "Merge Studies", "No files found in the secondary studies to merge.")
+            FocusAwareMessageBox.information(self, "Merge Studies", "No files found in the secondary studies to merge.")
             self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
             return
         
         # Confirmation dialog
-        reply = QMessageBox.question(
+        reply = FocusAwareMessageBox.question(
             self, "Confirm Merge",
             f"This will update {len(files_to_update)} files from other study(s) to merge into:\n"
             f"Study UID: {primary_study_uid}\n"
             f"Study Description: {primary_study_desc}\n"
             f"Study ID: {primary_study_id}\n"
             "This modifies files in-place. Continue?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No
+            FocusAwareMessageBox.StandardButton.Yes | FocusAwareMessageBox.StandardButton.No, FocusAwareMessageBox.StandardButton.No
         )
-        if reply != QMessageBox.StandardButton.Yes:
+        if reply != FocusAwareMessageBox.StandardButton.Yes:
             self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
             return
 
         updated_m = 0; failed_m = []
-        progress_m = QProgressDialog("Merging studies...", "Cancel", 0, len(files_to_update), self)
+        progress_m = FocusAwareProgressDialog("Merging studies...", "Cancel", 0, len(files_to_update), self)
         progress_m.setWindowTitle("Merging Studies"); progress_m.setMinimumDuration(0); progress_m.setValue(0)
         for idx_m, fp_m in enumerate(files_to_update):
             progress_m.setValue(idx_m)
@@ -3705,7 +4090,7 @@ class MainWindow(QMainWindow):
 
         msg_m = f"Merged study data.\nFiles updated: {updated_m}\nFailed: {len(failed_m)}"
         if failed_m: msg_m += "\n\nDetails (first few):\n" + "\n".join(failed_m[:3])
-        QMessageBox.information(self, "Merge Studies Complete", msg_m)
+        FocusAwareMessageBox.information(self, "Merge Studies Complete", msg_m)
 
         # Refresh the tree (corrected - don't call clear_loaded_files)
         all_known_files_after_merge = [f_info[0] for f_info in self.loaded_files if os.path.exists(f_info[0])]
@@ -3727,12 +4112,12 @@ class MainWindow(QMainWindow):
         
         # Validate selection
         if len(series_nodes) < 2:
-            QMessageBox.warning(self, "Merge Series", "Select at least two series nodes to merge.\nHold Ctrl or Shift to select multiple series.")
+            FocusAwareMessageBox.warning(self, "Merge Series", "Select at least two series nodes to merge.\nHold Ctrl or Shift to select multiple series.")
             self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
             return
         
         if not self._are_series_under_same_study(series_nodes):
-            QMessageBox.warning(self, "Merge Series", "All selected series must belong to the same study.")
+            FocusAwareMessageBox.warning(self, "Merge Series", "All selected series must belong to the same study.")
             self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
             return
         
@@ -3748,7 +4133,7 @@ class MainWindow(QMainWindow):
         # Get primary series metadata
         primary_series_files = self._collect_instance_filepaths(primary_series_node)
         if not primary_series_files:
-            QMessageBox.warning(self, "Merge Series", "Could not find any files in the primary series.")
+            FocusAwareMessageBox.warning(self, "Merge Series", "Could not find any files in the primary series.")
             self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
             return
         
@@ -3759,7 +4144,7 @@ class MainWindow(QMainWindow):
             primary_series_number = str(getattr(ds_primary, "SeriesNumber", ""))
             primary_modality = str(getattr(ds_primary, "Modality", ""))
         except Exception as e:
-            QMessageBox.critical(self, "Merge Series", f"Failed to read primary series metadata: {e}")
+            FocusAwareMessageBox.critical(self, "Merge Series", f"Failed to read primary series metadata: {e}")
             self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
             return
         
@@ -3782,7 +4167,7 @@ class MainWindow(QMainWindow):
                 files_to_update.extend(series_files)
         
         if not files_to_update:
-            QMessageBox.information(self, "Merge Series", "No files found in the secondary series to merge.")
+            FocusAwareMessageBox.information(self, "Merge Series", "No files found in the secondary series to merge.")
             self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
             return
         
@@ -3792,7 +4177,7 @@ class MainWindow(QMainWindow):
             warning_msg = f"\nWarning: Modality conflicts detected: {', '.join(set(modality_conflicts))}\n"
         
         # Confirmation dialog
-        reply = QMessageBox.question(
+        reply = FocusAwareMessageBox.question(
             self, "Confirm Series Merge",
             f"This will update {len(files_to_update)} files from {len(secondary_series)} series to merge into:\n"
             f"Series UID: {primary_series_uid}\n"
@@ -3801,16 +4186,16 @@ class MainWindow(QMainWindow):
             f"Modality: {primary_modality}\n"
             f"{warning_msg}\n"
             "This modifies files in-place. Continue?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No
+            FocusAwareMessageBox.StandardButton.Yes | FocusAwareMessageBox.StandardButton.No, FocusAwareMessageBox.StandardButton.No
         )
-        if reply != QMessageBox.StandardButton.Yes:
+        if reply != FocusAwareMessageBox.StandardButton.Yes:
             self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
             return
         
         # Perform the merge
         updated_count = 0
         failed_files = []
-        progress = QProgressDialog("Merging series...", "Cancel", 0, len(files_to_update), self)
+        progress = FocusAwareProgressDialog("Merging series...", "Cancel", 0, len(files_to_update), self)
         progress.setWindowTitle("Merging Series")
         progress.setMinimumDuration(0)
         progress.setValue(0)
@@ -3845,7 +4230,7 @@ class MainWindow(QMainWindow):
         msg = f"Series merge complete.\nFiles updated: {updated_count}\nFailed: {len(failed_files)}"
         if failed_files:
             msg += "\n\nDetails (first few):\n" + "\n".join(failed_files[:3])
-        QMessageBox.information(self, "Merge Series Complete", msg)
+        FocusAwareMessageBox.information(self, "Merge Series Complete", msg)
 
         # Refresh the tree (corrected - don't call clear_loaded_files)
         all_known_files_after_merge = [f_info[0] for f_info in self.loaded_files if os.path.exists(f_info[0])]
@@ -3858,7 +4243,7 @@ class MainWindow(QMainWindow):
     def delete_selected_items(self): # User's original
         selected = self.tree.selectedItems()
         if not selected:
-            QMessageBox.warning(self, "Delete", "Please select one or more items to delete.")
+            FocusAwareMessageBox.warning(self, "Delete", "Please select one or more items to delete.")
             return
 
         files_to_delete = set() # Use a set to avoid duplicates
@@ -3875,7 +4260,7 @@ class MainWindow(QMainWindow):
             files_to_delete.update(self._collect_instance_filepaths(item))
 
         if not files_to_delete:
-            QMessageBox.warning(self, "Delete", "No actual files found corresponding to selected items.")
+            FocusAwareMessageBox.warning(self, "Delete", "No actual files found corresponding to selected items.")
             return
 
         summary_str = ", ".join([f"{v} {k}(s)" for k,v in item_counts.items() if v > 0])
@@ -3883,13 +4268,13 @@ class MainWindow(QMainWindow):
                        f"This will permanently delete {len(files_to_delete)} file(s) from disk.\n"
                        "THIS CANNOT BE UNDONE. Are you sure?")
         
-        reply = QMessageBox.question(self, "Confirm Delete", confirm_msg,
-                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                                     QMessageBox.StandardButton.No) # Default to No
-        if reply != QMessageBox.StandardButton.Yes:
+        reply = FocusAwareMessageBox.question(self, "Confirm Delete", confirm_msg,
+                                     FocusAwareMessageBox.StandardButton.Yes | FocusAwareMessageBox.StandardButton.No,
+                                     FocusAwareMessageBox.StandardButton.No) # Default to No
+        if reply != FocusAwareMessageBox.StandardButton.Yes:
             return
 
-        progress_d = QProgressDialog("Deleting files...", "Cancel", 0, len(files_to_delete), self)
+        progress_d = FocusAwareProgressDialog("Deleting files...", "Cancel", 0, len(files_to_delete), self)
         progress_d.setWindowTitle("Deleting"); progress_d.setMinimumDuration(0); progress_d.setValue(0)
         
         deleted_d_count = 0; failed_d_list = []
@@ -3922,19 +4307,19 @@ class MainWindow(QMainWindow):
 
         msg_d = f"Deleted {deleted_d_count} file(s)."
         if failed_d_list: msg_d += "\n\nFailed to delete:\n" + "\n".join(failed_d_list[:3])
-        QMessageBox.information(self, "Delete Complete", msg_d)
+        FocusAwareMessageBox.information(self, "Delete Complete", msg_d)
 
     def validate_dicom_files(self):
         """Run DICOM validation on loaded files"""
         if not self.loaded_files:
-            QMessageBox.warning(self, "No Files", "No DICOM files loaded for validation.")
+            FocusAwareMessageBox.warning(self, "No Files", "No DICOM files loaded for validation.")
             return
         
         # Get list of file paths
         file_paths = [f_info[0] for f_info in self.loaded_files if os.path.exists(f_info[0])]
         
         if not file_paths:
-            QMessageBox.warning(self, "No Files", "No valid file paths found.")
+            FocusAwareMessageBox.warning(self, "No Files", "No valid file paths found.")
             return
         
         logging.info(f"Starting validation of {len(file_paths)} files")
@@ -3944,7 +4329,7 @@ class MainWindow(QMainWindow):
             run_validation(file_paths, self)
         except Exception as e:
             logging.error(f"Validation error: {e}", exc_info=True)
-            QMessageBox.critical(self, "Validation Error", 
+            FocusAwareMessageBox.critical(self, "Validation Error", 
                                f"An error occurred during validation:\n{str(e)}")
     
     def manage_templates(self):
@@ -3954,7 +4339,7 @@ class MainWindow(QMainWindow):
             template_dialog.exec()
         except Exception as e:
             logging.error(f"Template management error: {e}", exc_info=True)
-            QMessageBox.critical(self, "Template Management Error", 
+            FocusAwareMessageBox.critical(self, "Template Management Error", 
                             f"An error occurred:\n{str(e)}")
             
     def diagnose_image_performance(self, ds, filepath):
@@ -4112,7 +4497,7 @@ class MainWindow(QMainWindow):
         temp_files = []  # Track temp files for cleanup
         
         if show_progress:
-            progress = QProgressDialog("Preparing files for DICOM send...", "Cancel", 0, len(filepaths), self)
+            progress = FocusAwareProgressDialog("Preparing files for DICOM send...", "Cancel", 0, len(filepaths), self)
             progress.setWindowTitle("Converting Images")
             progress.setMinimumDuration(0)
             progress.setValue(0)
@@ -4207,12 +4592,12 @@ class MainWindow(QMainWindow):
                 
             except Exception as e:
                 logging.error(f"DICOMDIR ZIP export failed: {e}", exc_info=True)
-                QMessageBox.critical(self, "Export Error", f"Failed to create DICOMDIR ZIP: {e}")
+                FocusAwareMessageBox.critical(self, "Export Error", f"Failed to create DICOMDIR ZIP: {e}")
 
     def _create_dicomdir_structure(self, filepaths, temp_dir, output_zip):
         """Create DICOM standard structure with DICOMDIR"""
         
-        progress = QProgressDialog("Creating DICOMDIR ZIP...", "Cancel", 0, 100, self)
+        progress = FocusAwareProgressDialog("Creating DICOMDIR ZIP...", "Cancel", 0, 100, self)
         progress.setWindowTitle("DICOMDIR Export")
         progress.setMinimumDuration(0)
         progress.setValue(0)
@@ -4273,7 +4658,7 @@ class MainWindow(QMainWindow):
             total_size = sum(os.path.getsize(f) for f in filepaths if os.path.exists(f))
             size_mb = total_size / (1024 * 1024)
             
-            QMessageBox.information(self, "Export Complete", 
+            FocusAwareMessageBox.information(self, "Export Complete", 
                                 f"DICOMDIR ZIP created successfully!\n\n"
                                 f"Files: {total_files}\n"
                                 f"Size: {size_mb:.1f} MB\n"
