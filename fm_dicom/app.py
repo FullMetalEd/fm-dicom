@@ -2646,287 +2646,668 @@ class SettingsEditorDialog(QDialog):
             if reply != FocusAwareMessageBox.StandardButton.Yes:
                 raise ValueError(f"Missing required configuration keys: {missing_keys}")
 
-class CheckboxTreeWidget(QTreeWidget):
-    """Tree widget with hierarchical checkbox behavior"""
+class OptimizedCheckboxTreeWidget(QTreeWidget):
+    """Tree widget with hierarchical checkbox behavior and tri-state logic"""
     
-    selection_changed = pyqtSignal()
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setHeaderLabels(["Patient/Study/Series/Instance", "Files", "Size"])
-        self.itemChanged.connect(self._on_item_changed)
-        self._updating_children = False  # Prevent recursive updates
-        
-    def _on_item_changed(self, item, column):
-        """Handle checkbox state changes with parent-child logic"""
-        if self._updating_children or column != 0:
-            return
-            
-        self._updating_children = True
-        
-        # Get new check state
-        check_state = item.checkState(0)
-        
-        # Update children to match parent
-        self._set_children_check_state(item, check_state)
-        
-        # Update parent based on children states
-        self._update_parent_check_state(item.parent())
-        
-        self._updating_children = False
-        self.selection_changed.emit()
-    
-    def _set_children_check_state(self, parent_item, check_state):
-        """Recursively set children to match parent state"""
-        if not parent_item:
-            return
-            
-        for i in range(parent_item.childCount()):
-            child = parent_item.child(i)
-            if check_state == Qt.CheckState.PartiallyChecked:
-                # Don't change children when parent becomes partially checked
-                continue
-            child.setCheckState(0, check_state)
-            self._set_children_check_state(child, check_state)
-    
-    def _update_parent_check_state(self, parent_item):
-        """Update parent check state based on children"""
-        if not parent_item:
-            return
-            
-        child_count = parent_item.childCount()
-        if child_count == 0:
-            return
-            
-        checked_count = 0
-        partially_checked_count = 0
-        
-        for i in range(child_count):
-            child = parent_item.child(i)
-            state = child.checkState(0)
-            if state == Qt.CheckState.Checked:
-                checked_count += 1
-            elif state == Qt.CheckState.PartiallyChecked:
-                partially_checked_count += 1
-        
-        # Determine parent state
-        if checked_count == child_count:
-            # All children checked
-            parent_item.setCheckState(0, Qt.CheckState.Checked)
-        elif checked_count == 0 and partially_checked_count == 0:
-            # No children checked
-            parent_item.setCheckState(0, Qt.CheckState.Unchecked)
-        else:
-            # Some children checked
-            parent_item.setCheckState(0, Qt.CheckState.PartiallyChecked)
-        
-        # Recursively update grandparent
-        self._update_parent_check_state(parent_item.parent())
-    
-    def get_checked_file_paths(self):
-        """Return list of file paths for checked instance items"""
-        file_paths = []
-        
-        def collect_checked_files(item):
-            # Only instance items (depth 3) have file paths
-            if item.depth() == 3 and item.checkState(0) == Qt.CheckState.Checked:
-                file_path = item.data(0, Qt.ItemDataRole.UserRole)
-                if file_path:
-                    file_paths.append(file_path)
-            
-            # Recursively check children
-            for i in range(item.childCount()):
-                collect_checked_files(item.child(i))
-        
-        # Check all top-level items
-        for i in range(self.topLevelItemCount()):
-            collect_checked_files(self.topLevelItem(i))
-        
-        return file_paths
-    
-    def get_selection_stats(self):
-        """Return statistics about current selection"""Perfect! Let's implement this step by step. I'll create a comprehensive DICOM send file selection dialog.
-
-## **Step 1: Custom Checkbox Tree Widget** 🌳
-
-Add this class before your `MainWindow` class:
-
-```python
-class CheckboxTreeWidget(QTreeWidget):
-    """Tree widget with hierarchical checkbox behavior"""
-    
-    selection_changed = pyqtSignal()
+    selection_changed = pyqtSignal(list)  # Emits list of selected file paths
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setHeaderLabels(["Patient", "Study", "Series", "Instance"])
+        self.setHeaderLabels(["Item", "Files", "Size"])
+        self.setColumnWidth(0, 300)
+        self.setColumnWidth(1, 80)
+        self.setColumnWidth(2, 80)
+        
+        # Enable checkboxes
+        self.setSelectionMode(QTreeWidget.SelectionMode.NoSelection)
+        self.setRootIsDecorated(True)  # Show expand/collapse icons
+        
+        # Connect signals
         self.itemChanged.connect(self._on_item_changed)
-        self._updating_checkboxes = False  # Prevent recursive updates
+        
+        # Track programmatic changes to avoid recursion
+        self._updating_programmatically = False
         
     def _on_item_changed(self, item, column):
-        """Handle checkbox state changes with hierarchical logic"""
-        if self._updating_checkboxes or column != 0:
+        if column != 0 or self._updating_programmatically:
             return
-            
-        self._updating_checkboxes = True
+        
+        # Prevent recursive calls
+        self._updating_programmatically = True
         
         try:
             check_state = item.checkState(0)
             
-            if check_state == Qt.CheckState.Checked:
-                # Check all children
-                self._set_children_check_state(item, Qt.CheckState.Checked)
-            elif check_state == Qt.CheckState.Unchecked:
-                # Uncheck all children
-                self._set_children_check_state(item, Qt.CheckState.Unchecked)
+            # Check if this is a leaf node (instance) or parent node
+            if item.childCount() == 0:
+                # This is a leaf node (instance) - only update parents
+                self._update_parent_chain(item)
+            else:
+                # This is a parent node - update children then parents
+                self._update_children_recursive(item, check_state)
+                self._update_parent_chain(item)
             
-            # Update parent based on children states
-            self._update_parent_check_state(item)
+            # Emit selection changed
+            self._emit_selection_changed()
             
-            # Emit selection changed signal
-            self.selection_changed.emit()
-            
+        except Exception as e:
+            logging.error(f"Error in checkbox update: {e}", exc_info=True)
         finally:
-            self._updating_checkboxes = False
+            self._updating_programmatically = False
     
-    def _set_children_check_state(self, item, state):
-        """Recursively set check state for all children"""
-        for i in range(item.childCount()):
-            child = item.child(i)
-            child.setCheckState(0, state)
-            self._set_children_check_state(child, state)
+    def _update_children_recursive(self, parent_item, check_state):
+        """Update all children to match parent state"""
+        try:
+            for i in range(parent_item.childCount()):
+                child = parent_item.child(i)
+                if child:
+                    child.setCheckState(0, check_state)
+                    # Recursively update grandchildren
+                    self._update_children_recursive(child, check_state)
+        except Exception as e:
+            logging.warning(f"Error updating children: {e}")
     
-    def _update_parent_check_state(self, item):
-        """Update parent check state based on children"""
-        parent = item.parent()
-        if not parent:
+    def _update_parent_chain(self, child_item):
+        """Update parent chain from this item upward"""
+        try:
+            current = child_item.parent()
+            while current is not None:
+                self._update_single_parent(current)
+                current = current.parent()
+        except Exception as e:
+            logging.warning(f"Error updating parent chain: {e}")
+    
+    def _update_single_parent(self, parent_item):
+        """Update a single parent based on its children"""
+        try:
+            if not parent_item:
+                return
+                
+            total_children = parent_item.childCount()
+            if total_children == 0:
+                return
+                
+            checked_children = 0
+            partially_checked_children = 0
+            
+            for i in range(total_children):
+                child = parent_item.child(i)
+                if child:
+                    state = child.checkState(0)
+                    if state == Qt.CheckState.Checked:
+                        checked_children += 1
+                    elif state == Qt.CheckState.PartiallyChecked:
+                        partially_checked_children += 1
+            
+            # Determine parent state
+            if checked_children == total_children:
+                parent_item.setCheckState(0, Qt.CheckState.Checked)
+            elif checked_children == 0 and partially_checked_children == 0:
+                parent_item.setCheckState(0, Qt.CheckState.Unchecked)
+            else:
+                parent_item.setCheckState(0, Qt.CheckState.PartiallyChecked)
+                
+        except Exception as e:
+            logging.warning(f"Error updating single parent: {e}")
+    
+    def _emit_selection_changed(self):
+        """Emit list of selected file paths"""
+        try:
+            selected_files = self.get_selected_files()
+            self.selection_changed.emit(selected_files)
+        except Exception as e:
+            logging.warning(f"Error emitting selection changed: {e}")
+    
+    def get_selected_files(self):
+        """Return list of selected file paths - only from leaf nodes"""
+        selected_files = []
+        try:
+            self._collect_checked_files(self.invisibleRootItem(), selected_files)
+        except Exception as e:
+            logging.warning(f"Error collecting selected files: {e}")
+        return selected_files
+    
+    def _collect_checked_files(self, item, file_list):
+        """Recursively collect checked files from leaf nodes only"""
+        try:
+            for i in range(item.childCount()):
+                child = item.child(i)
+                if not child:
+                    continue
+                
+                # Only collect from leaf nodes (instances)
+                if child.childCount() == 0:
+                    # This is a leaf node - check if it's selected and has file path
+                    file_path = child.data(0, Qt.ItemDataRole.UserRole)
+                    if file_path and child.checkState(0) == Qt.CheckState.Checked:
+                        file_list.append(file_path)
+                else:
+                    # This is a parent node - recurse into children
+                    self._collect_checked_files(child, file_list)
+                    
+        except Exception as e:
+            logging.warning(f"Error collecting files from item: {e}")
+    
+    def set_initial_selection(self, file_paths):
+        """Set initial selection based on file paths"""
+        if not file_paths:
             return
             
-        # Count checked children
-        total_children = parent.childCount()
-        checked_children = 0
-        partially_checked_children = 0
+        self._updating_programmatically = True
         
-        for i in range(total_children):
-            child = parent.child(i)
-            child_state = child.checkState(0)
-            
-            if child_state == Qt.CheckState.Checked:
-                checked_children += 1
-            elif child_state == Qt.CheckState.PartiallyChecked:
-                partially_checked_children += 1
-        
-        # Set parent state based on children
-        if checked_children == total_children and partially_checked_children == 0:
-            # All children checked
-            parent.setCheckState(0, Qt.CheckState.Checked)
-        elif checked_children == 0 and partially_checked_children == 0:
-            # No children checked
-            parent.setCheckState(0, Qt.CheckState.Unchecked)
-        else:
-            # Some children checked
-            parent.setCheckState(0, Qt.CheckState.PartiallyChecked)
-        
-        # Recursively update grandparent
-        self._update_parent_check_state(parent)
-    
-    def get_checked_files(self):
-        """Return list of file paths for checked instances"""
-        checked_files = []
-        
-        def collect_checked_files(item):
-            # Only collect files from instance-level items (depth 3)
-            if item.depth() == 3:  # Instance level
-                if item.checkState(0) == Qt.CheckState.Checked:
-                    filepath = item.data(0, Qt.ItemDataRole.UserRole)
-                    if filepath:
-                        checked_files.append(filepath)
-            else:
-                # Recurse through children
-                for i in range(item.childCount()):
-                    collect_checked_files(item.child(i))
-        
-        # Start from root level
-        for i in range(self.topLevelItemCount()):
-            collect_checked_files(self.topLevelItem(i))
-        
-        return checked_files
-    
-    def set_all_checked(self, checked=True):
-        """Check or uncheck all items"""
-        self._updating_checkboxes = True
         try:
-            state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
-            for i in range(self.topLevelItemCount()):
-                item = self.topLevelItem(i)
-                item.setCheckState(0, state)
-                self._set_children_check_state(item, state)
-            self.selection_changed.emit()
+            # Convert to set for faster lookup
+            selected_paths = set(file_paths)
+            
+            # Mark leaf items as checked if their file path is in selection
+            self._mark_initial_selection(self.invisibleRootItem(), selected_paths)
+            
+            # Update all parent states from bottom up
+            self._update_all_parents_bottom_up()
+            
+        except Exception as e:
+            logging.error(f"Error setting initial selection: {e}", exc_info=True)
         finally:
-            self._updating_checkboxes = False
+            self._updating_programmatically = False
+            
+        self._emit_selection_changed()
+    
+    def _mark_initial_selection(self, item, selected_paths):
+        """Mark leaf items as checked based on file paths"""
+        try:
+            for i in range(item.childCount()):
+                child = item.child(i)
+                if not child:
+                    continue
+                
+                if child.childCount() == 0:
+                    # This is a leaf node - check if it should be selected
+                    file_path = child.data(0, Qt.ItemDataRole.UserRole)
+                    if file_path and file_path in selected_paths:
+                        child.setCheckState(0, Qt.CheckState.Checked)
+                    else:
+                        child.setCheckState(0, Qt.CheckState.Unchecked)
+                else:
+                    # This is a parent node - recurse and set to unchecked initially
+                    child.setCheckState(0, Qt.CheckState.Unchecked)
+                    self._mark_initial_selection(child, selected_paths)
+                    
+        except Exception as e:
+            logging.warning(f"Error marking initial selection: {e}")
+    
+    def _update_all_parents_bottom_up(self):
+        """Update all parent states from bottom up"""
+        try:
+            # Get all items in tree
+            all_items = []
+            self._collect_all_items(self.invisibleRootItem(), all_items)
+            
+            # Process leaf nodes first to update their parents
+            for item in all_items:
+                if item.childCount() == 0:  # Leaf node
+                    self._update_parent_chain(item)
+                    
+        except Exception as e:
+            logging.warning(f"Error updating all parents: {e}")
+    
+    def _collect_all_items(self, item, item_list):
+        """Collect all items in the tree"""
+        try:
+            for i in range(item.childCount()):
+                child = item.child(i)
+                if child:
+                    item_list.append(child)
+                    self._collect_all_items(child, item_list)
+        except Exception as e:
+            logging.warning(f"Error collecting all items: {e}")
+    
+    def select_all(self):
+        """Check all leaf items"""
+        self._updating_programmatically = True
+        try:
+            self._set_all_leaf_items_state(self.invisibleRootItem(), Qt.CheckState.Checked)
+            # Update parents after setting all leaves
+            self._update_all_parents_bottom_up()
+        except Exception as e:
+            logging.warning(f"Error selecting all: {e}")
+        finally:
+            self._updating_programmatically = False
+        self._emit_selection_changed()
+    
+    def select_none(self):
+        """Uncheck all items"""
+        self._updating_programmatically = True
+        try:
+            self._set_all_items_state(self.invisibleRootItem(), Qt.CheckState.Unchecked)
+        except Exception as e:
+            logging.warning(f"Error selecting none: {e}")
+        finally:
+            self._updating_programmatically = False
+        self._emit_selection_changed()
+    
+    def _set_all_leaf_items_state(self, item, state):
+        """Set state only for leaf items"""
+        try:
+            for i in range(item.childCount()):
+                child = item.child(i)
+                if child:
+                    if child.childCount() == 0:  # Leaf node
+                        child.setCheckState(0, state)
+                    else:  # Parent node
+                        self._set_all_leaf_items_state(child, state)
+        except Exception as e:
+            logging.warning(f"Error setting leaf items state: {e}")
+    
+    def _set_all_items_state(self, item, state):
+        """Recursively set state for all items"""
+        try:
+            for i in range(item.childCount()):
+                child = item.child(i)
+                if child:
+                    child.setCheckState(0, state)
+                    self._set_all_items_state(child, state)
+        except Exception as e:
+            logging.warning(f"Error setting all items state: {e}")
 
-
-class SelectionSummaryWidget(QWidget):
-    """Widget to display selection summary statistics"""
+class LazySelectionSummaryWidget(QWidget):
+    """Widget showing real-time summary with lazy calculation"""
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self._setup_ui()
+        self._file_size_cache = {}  # Cache file sizes
         
     def _setup_ui(self):
+        """Setup the summary UI"""
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setContentsMargins(10, 5, 10, 5)
         
-        # Title
-        title = QLabel("Selection Summary")
-        title.setStyleSheet("font-weight: bold; font-size: 14px;")
-        layout.addWidget(title)
-        
-        # Statistics labels
-        self.files_label = QLabel("Files: 0")
+        # Create summary labels
+        self.file_count_label = QLabel("Files: 0")
         self.size_label = QLabel("Size: 0 MB")
-        self.patients_label = QLabel("Patients: 0")
-        self.studies_label = QLabel("Studies: 0")
-        self.series_label = QLabel("Series: 0")
-        self.modalities_label = QLabel("Modalities: None")
+        self.breakdown_label = QLabel("Patients: 0, Studies: 0, Series: 0")
         
-        layout.addWidget(self.files_label)
+        # Style the labels
+        font = QFont()
+        font.setBold(True)
+        for label in [self.file_count_label, self.size_label, self.breakdown_label]:
+            label.setFont(font)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        # Add to layout
+        layout.addWidget(self.file_count_label)
         layout.addWidget(self.size_label)
-        layout.addWidget(self.patients_label)
-        layout.addWidget(self.studies_label)
-        layout.addWidget(self.series_label)
-        layout.addWidget(self.modalities_label)
+        layout.addWidget(self.breakdown_label)
         
-        layout.addStretch()
+        # Style the widget
+        self.setStyleSheet("""
+            QWidget {
+                background-color: #2c2f33;
+                border: 1px solid #444;
+                border-radius: 5px;
+            }
+            QLabel {
+                color: #f5f5f5;
+                padding: 2px;
+            }
+        """)
     
-    def update_summary(self, file_paths):
-        """Update summary based on selected file paths"""
-        if not file_paths:
-            self.files_label.setText("Files: 0")
+    def update_summary(self, selected_files):
+        """Update summary with lazy calculation"""
+        if not selected_files:
+            self.file_count_label.setText("Files: 0")
             self.size_label.setText("Size: 0 MB")
-            self.patients_label.setText("Patients: 0")
-            self.studies_label.setText("Studies: 0")
-            self.series_label.setText("Series: 0")
-            self.modalities_label.setText("Modalities: None")
+            self.breakdown_label.setText("Patients: 0, Studies: 0, Series: 0")
             return
         
-        # Analyze selected files
-        patients = set()
-        studies = set()
-        series = set()
-        modalities = set()
-        total_size = 0
+        # Just show file count immediately
+        file_count = len(selected_files)
+        self.file_count_label.setText(f"Files: {file_count}")
         
-        for filepath in file_paths:
+        # Calculate size from cache or estimate
+        total_size = 0
+        for file_path in selected_files:
+            if file_path in self._file_size_cache:
+                total_size += self._file_size_cache[file_path]
+            elif os.path.exists(file_path):
+                try:
+                    size = os.path.getsize(file_path)
+                    self._file_size_cache[file_path] = size
+                    total_size += size
+                except:
+                    # Estimate 500KB per file if can't read
+                    total_size += 500 * 1024
+        
+        # Format size
+        if total_size < 1024 * 1024:  # Less than 1MB
+            size_str = f"{total_size / 1024:.1f} KB"
+        elif total_size < 1024 * 1024 * 1024:  # Less than 1GB
+            size_str = f"{total_size / (1024 * 1024):.1f} MB"
+        else:
+            size_str = f"{total_size / (1024 * 1024 * 1024):.2f} GB"
+        
+        self.size_label.setText(f"Size: {size_str}")
+        
+        # Simplified breakdown - just estimate from file paths
+        # This avoids reading DICOM headers
+        unique_patients = set()
+        unique_studies = set()
+        unique_series = set()
+        
+        for file_path in selected_files:
+            # Extract IDs from file path or use simple heuristics
+            path_parts = file_path.split(os.sep)
+            if len(path_parts) >= 3:
+                unique_patients.add(path_parts[-3] if len(path_parts) > 3 else "patient1")
+                unique_studies.add(path_parts[-2] if len(path_parts) > 2 else "study1")
+                unique_series.add(path_parts[-1] if len(path_parts) > 1 else "series1")
+        
+        self.breakdown_label.setText(f"Est. Patients: {len(unique_patients)}, Studies: {len(unique_studies)}, Series: {len(unique_series)}")
+
+class DicomSendSelectionDialog(QDialog):
+    """Dialog for selecting files to send via DICOM with hierarchical checkboxes"""
+    
+    def __init__(self, loaded_files, initial_selection_items, parent=None):
+        super().__init__(parent)
+        
+        # Store references
+        self.loaded_files = loaded_files  # Now this will work
+        self.initial_selection_items = initial_selection_items
+        self.selected_files = []
+        
+        # Add some debug logging
+        logging.info(f"DicomSendSelectionDialog initialized with {len(self.loaded_files)} loaded files")
+        
+        self.setWindowTitle("Select Files for DICOM Send")
+        self.setModal(True)
+        self.resize(600, 500)
+        
+        # Now call the setup methods
+        self._setup_ui()
+        self._populate_tree()
+        self._set_initial_selection()
+        
+    def _setup_ui(self):
+        """Setup the dialog UI"""
+        layout = QVBoxLayout(self)
+        
+        # Title
+        title_label = QLabel("Select Files for DICOM Send")
+        title_font = QFont()
+        title_font.setBold(True)
+        title_font.setPointSize(12)
+        title_label.setFont(title_font)
+        layout.addWidget(title_label)
+        
+        # Search bar
+        search_layout = QHBoxLayout()
+        self.search_bar = QLineEdit()
+        self.search_bar.setPlaceholderText("Search patients, studies, series...")
+        self.search_bar.textChanged.connect(self._filter_tree)
+        
+        # Expand/Collapse buttons
+        self.expand_btn = QPushButton("Expand All")
+        self.collapse_btn = QPushButton("Collapse All")
+        self.expand_btn.clicked.connect(self._expand_all)
+        self.collapse_btn.clicked.connect(self._collapse_all)
+        
+        search_layout.addWidget(QLabel("Search:"))
+        search_layout.addWidget(self.search_bar)
+        search_layout.addStretch()
+        search_layout.addWidget(self.expand_btn)
+        search_layout.addWidget(self.collapse_btn)
+        layout.addLayout(search_layout)
+        
+        # Main content area
+        content_layout = QHBoxLayout()
+        
+        # Left side: Tree
+        tree_layout = QVBoxLayout()
+        tree_label = QLabel("Available Files:")
+        tree_label.setFont(QFont("", weight=QFont.Weight.Bold))
+        tree_layout.addWidget(tree_label)
+        
+        # IMPORTANT: Use the correct widget class name
+        self.tree_widget = OptimizedCheckboxTreeWidget()
+        self.tree_widget.selection_changed.connect(self._on_selection_changed)
+        tree_layout.addWidget(self.tree_widget)
+        
+        # Quick action buttons
+        action_layout = QHBoxLayout()
+        self.select_all_btn = QPushButton("Select All")
+        self.select_none_btn = QPushButton("Select None")
+        self.select_all_btn.clicked.connect(self.tree_widget.select_all)
+        self.select_none_btn.clicked.connect(self.tree_widget.select_none)
+        
+        action_layout.addWidget(self.select_all_btn)
+        action_layout.addWidget(self.select_none_btn)
+        action_layout.addStretch()
+        tree_layout.addLayout(action_layout)
+        
+        content_layout.addLayout(tree_layout, 2)
+        
+        # Right side: Summary
+        summary_layout = QVBoxLayout()
+        summary_label = QLabel("Selection Summary:")
+        summary_label.setFont(QFont("", weight=QFont.Weight.Bold))
+        summary_layout.addWidget(summary_label)
+        
+        # IMPORTANT: Use the correct widget class name
+        self.summary_widget = LazySelectionSummaryWidget()
+        summary_layout.addWidget(self.summary_widget)
+        summary_layout.addStretch()
+        
+        content_layout.addLayout(summary_layout, 1)
+        layout.addLayout(content_layout)
+        
+        # Bottom buttons
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        
+        self.cancel_btn = QPushButton("Cancel")
+        self.send_btn = QPushButton("Send Selected Files")
+        self.send_btn.setDefault(True)
+        
+        # Style the send button
+        self.send_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #508cff;
+                color: white;
+                font-weight: bold;
+                padding: 8px 16px;
+                border: none;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #6ea3ff;
+            }
+            QPushButton:pressed {
+                background-color: #3d75e6;
+            }
+        """)
+        
+        self.cancel_btn.clicked.connect(self.reject)
+        self.send_btn.clicked.connect(self.accept)
+        
+        button_layout.addWidget(self.cancel_btn)
+        button_layout.addWidget(self.send_btn)
+        layout.addLayout(button_layout)
+    
+    def _populate_tree(self):
+        """Populate tree with file hierarchy and proper checkboxes"""
+        logging.info("Populating DICOM send selection tree")
+        
+        # Build hierarchy from loaded files
+        hierarchy = {}
+        file_paths = [file_info[0] for file_info in self.loaded_files]
+        
+        for file_path in file_paths:
             try:
-                # Get file size
-                if os.path.exists(filepath):
-                    total_size += os.path.getsize(filepath)
+                ds = pydicom.dcmread(file_path, stop_before_pixels=True)
                 
-                # Read DICOM metadata
-                ds = pydicom.dcmread(filepath, stop_before_pixels=True)
+                patient_id = getattr(ds, "PatientID", "Unknown ID")
+                patient_name = getattr(ds, "PatientName", "Unknown Name")
+                patient_label = f"{patient_name} ({patient_id})"
                 
-                patient_id = str(getattr(ds,
+                study_uid = getattr(ds, "StudyInstanceUID", "Unknown StudyUID")
+                study_desc = getattr(ds, "StudyDescription", "No Study Description")
+                study_label = f"{study_desc}"
+                
+                series_uid = getattr(ds, "SeriesInstanceUID", "Unknown SeriesUID")
+                series_desc = getattr(ds, "SeriesDescription", "No Series Description")
+                series_number = getattr(ds, "SeriesNumber", "")
+                series_label = f"{series_desc}"
+                if series_number:
+                    series_label += f" (#{series_number})"
+                
+                instance_number = getattr(ds, "InstanceNumber", None)
+                sop_uid = getattr(ds, "SOPInstanceUID", os.path.basename(file_path))
+                if instance_number is not None:
+                    instance_label = f"Instance {instance_number}"
+                else:
+                    instance_label = f"{os.path.basename(file_path)}"
+                
+                # Build hierarchy
+                hierarchy.setdefault(patient_label, {}).setdefault(study_label, {}).setdefault(series_label, {})[instance_label] = file_path
+                
+            except Exception as e:
+                logging.warning(f"Could not read DICOM file {file_path}: {e}")
+                continue
+        
+        # Populate tree widget with proper checkbox setup
+        for patient, studies in hierarchy.items():
+            patient_item = QTreeWidgetItem([patient, "", ""])
+            
+            # FIXED: Only ItemIsUserCheckable - let OptimizedCheckboxTreeWidget handle tri-state
+            patient_item.setFlags(
+                patient_item.flags() | 
+                Qt.ItemFlag.ItemIsUserCheckable
+                # NO tri-state flags - custom widget handles this
+            )
+            patient_item.setCheckState(0, Qt.CheckState.Unchecked)
+            
+            self.tree_widget.addTopLevelItem(patient_item)
+            
+            patient_file_count = 0
+            for study, series_dict in studies.items():
+                study_item = QTreeWidgetItem([study, "", ""])
+                
+                # FIXED: Only ItemIsUserCheckable - let OptimizedCheckboxTreeWidget handle tri-state
+                study_item.setFlags(
+                    study_item.flags() | 
+                    Qt.ItemFlag.ItemIsUserCheckable
+                    # NO tri-state flags - custom widget handles this
+                )
+                study_item.setCheckState(0, Qt.CheckState.Unchecked)
+                
+                patient_item.addChild(study_item)
+                
+                study_file_count = 0
+                for series, instances in series_dict.items():
+                    series_item = QTreeWidgetItem([series, "", ""])
+                    
+                    # FIXED: Only ItemIsUserCheckable - let OptimizedCheckboxTreeWidget handle tri-state
+                    series_item.setFlags(
+                        series_item.flags() | 
+                        Qt.ItemFlag.ItemIsUserCheckable
+                        # NO tri-state flags - custom widget handles this
+                    )
+                    series_item.setCheckState(0, Qt.CheckState.Unchecked)
+                    
+                    study_item.addChild(series_item)
+                    
+                    series_file_count = len(instances)
+                    study_file_count += series_file_count
+                    patient_file_count += series_file_count
+                    
+                    # Calculate series size
+                    series_size = sum(os.path.getsize(fp) for fp in instances.values() if os.path.exists(fp))
+                    series_size_mb = series_size / (1024 * 1024)
+                    
+                    series_item.setText(1, str(series_file_count))
+                    series_item.setText(2, f"{series_size_mb:.1f}MB")
+                    
+                    for instance, filepath in sorted(instances.items()):
+                        instance_item = QTreeWidgetItem([instance, "1", ""])
+                        
+                        # CORRECT: Only ItemIsUserCheckable for leaf items
+                        instance_item.setFlags(
+                            instance_item.flags() | 
+                            Qt.ItemFlag.ItemIsUserCheckable
+                        )
+                        instance_item.setCheckState(0, Qt.CheckState.Unchecked)
+                        instance_item.setData(0, Qt.ItemDataRole.UserRole, filepath)  # Store file path
+                        
+                        series_item.addChild(instance_item)
+                
+                study_item.setText(1, str(study_file_count))
+            
+            patient_item.setText(1, str(patient_file_count))
+        
+        # Expand tree by default
+        self.tree_widget.expandAll()
+        
+        logging.info(f"Populated tree with {len(hierarchy)} patients")
+    
+    def _set_initial_selection(self):
+        """Set initial selection based on what user had selected in main tree"""
+        if not self.initial_selection_items:
+            return
+        
+        # Collect file paths from initial selection
+        initial_file_paths = []
+        for item in self.initial_selection_items:
+            file_paths = self._collect_instance_filepaths_from_item(item)
+            initial_file_paths.extend(file_paths)
+        
+        # Set selection in tree
+        self.tree_widget.set_initial_selection(initial_file_paths)
+        
+        logging.info(f"Set initial selection: {len(initial_file_paths)} files")
+    
+    def _collect_instance_filepaths_from_item(self, tree_item):
+        """Collect file paths from a tree item (reuse MainWindow logic)"""
+        filepaths = []
+        
+        def collect(item):
+            fp = item.data(0, Qt.ItemDataRole.UserRole)
+            if fp:
+                filepaths.append(fp)
+            for i in range(item.childCount()):
+                collect(item.child(i))
+        
+        collect(tree_item)
+        return filepaths
+    
+    def _on_selection_changed(self, selected_files):
+        """Handle selection changes"""
+        self.selected_files = selected_files
+        self.summary_widget.update_summary(selected_files)
+        
+        # Update send button text
+        if selected_files:
+            self.send_btn.setText(f"Send {len(selected_files)} Files")
+            self.send_btn.setEnabled(True)
+        else:
+            self.send_btn.setText("Send Selected Files")
+            self.send_btn.setEnabled(False)
+    
+    def _filter_tree(self, text):
+        """Filter tree based on search text"""
+        # TODO: Implement filtering logic
+        pass
+    
+    def _expand_all(self):
+        """Expand all tree items"""
+        self.tree_widget.expandAll()
+    
+    def _collapse_all(self):
+        """Collapse all tree items"""
+        self.tree_widget.collapseAll()
+    
+    def get_selected_files(self):
+        """Return list of selected file paths"""
+        return self.selected_files
 
 class MainWindow(QMainWindow):
     def __init__(self, start_path=None, config_path_override=None):
@@ -4907,7 +5288,9 @@ class MainWindow(QMainWindow):
 
 
     def dicom_send(self):
+        """Enhanced DICOM send with file selection dialog"""
         logging.info("DICOM send initiated")
+        
         if AE is None or not STORAGE_CONTEXTS or VERIFICATION_SOP_CLASS is None:
             logging.error("pynetdicom not available or not fully imported.")
             FocusAwareMessageBox.critical(self, "Missing Dependency",
@@ -4916,19 +5299,28 @@ class MainWindow(QMainWindow):
                                 f"Python executable: {sys.executable}\n")
             return
         
+        # Get current selection for pre-population
         selected = self.tree.selectedItems()
         if not selected:
             FocusAwareMessageBox.warning(self, "No Selection", "Please select a node in the tree to send.")
             return
         
-        tree_item_anchor = selected[0]
-        filepaths = self._collect_instance_filepaths(tree_item_anchor)
-
-        if not filepaths:
-            FocusAwareMessageBox.warning(self, "No Instances", "No DICOM instances found under the selected node.")
+        # Show file selection dialog
+        selection_dialog = DicomSendSelectionDialog(self.loaded_files, selected, self)
+        
+        if selection_dialog.exec() != QDialog.DialogCode.Accepted:
             return
-
-        # Get send parameters
+        
+        # Get selected files from dialog
+        filepaths = selection_dialog.get_selected_files()
+        
+        if not filepaths:
+            FocusAwareMessageBox.warning(self, "No Files", "No files selected for sending.")
+            return
+        
+        logging.info(f"User selected {len(filepaths)} files for DICOM send")
+        
+        # Continue with existing workflow - get send parameters
         dlg = DicomSendDialog(self, config=self.dicom_send_config)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -4937,7 +5329,7 @@ class MainWindow(QMainWindow):
         if send_params is None:
             return
 
-        # Get unique SOP classes
+        # Get unique SOP classes from selected files
         unique_sop_classes_to_send = set()
         for fp_ctx in filepaths:
             try:
@@ -4960,17 +5352,10 @@ class MainWindow(QMainWindow):
         
         logging.info("Main thread: About to create and start DicomSendWorker")
         
-        # Start background send
+        # Start background send with selected files
         self.send_worker = DicomSendWorker(filepaths, send_params, unique_sop_classes_to_send)
         
-        # Connect signals with debug logging
-        self.send_worker.progress_updated.connect(lambda *args: logging.info(f"progress_updated signal: {args}"))
-        self.send_worker.send_complete.connect(lambda *args: logging.info(f"send_complete signal: {args}"))
-        self.send_worker.send_failed.connect(lambda msg: logging.error(f"send_failed signal: {msg}"))
-        self.send_worker.association_status.connect(lambda msg: logging.info(f"association_status signal: {msg}"))
-        self.send_worker.conversion_progress.connect(lambda *args: logging.info(f"conversion_progress signal: {args}"))
-        
-        # Also connect to your actual handlers
+        # Connect signals
         self.send_worker.progress_updated.connect(self._on_send_progress)
         self.send_worker.send_complete.connect(self._on_send_complete)
         self.send_worker.send_failed.connect(self._on_send_failed)
