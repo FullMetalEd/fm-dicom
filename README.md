@@ -128,6 +128,7 @@ fm-dicom requires a config.yml file for setting persistent settings you may want
 log_path: "~/.local/share/fm-dicom/fm-dicom.log"
 log_level: "INFO"
 show_image_preview: true
+file_picker_native: true
 window_size: [1500, 1000]
 theme: "dark"
 language: "en"

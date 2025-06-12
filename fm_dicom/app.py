@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QTableWidget, QTableWidgetItem, QMessageBox, QLineEdit, QInputDialog, QComboBox, QLabel, QCheckBox, QSizePolicy, QSplitter,
     QDialog, QFormLayout, QDialogButtonBox, QProgressDialog,
     QApplication, QToolBar, QGroupBox, QFrame, QStatusBar, QStyle, QMenu,
-    QGridLayout, QRadioButton, QButtonGroup, QProgressBar
+    QGridLayout, QRadioButton, QButtonGroup, QProgressBar, QTextEdit
 )
 from PyQt6.QtGui import QPixmap, QImage, QIcon, QPalette, QColor, QFont, QAction, QPainter
 from PyQt6.QtCore import QDir, Qt, QPoint, QSize, QThread, pyqtSignal, QTimer
@@ -31,29 +31,6 @@ from pynetdicom import AE, AllStoragePresentationContexts
 from pynetdicom.sop_class import Verification
 VERIFICATION_SOP_CLASS = Verification
 STORAGE_CONTEXTS = AllStoragePresentationContexts
-
-
-# Force pydicom to recognize GDCM is available
-try:
-    import python_gdcm
-    sys.modules['gdcm'] = python_gdcm
-    
-    # Force set the HAVE_GDCM flag
-    from pydicom.pixel_data_handlers import gdcm_handler
-    gdcm_handler.HAVE_GDCM = True
-    
-    if gdcm_handler.is_available():
-        handlers = pydicom.config.pixel_data_handlers
-        if gdcm_handler in handlers:
-            handlers.remove(gdcm_handler)
-            handlers.insert(0, gdcm_handler)
-        logging.info("✅ GDCM forced available and prioritized")
-    else:
-        logging.error("❌ GDCM still not available")
-        
-except Exception as e:
-    logging.error(f"❌ Error forcing GDCM: {e}")
-
 
 class ZipExtractionWorker(QThread):
     """Worker thread for ZIP extraction with progress updates"""
@@ -446,6 +423,17 @@ class ExportWorker(QThread):
         
     def _export_dicomdir_zip(self):
         """Export files as ZIP with DICOMDIR"""
+         # Get output path
+        out_zip_path, _ = self._get_save_filename(
+            "Save DICOMDIR ZIP Archive", 
+            self.default_export_dir, 
+            "ZIP Archives (*.zip)"
+        )
+        if not out_zip_path:
+            return
+        if not out_zip_path.lower().endswith('.zip'):
+            out_zip_path += '.zip'
+
         try:
             # Step 1: Analyze files (10%)
             self.stage_changed.emit("Analyzing DICOM files...")
@@ -721,12 +709,13 @@ def load_config(config_path_override=None):
         "ae_title": "DCMSCU",
         "destinations": [],
         "window_size": [1200, 800],
-        "default_export_dir": os.path.join(default_user_home_dir, "DICOM_Exports"), # Default subfolder
-        "default_import_dir": os.path.join(default_user_home_dir, "Downloads"), # Default to Downloads
+        "default_export_dir": os.path.join(default_user_home_dir, "DICOM_Exports"),
+        "default_import_dir": os.path.join(default_user_home_dir, "Downloads"),
         "anonymization": {},
         "recent_paths": [],
-        "theme": "dark", # Default theme
-        "language": "en"
+        "theme": "dark",
+        "language": "en",
+        "file_picker_native": False  # ADD THIS LINE - False = use Python/Qt picker by default
     }
 
     paths_to_check = []
@@ -830,6 +819,26 @@ def setup_logging(log_path_from_config, log_level_str_from_config): # Renamed pa
         # If FileHandler fails, logging will still go to StreamHandler
         logging.error(f"Could not set up file logger at {log_path_from_config}: {e}. Logging to stderr only.")
 
+# Force pydicom to recognize GDCM is available
+try:
+    import python_gdcm
+    sys.modules['gdcm'] = python_gdcm
+    
+    # Force set the HAVE_GDCM flag
+    from pydicom.pixel_data_handlers import gdcm_handler
+    gdcm_handler.HAVE_GDCM = True
+    
+    if gdcm_handler.is_available():
+        handlers = pydicom.config.pixel_data_handlers
+        if gdcm_handler in handlers:
+            handlers.remove(gdcm_handler)
+            handlers.insert(0, gdcm_handler)
+        logging.info("✅ GDCM forced available and prioritized")
+    else:
+        logging.error("❌ GDCM still not available")
+        
+except Exception as e:
+    logging.error(f"❌ Error forcing GDCM: {e}")
 
 # --- Primary Selection Dialog (NEW) ---
 class PrimarySelectionDialog(QDialog):
@@ -1935,8 +1944,10 @@ class FileAnalysisResultsDialog(QDialog):
     
     def export_csv(self):
         """Export results to CSV file"""
-        filename, _ = QFileDialog.getSaveFileName(
-            self, "Export Analysis Results", "file_analysis_results.csv", "CSV Files (*.csv)"
+        filename, _ = self.parent()._get_save_filename(
+            "Export Analysis Results", 
+            "file_analysis_results.csv", 
+            "CSV Files (*.csv)"
         )
         if not filename:
             return
@@ -1974,8 +1985,10 @@ class FileAnalysisResultsDialog(QDialog):
     
     def export_report(self):
         """Export detailed report to text file"""
-        filename, _ = QFileDialog.getSaveFileName(
-            self, "Export Analysis Report", "file_analysis_report.txt", "Text Files (*.txt)"
+        filename, _ = self.parent()._get_save_filename(
+            "Export Analysis Report", 
+            "file_analysis_report.txt", 
+            "Text Files (*.txt)"
         )
         if not filename:
             return
@@ -2200,6 +2213,721 @@ class PerformanceResultsDialog(QDialog):
         except Exception as e:
             FocusAwareMessageBox.critical(self, "Export Error", f"Failed to export report:\n{str(e)}")
 
+class LogViewerDialog(QDialog):
+    """Live log viewer dialog with tail -f functionality"""
+    
+    def __init__(self, log_path, parent=None):
+        super().__init__(parent)
+        self.log_path = log_path
+        self.file_position = 0
+        self.is_paused = False
+        self.auto_scroll = True
+        
+        self.setWindowTitle(f"Log Viewer - {os.path.basename(log_path)}")
+        self.setModal(False)  # Non-modal so user can interact with main app
+        self.resize(800, 600)
+        
+        self.setup_ui()
+        self.setup_timer()
+        self.load_initial_content()
+        
+    def setup_ui(self):
+        """Setup the UI components"""
+        layout = QVBoxLayout(self)
+        
+        # Toolbar
+        toolbar_layout = QHBoxLayout()
+        
+        self.pause_btn = QPushButton("Pause")
+        self.pause_btn.setCheckable(True)
+        self.pause_btn.clicked.connect(self.toggle_pause)
+        
+        self.clear_btn = QPushButton("Clear")
+        self.clear_btn.clicked.connect(self.clear_log_display)
+        
+        self.auto_scroll_cb = QCheckBox("Auto-scroll")
+        self.auto_scroll_cb.setChecked(True)
+        self.auto_scroll_cb.stateChanged.connect(self.toggle_auto_scroll)
+        
+        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.clicked.connect(self.force_refresh)
+        
+        self.copy_btn = QPushButton("Copy All")
+        self.copy_btn.clicked.connect(self.copy_to_clipboard)
+        
+        toolbar_layout.addWidget(self.pause_btn)
+        toolbar_layout.addWidget(self.clear_btn)
+        toolbar_layout.addWidget(self.auto_scroll_cb)
+        toolbar_layout.addWidget(self.refresh_btn)
+        toolbar_layout.addWidget(self.copy_btn)
+        toolbar_layout.addStretch()
+        
+        # Status label
+        self.status_label = QLabel(f"Watching: {self.log_path}")
+        self.status_label.setStyleSheet("QLabel { color: #888; font-size: 10px; }")
+        
+        # Log content area
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setFont(QFont("monospace", 9))
+        
+        # Set dark theme for log viewer
+        self.log_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #1a1a1a;
+                color: #f0f0f0;
+                border: 1px solid #444;
+                selection-background-color: #0078d4;
+            }
+        """)
+        
+        # Close button
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        
+        # Layout
+        layout.addLayout(toolbar_layout)
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.log_text)
+        layout.addWidget(close_btn)
+        
+    def setup_timer(self):
+        """Setup timer for periodic log updates"""
+        self.update_timer = QTimer()
+        self.update_timer.timeout.connect(self.update_log_content)
+        self.update_timer.start(1000)  # Update every 1 second
+        
+    def load_initial_content(self):
+        """Load initial log content (last 1000 lines)"""
+        try:
+            if not os.path.exists(self.log_path):
+                self.log_text.append(f"Log file does not exist: {self.log_path}")
+                return
+                
+            with open(self.log_path, 'r', encoding='utf-8', errors='ignore') as f:
+                # Read last 1000 lines
+                lines = f.readlines()
+                if len(lines) > 1000:
+                    lines = lines[-1000:]
+                    self.log_text.append("... (showing last 1000 lines) ...\n")
+                
+                content = ''.join(lines)
+                self.log_text.append(content)
+                
+                # Set file position to end
+                f.seek(0, 2)  # Seek to end
+                self.file_position = f.tell()
+                
+            if self.auto_scroll:
+                self.scroll_to_bottom()
+                
+        except Exception as e:
+            self.log_text.append(f"Error reading log file: {e}")
+            
+    def update_log_content(self):
+        """Update log content with new lines (tail -f behavior)"""
+        if self.is_paused:
+            return
+            
+        try:
+            if not os.path.exists(self.log_path):
+                return
+                
+            with open(self.log_path, 'r', encoding='utf-8', errors='ignore') as f:
+                # Check if file was truncated (log rotation)
+                f.seek(0, 2)  # Seek to end
+                current_size = f.tell()
+                
+                if current_size < self.file_position:
+                    # File was truncated, start from beginning
+                    self.file_position = 0
+                    self.log_text.append("\n--- Log file was rotated ---\n")
+                
+                # Read new content
+                f.seek(self.file_position)
+                new_content = f.read()
+                
+                if new_content:
+                    # Color-code log levels
+                    new_content = self.colorize_log_content(new_content)
+                    self.log_text.append(new_content)
+                    self.file_position = f.tell()
+                    
+                    if self.auto_scroll:
+                        self.scroll_to_bottom()
+                        
+        except Exception as e:
+            # Don't spam errors, just log once
+            if not hasattr(self, '_error_logged'):
+                self.log_text.append(f"Error updating log: {e}")
+                self._error_logged = True
+                
+    def colorize_log_content(self, content):
+        """Add basic color coding for log levels"""
+        # This is basic - you could make it more sophisticated
+        lines = content.split('\n')
+        colored_lines = []
+        
+        for line in lines:
+            if '[ERROR]' in line or '[CRITICAL]' in line:
+                colored_lines.append(f'<span style="color: #ff6b6b;">{line}</span>')
+            elif '[WARNING]' in line or '[WARN]' in line:
+                colored_lines.append(f'<span style="color: #ffa500;">{line}</span>')
+            elif '[INFO]' in line:
+                colored_lines.append(f'<span style="color: #87ceeb;">{line}</span>')
+            elif '[DEBUG]' in line:
+                colored_lines.append(f'<span style="color: #98fb98;">{line}</span>')
+            else:
+                colored_lines.append(line)
+        
+        return '\n'.join(colored_lines)
+    
+    def scroll_to_bottom(self):
+        """Scroll to bottom of log"""
+        scrollbar = self.log_text.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+        
+    def toggle_pause(self, checked):
+        """Toggle pause/resume log updates"""
+        self.is_paused = checked
+        self.pause_btn.setText("Resume" if checked else "Pause")
+        
+        if checked:
+            self.status_label.setText(f"PAUSED - {self.log_path}")
+            self.status_label.setStyleSheet("QLabel { color: #ff6b6b; font-size: 10px; }")
+        else:
+            self.status_label.setText(f"Watching: {self.log_path}")
+            self.status_label.setStyleSheet("QLabel { color: #888; font-size: 10px; }")
+            
+    def toggle_auto_scroll(self, state):
+        """Toggle auto-scroll feature"""
+        self.auto_scroll = (state == Qt.CheckState.Checked.value)
+        
+    def clear_log_display(self):
+        """Clear the log display (not the actual log file)"""
+        self.log_text.clear()
+        
+    def force_refresh(self):
+        """Force refresh the log content"""
+        self.log_text.clear()
+        self.file_position = 0
+        self.load_initial_content()
+        
+    def copy_to_clipboard(self):
+        """Copy all log content to clipboard"""
+        clipboard = QApplication.clipboard()
+        clipboard.setText(self.log_text.toPlainText())
+        
+        # Brief status update
+        original_text = self.status_label.text()
+        self.status_label.setText("Copied to clipboard!")
+        QTimer.singleShot(2000, lambda: self.status_label.setText(original_text))
+        
+    def closeEvent(self, event):
+        """Clean up when closing"""
+        # Close log viewer if open
+        if hasattr(self, 'log_viewer') and self.log_viewer:
+            self.log_viewer.close()
+            
+        if hasattr(self, 'update_timer'):
+            self.update_timer.stop()
+        event.accept()
+
+class SettingsEditorDialog(QDialog):
+    """Dialog for editing application settings as YAML"""
+    
+    def __init__(self, config_data, config_file_path, parent=None):
+        super().__init__(parent)
+        self.config_data = config_data
+        self.config_file_path = config_file_path
+        self.setWindowTitle("Settings Editor")
+        self.setModal(True)
+        self.resize(800, 600)
+        self.setup_ui()
+        self.load_yaml_content()
+        
+    def setup_ui(self):
+        layout = QVBoxLayout(self)
+        
+        # Header with file path
+        header_layout = QHBoxLayout()
+        header_label = QLabel("Editing configuration file:")
+        self.path_label = QLabel(self.config_file_path)
+        self.path_label.setStyleSheet("font-family: monospace; color: #888;")
+        header_layout.addWidget(header_label)
+        header_layout.addWidget(self.path_label)
+        header_layout.addStretch()
+        layout.addLayout(header_layout)
+        
+        # YAML editor
+        editor_group = QGroupBox("Configuration (YAML Format)")
+        editor_layout = QVBoxLayout(editor_group)
+        
+        self.yaml_editor = QTextEdit()
+        self.yaml_editor.setFont(QFont("monospace", 10))
+        
+        # Basic YAML syntax highlighting
+        self._setup_syntax_highlighting()
+        
+        editor_layout.addWidget(self.yaml_editor)
+        layout.addWidget(editor_group)
+        
+        # Validation status
+        self.status_label = QLabel("Ready")
+        self.status_label.setStyleSheet("color: green; font-weight: bold;")
+        layout.addWidget(self.status_label)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        
+        validate_btn = QPushButton("Validate YAML")
+        validate_btn.clicked.connect(self.validate_yaml)
+        
+        reset_btn = QPushButton("Reset to Original")
+        reset_btn.clicked.connect(self.load_yaml_content)
+        
+        save_btn = QPushButton("Save & Apply")
+        save_btn.clicked.connect(self.save_and_apply)
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        
+        button_layout.addWidget(validate_btn)
+        button_layout.addWidget(reset_btn)
+        button_layout.addStretch()
+        button_layout.addWidget(save_btn)
+        button_layout.addWidget(cancel_btn)
+        
+        layout.addLayout(button_layout)
+        
+        # Auto-validate on text change (with delay)
+        self.validation_timer = QTimer()
+        self.validation_timer.setSingleShot(True)
+        self.validation_timer.timeout.connect(self.validate_yaml_silent)
+        self.yaml_editor.textChanged.connect(self._on_text_changed)
+    
+    def _setup_syntax_highlighting(self):
+        """Setup basic YAML syntax highlighting"""
+        try:
+            # Simple YAML highlighting
+            self.yaml_editor.setStyleSheet("""
+                QTextEdit {
+                    background-color: #2b2b2b;
+                    color: #f8f8f2;
+                    border: 1px solid #3c3c3c;
+                    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+                    font-size: 11px;
+                    line-height: 1.4;
+                }
+            """)
+        except Exception as e:
+            logging.warning(f"Could not setup syntax highlighting: {e}")
+    
+    def load_yaml_content(self):
+        """Load current configuration as YAML text"""
+        try:
+            yaml_content = yaml.dump(self.config_data, default_flow_style=False, sort_keys=False, allow_unicode=True)
+            self.yaml_editor.setPlainText(yaml_content)
+            self.status_label.setText("✅ Configuration loaded")
+            self.status_label.setStyleSheet("color: green; font-weight: bold;")
+        except Exception as e:
+            self.status_label.setText(f"❌ Error loading config: {e}")
+            self.status_label.setStyleSheet("color: red; font-weight: bold;")
+    
+    def _on_text_changed(self):
+        """Called when text changes - start validation timer"""
+        self.validation_timer.stop()
+        self.validation_timer.start(1000)  # Validate after 1 second of no typing
+    
+    def validate_yaml_silent(self):
+        """Validate YAML without showing success message"""
+        try:
+            yaml_text = self.yaml_editor.toPlainText()
+            yaml.safe_load(yaml_text)
+            self.status_label.setText("✅ Valid YAML")
+            self.status_label.setStyleSheet("color: green; font-weight: bold;")
+            return True
+        except yaml.YAMLError as e:
+            self.status_label.setText(f"❌ YAML Error: {str(e)}")
+            self.status_label.setStyleSheet("color: red; font-weight: bold;")
+            return False
+        except Exception as e:
+            self.status_label.setText(f"❌ Parse Error: {str(e)}")
+            self.status_label.setStyleSheet("color: red; font-weight: bold;")
+            return False
+    
+    def validate_yaml(self):
+        """Validate YAML and show result"""
+        if self.validate_yaml_silent():
+            FocusAwareMessageBox.information(self, "Validation Success", "YAML syntax is valid!")
+        else:
+            FocusAwareMessageBox.warning(self, "Validation Failed", "Please fix the YAML syntax errors before saving.")
+    
+    def save_and_apply(self):
+        """Save the YAML configuration and apply changes"""
+        # Validate first
+        if not self.validate_yaml_silent():
+            reply = FocusAwareMessageBox.question(
+                self, "Invalid YAML",
+                "The YAML contains syntax errors. Save anyway?",
+                FocusAwareMessageBox.StandardButton.Yes | FocusAwareMessageBox.StandardButton.No,
+                FocusAwareMessageBox.StandardButton.No
+            )
+            if reply != FocusAwareMessageBox.StandardButton.Yes:
+                return
+        
+        try:
+            # Parse the YAML
+            yaml_text = self.yaml_editor.toPlainText()
+            new_config = yaml.safe_load(yaml_text)
+            
+            if new_config is None:
+                new_config = {}
+            
+            # Validate required fields exist
+            self._validate_config_structure(new_config)
+            
+            # Create backup of original file
+            backup_path = self.config_file_path + ".backup"
+            if os.path.exists(self.config_file_path):
+                shutil.copy2(self.config_file_path, backup_path)
+                logging.info(f"Created config backup: {backup_path}")
+            
+            # Ensure directory exists
+            config_dir = os.path.dirname(self.config_file_path)
+            os.makedirs(config_dir, exist_ok=True)
+            
+            # Save the new configuration
+            with open(self.config_file_path, 'w', encoding='utf-8') as f:
+                yaml.dump(new_config, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+            
+            self.status_label.setText("✅ Configuration saved successfully!")
+            self.status_label.setStyleSheet("color: green; font-weight: bold;")
+            
+            # Return the new config for the parent to apply
+            self.new_config = new_config
+            
+            FocusAwareMessageBox.information(
+                self, "Settings Saved",
+                f"Configuration saved successfully!\n\n"
+                f"File: {self.config_file_path}\n"
+                f"Backup: {backup_path}\n\n"
+                "Some changes may require restarting the application."
+            )
+            
+            self.accept()
+            
+        except Exception as e:
+            logging.error(f"Failed to save configuration: {e}")
+            FocusAwareMessageBox.critical(
+                self, "Save Failed",
+                f"Failed to save configuration:\n\n{str(e)}\n\n"
+                f"Your changes have not been saved."
+            )
+    
+    def _validate_config_structure(self, config):
+        """Validate that required configuration keys exist"""
+        required_keys = ['log_path', 'log_level', 'ae_title']
+        missing_keys = []
+        
+        for key in required_keys:
+            if key not in config or config[key] is None:
+                missing_keys.append(key)
+        
+        if missing_keys:
+            reply = FocusAwareMessageBox.question(
+                self, "Missing Required Settings",
+                f"The following required settings are missing or null:\n\n"
+                f"{', '.join(missing_keys)}\n\n"
+                f"This may cause the application to malfunction. Continue anyway?",
+                FocusAwareMessageBox.StandardButton.Yes | FocusAwareMessageBox.StandardButton.No,
+                FocusAwareMessageBox.StandardButton.No
+            )
+            if reply != FocusAwareMessageBox.StandardButton.Yes:
+                raise ValueError(f"Missing required configuration keys: {missing_keys}")
+
+class CheckboxTreeWidget(QTreeWidget):
+    """Tree widget with hierarchical checkbox behavior"""
+    
+    selection_changed = pyqtSignal()
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setHeaderLabels(["Patient/Study/Series/Instance", "Files", "Size"])
+        self.itemChanged.connect(self._on_item_changed)
+        self._updating_children = False  # Prevent recursive updates
+        
+    def _on_item_changed(self, item, column):
+        """Handle checkbox state changes with parent-child logic"""
+        if self._updating_children or column != 0:
+            return
+            
+        self._updating_children = True
+        
+        # Get new check state
+        check_state = item.checkState(0)
+        
+        # Update children to match parent
+        self._set_children_check_state(item, check_state)
+        
+        # Update parent based on children states
+        self._update_parent_check_state(item.parent())
+        
+        self._updating_children = False
+        self.selection_changed.emit()
+    
+    def _set_children_check_state(self, parent_item, check_state):
+        """Recursively set children to match parent state"""
+        if not parent_item:
+            return
+            
+        for i in range(parent_item.childCount()):
+            child = parent_item.child(i)
+            if check_state == Qt.CheckState.PartiallyChecked:
+                # Don't change children when parent becomes partially checked
+                continue
+            child.setCheckState(0, check_state)
+            self._set_children_check_state(child, check_state)
+    
+    def _update_parent_check_state(self, parent_item):
+        """Update parent check state based on children"""
+        if not parent_item:
+            return
+            
+        child_count = parent_item.childCount()
+        if child_count == 0:
+            return
+            
+        checked_count = 0
+        partially_checked_count = 0
+        
+        for i in range(child_count):
+            child = parent_item.child(i)
+            state = child.checkState(0)
+            if state == Qt.CheckState.Checked:
+                checked_count += 1
+            elif state == Qt.CheckState.PartiallyChecked:
+                partially_checked_count += 1
+        
+        # Determine parent state
+        if checked_count == child_count:
+            # All children checked
+            parent_item.setCheckState(0, Qt.CheckState.Checked)
+        elif checked_count == 0 and partially_checked_count == 0:
+            # No children checked
+            parent_item.setCheckState(0, Qt.CheckState.Unchecked)
+        else:
+            # Some children checked
+            parent_item.setCheckState(0, Qt.CheckState.PartiallyChecked)
+        
+        # Recursively update grandparent
+        self._update_parent_check_state(parent_item.parent())
+    
+    def get_checked_file_paths(self):
+        """Return list of file paths for checked instance items"""
+        file_paths = []
+        
+        def collect_checked_files(item):
+            # Only instance items (depth 3) have file paths
+            if item.depth() == 3 and item.checkState(0) == Qt.CheckState.Checked:
+                file_path = item.data(0, Qt.ItemDataRole.UserRole)
+                if file_path:
+                    file_paths.append(file_path)
+            
+            # Recursively check children
+            for i in range(item.childCount()):
+                collect_checked_files(item.child(i))
+        
+        # Check all top-level items
+        for i in range(self.topLevelItemCount()):
+            collect_checked_files(self.topLevelItem(i))
+        
+        return file_paths
+    
+    def get_selection_stats(self):
+        """Return statistics about current selection"""Perfect! Let's implement this step by step. I'll create a comprehensive DICOM send file selection dialog.
+
+## **Step 1: Custom Checkbox Tree Widget** 🌳
+
+Add this class before your `MainWindow` class:
+
+```python
+class CheckboxTreeWidget(QTreeWidget):
+    """Tree widget with hierarchical checkbox behavior"""
+    
+    selection_changed = pyqtSignal()
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setHeaderLabels(["Patient", "Study", "Series", "Instance"])
+        self.itemChanged.connect(self._on_item_changed)
+        self._updating_checkboxes = False  # Prevent recursive updates
+        
+    def _on_item_changed(self, item, column):
+        """Handle checkbox state changes with hierarchical logic"""
+        if self._updating_checkboxes or column != 0:
+            return
+            
+        self._updating_checkboxes = True
+        
+        try:
+            check_state = item.checkState(0)
+            
+            if check_state == Qt.CheckState.Checked:
+                # Check all children
+                self._set_children_check_state(item, Qt.CheckState.Checked)
+            elif check_state == Qt.CheckState.Unchecked:
+                # Uncheck all children
+                self._set_children_check_state(item, Qt.CheckState.Unchecked)
+            
+            # Update parent based on children states
+            self._update_parent_check_state(item)
+            
+            # Emit selection changed signal
+            self.selection_changed.emit()
+            
+        finally:
+            self._updating_checkboxes = False
+    
+    def _set_children_check_state(self, item, state):
+        """Recursively set check state for all children"""
+        for i in range(item.childCount()):
+            child = item.child(i)
+            child.setCheckState(0, state)
+            self._set_children_check_state(child, state)
+    
+    def _update_parent_check_state(self, item):
+        """Update parent check state based on children"""
+        parent = item.parent()
+        if not parent:
+            return
+            
+        # Count checked children
+        total_children = parent.childCount()
+        checked_children = 0
+        partially_checked_children = 0
+        
+        for i in range(total_children):
+            child = parent.child(i)
+            child_state = child.checkState(0)
+            
+            if child_state == Qt.CheckState.Checked:
+                checked_children += 1
+            elif child_state == Qt.CheckState.PartiallyChecked:
+                partially_checked_children += 1
+        
+        # Set parent state based on children
+        if checked_children == total_children and partially_checked_children == 0:
+            # All children checked
+            parent.setCheckState(0, Qt.CheckState.Checked)
+        elif checked_children == 0 and partially_checked_children == 0:
+            # No children checked
+            parent.setCheckState(0, Qt.CheckState.Unchecked)
+        else:
+            # Some children checked
+            parent.setCheckState(0, Qt.CheckState.PartiallyChecked)
+        
+        # Recursively update grandparent
+        self._update_parent_check_state(parent)
+    
+    def get_checked_files(self):
+        """Return list of file paths for checked instances"""
+        checked_files = []
+        
+        def collect_checked_files(item):
+            # Only collect files from instance-level items (depth 3)
+            if item.depth() == 3:  # Instance level
+                if item.checkState(0) == Qt.CheckState.Checked:
+                    filepath = item.data(0, Qt.ItemDataRole.UserRole)
+                    if filepath:
+                        checked_files.append(filepath)
+            else:
+                # Recurse through children
+                for i in range(item.childCount()):
+                    collect_checked_files(item.child(i))
+        
+        # Start from root level
+        for i in range(self.topLevelItemCount()):
+            collect_checked_files(self.topLevelItem(i))
+        
+        return checked_files
+    
+    def set_all_checked(self, checked=True):
+        """Check or uncheck all items"""
+        self._updating_checkboxes = True
+        try:
+            state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+            for i in range(self.topLevelItemCount()):
+                item = self.topLevelItem(i)
+                item.setCheckState(0, state)
+                self._set_children_check_state(item, state)
+            self.selection_changed.emit()
+        finally:
+            self._updating_checkboxes = False
+
+
+class SelectionSummaryWidget(QWidget):
+    """Widget to display selection summary statistics"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._setup_ui()
+        
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        
+        # Title
+        title = QLabel("Selection Summary")
+        title.setStyleSheet("font-weight: bold; font-size: 14px;")
+        layout.addWidget(title)
+        
+        # Statistics labels
+        self.files_label = QLabel("Files: 0")
+        self.size_label = QLabel("Size: 0 MB")
+        self.patients_label = QLabel("Patients: 0")
+        self.studies_label = QLabel("Studies: 0")
+        self.series_label = QLabel("Series: 0")
+        self.modalities_label = QLabel("Modalities: None")
+        
+        layout.addWidget(self.files_label)
+        layout.addWidget(self.size_label)
+        layout.addWidget(self.patients_label)
+        layout.addWidget(self.studies_label)
+        layout.addWidget(self.series_label)
+        layout.addWidget(self.modalities_label)
+        
+        layout.addStretch()
+    
+    def update_summary(self, file_paths):
+        """Update summary based on selected file paths"""
+        if not file_paths:
+            self.files_label.setText("Files: 0")
+            self.size_label.setText("Size: 0 MB")
+            self.patients_label.setText("Patients: 0")
+            self.studies_label.setText("Studies: 0")
+            self.series_label.setText("Series: 0")
+            self.modalities_label.setText("Modalities: None")
+            return
+        
+        # Analyze selected files
+        patients = set()
+        studies = set()
+        series = set()
+        modalities = set()
+        total_size = 0
+        
+        for filepath in file_paths:
+            try:
+                # Get file size
+                if os.path.exists(filepath):
+                    total_size += os.path.getsize(filepath)
+                
+                # Read DICOM metadata
+                ds = pydicom.dcmread(filepath, stop_before_pixels=True)
+                
+                patient_id = str(getattr(ds,
+
 class MainWindow(QMainWindow):
     def __init__(self, start_path=None, config_path_override=None):
         super().__init__() # Call super constructor first
@@ -2285,17 +3013,9 @@ class MainWindow(QMainWindow):
         act_open_dir.triggered.connect(self.open_directory)
         toolbar.addAction(act_open_dir)
 
-        act_save = QAction(save_icon, "Save As", self) # User's toolbar save
-        act_save.triggered.connect(self.save_as)
-        toolbar.addAction(act_save)
-
         act_delete = QAction(delete_icon, "Delete", self)
         act_delete.triggered.connect(self.delete_selected_items)
         toolbar.addAction(act_delete)
-
-        act_merge = QAction(merge_icon, "Merge Patients", self)
-        act_merge.triggered.connect(self.merge_patients)
-        toolbar.addAction(act_merge)
 
         act_expand = QAction(expand_icon, "Expand All", self)
         act_expand.triggered.connect(self.tree_expand_all)
@@ -2304,9 +3024,6 @@ class MainWindow(QMainWindow):
         act_collapse = QAction(collapse_icon, "Collapse All", self)
         act_collapse.triggered.connect(self.tree_collapse_all)
         toolbar.addAction(act_collapse)
-        toolbar.addSeparator()
-
-        # Add after the existing toolbar actions
         toolbar.addSeparator()
 
         validate_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton)
@@ -2320,6 +3037,16 @@ class MainWindow(QMainWindow):
         act_templates = QAction(template_icon, "Manage Templates", self)
         act_templates.triggered.connect(self.manage_templates)
         toolbar.addAction(act_templates)
+
+        logs_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView)
+        act_show_logs = QAction(logs_icon, "Show Logs", self)
+        act_show_logs.triggered.connect(self.show_log_viewer)
+        toolbar.addAction(act_show_logs)
+
+        settings_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+        act_settings = QAction(settings_icon, "Settings", self)
+        act_settings.triggered.connect(self.open_settings_editor)
+        toolbar.addAction(act_settings)
 
         # Main Splitter (User's Original)
         main_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -2506,6 +3233,10 @@ class MainWindow(QMainWindow):
         self.current_filepath = None
         self.current_ds = None
         self._all_tag_rows = []
+
+        #For discard changes dialog tracking
+        self.has_unsaved_tag_changes = False
+        self.reverting_selection= False
 
         self.pending_start_path = start_path  # Store for later loading
         if start_path:
@@ -2841,22 +3572,17 @@ class MainWindow(QMainWindow):
 
     def open_file(self):
         """GUI file picker"""
-        dialog = QFileDialog(
-            self,
+        filename, _ = self._get_open_filename(
             "Open DICOM or ZIP File",
             self.default_import_dir,
             "ZIP Archives (*.zip);;DICOM Files (*.dcm);;All Files (*)"
         )
-        dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
-        if dialog.exec():
-            file_paths = dialog.selectedFiles()
-            if file_paths:
-                self.load_path(file_paths[0])
+        if filename:
+            self.load_path(filename)
 
     def open_directory(self):
         """GUI directory picker"""
-        dir_path = QFileDialog.getExistingDirectory(
-            self,
+        dir_path = self._get_existing_directory(
             "Open DICOM Directory",
             self.default_import_dir
         )
@@ -3008,15 +3734,16 @@ class MainWindow(QMainWindow):
         self.tag_table.setColumnWidth(2, 260)
         self.tag_table.setColumnWidth(3, 160)
 
-    def populate_tree(self, files): # User's original populate_tree
+    def populate_tree(self, files):
         self.tree.clear()
         hierarchy = {}
         self.file_metadata = {}
         modalities = set()
-        progress = FocusAwareProgressDialog("Loading DICOM headers...", "Cancel", 0, len(files), self)
+        progress = QProgressDialog("Loading DICOM headers...", "Cancel", 0, len(files), self)
         progress.setWindowTitle("Loading DICOM Files")
         progress.setMinimumDuration(0)
         progress.setValue(0)
+        
         for idx, f in enumerate(files):
             if progress.wasCanceled():
                 break
@@ -3033,22 +3760,39 @@ class MainWindow(QMainWindow):
                 series_label = f"{series_desc} [{series_uid}]"
                 instance_number = getattr(ds, "InstanceNumber", None)
                 sop_uid = getattr(ds, "SOPInstanceUID", os.path.basename(f))
+                
+                # Create instance label but store numerical info for sorting
                 if instance_number is not None:
                     instance_label = f"Instance {instance_number} [{sop_uid}]"
+                    # Convert to int for proper numerical sorting
+                    try:
+                        instance_sort_key = int(instance_number)
+                    except (ValueError, TypeError):
+                        instance_sort_key = 999999  # Put non-numeric at end
                 else:
                     instance_label = f"{os.path.basename(f)} [{sop_uid}]"
+                    instance_sort_key = 999999  # Put missing instance numbers at end
+                
                 modality = getattr(ds, "Modality", None)
                 if modality:
                     modalities.add(str(modality))
+                
                 self.file_metadata[f] = (patient_label, study_label, series_label, instance_label)
-                hierarchy.setdefault(patient_label, {}).setdefault(study_label, {}).setdefault(series_label, {})[instance_label] = f
+                
+                # CHANGED: Store both filepath and sort key for proper ordering
+                hierarchy.setdefault(patient_label, {}).setdefault(study_label, {}).setdefault(series_label, {})[instance_label] = {
+                    'filepath': f,
+                    'sort_key': instance_sort_key,
+                    'instance_number': instance_number
+                }
+                
             except Exception:
-                # logging.warning(f"Could not parse DICOM header for {f}: {e}", exc_info=True) # Add logging
-                continue # Skip problematic files
+                continue
             progress.setValue(idx + 1)
             QApplication.processEvents()
         progress.close()
 
+        # Icons (unchanged)
         patient_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
         study_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon)
         series_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DriveHDIcon)
@@ -3061,6 +3805,7 @@ class MainWindow(QMainWindow):
             font.setBold(True)
             patient_item.setFont(0, font)
             self.tree.addTopLevelItem(patient_item)
+            
             for study, series_dict in studies.items():
                 study_item = QTreeWidgetItem([patient, study])
                 study_item.setIcon(1, study_icon)
@@ -3068,24 +3813,32 @@ class MainWindow(QMainWindow):
                 font2.setBold(True)
                 study_item.setFont(1, font2)
                 patient_item.addChild(study_item)
+                
                 for series, instances in series_dict.items():
                     series_item = QTreeWidgetItem([patient, study, series])
                     series_item.setIcon(2, series_icon)
                     study_item.addChild(series_item)
-                    for instance, filepath in sorted(instances.items()):
-                        instance_item = QTreeWidgetItem([patient, study, series, str(instance)])
+                    
+                    # CHANGED: Sort instances by numerical InstanceNumber instead of alphabetical
+                    sorted_instances = sorted(instances.items(), key=lambda x: x[1]['sort_key'])
+                    
+                    for instance_label, instance_data in sorted_instances:
+                        filepath = instance_data['filepath']
+                        instance_item = QTreeWidgetItem([patient, study, series, str(instance_label)])
                         instance_item.setIcon(3, instance_icon)
-                        # Store filepath in UserRole for easy access, not in display text
-                        instance_item.setData(0, Qt.ItemDataRole.UserRole, filepath) 
+                        # Store filepath in UserRole for easy access
+                        instance_item.setData(0, Qt.ItemDataRole.UserRole, filepath)
                         series_item.addChild(instance_item)
+        
         self.tree.expandAll()
 
+        # Rest of summary calculation (unchanged)
         patient_count = len(hierarchy)
         study_count = sum(len(studies) for studies in hierarchy.values())
         series_count = sum(len(series_dict) for studies in hierarchy.values() for series_dict in studies.values())
-        instance_count = len(files) # This should be len of successfully processed files
+        instance_count = len(files)
         modality_str = ", ".join(sorted(modalities)) if modalities else "Unknown"
-        total_bytes = sum(os.path.getsize(f) for f in files if os.path.exists(f)) # Use successfully processed files
+        total_bytes = sum(os.path.getsize(f) for f in files if os.path.exists(f))
         if total_bytes < 1024 * 1024 * 1024:
             size_str = f"{total_bytes / (1024 * 1024):.2f} MB"
         else:
@@ -3117,7 +3870,28 @@ class MainWindow(QMainWindow):
             FocusAwareMessageBox.critical(self, "Error", f"Error reading file: {e}")
 
 
-    def display_selected_tree_file(self): # User's original method with performance diagnosis
+    def display_selected_tree_file(self):
+        # Safety check: ensure flags are initialized
+        if not hasattr(self, 'has_unsaved_tag_changes'):
+            self.has_unsaved_tag_changes = False
+        if not hasattr(self, 'reverting_selection'):
+            self.reverting_selection = False
+        
+        # Skip if we're in the middle of reverting selection
+        if self.reverting_selection:
+            return
+        
+        # Check for unsaved changes before navigating away
+        if self.has_unsaved_tag_changes and self.current_filepath:
+            choice = self._prompt_for_unsaved_changes()
+            
+            if choice == "keep_editing":
+                # Don't navigate away, revert tree selection to current file
+                self._revert_tree_selection_to_current_file()
+                return
+            # If choice == "discard", continue with navigation and clear changes
+        
+        # Original display_selected_tree_file logic
         selected = self.tree.selectedItems()
         if not selected:
             self.tag_table.setRowCount(0)
@@ -3125,30 +3899,30 @@ class MainWindow(QMainWindow):
             self.current_ds = None
             self.image_label.clear()
             self.image_label.setVisible(False)
+            self._clear_unsaved_changes()
             return
+        
         item = selected[0]
-        # Corrected to use UserRole for filepath
-        filepath = item.data(0, Qt.ItemDataRole.UserRole) # Assuming filepath is stored here by populate_tree
+        filepath = item.data(0, Qt.ItemDataRole.UserRole)
 
-        if not filepath: # If not an instance node or filepath not set
+        if not filepath:
             self.tag_table.setRowCount(0)
             self.current_filepath = None
             self.current_ds = None
             self.image_label.clear()
             self.image_label.setVisible(False)
+            self._clear_unsaved_changes()
             return
         
-        # Avoid reloading if the same file is already current, unless preview toggle changed things
+        # Avoid reloading if the same file is already current
         if self.current_filepath == filepath and self.current_ds is not None:
-            # Check if preview needs update due to toggle (handled by _update_image_preview)
             self._update_image_preview(self.current_ds)
             return
 
         try:
-            # Add performance timing
             start_time = time.time()
             
-            ds = pydicom.dcmread(filepath) # Read full dataset for preview
+            ds = pydicom.dcmread(filepath)
             
             load_time = time.time() - start_time
             
@@ -3156,14 +3930,13 @@ class MainWindow(QMainWindow):
             self.current_ds = ds
             self.populate_tag_table(ds)
             
-            # Diagnose if loading was slow
-            if load_time > 0.5:  # If took more than 500ms
-                logging.info(f"SLOW LOADING DETECTED ({load_time:.2f}s)")
+            if load_time > 0.5:
+                print(f"SLOW LOADING DETECTED ({load_time:.2f}s)")
                 self.diagnose_image_performance(ds, filepath)
-            elif load_time > 0.1:  # If took more than 100ms but less than 500ms
-                logging.info(f"Moderate loading time: {load_time:.2f}s for {os.path.basename(filepath)}")
+            elif load_time > 0.1:
+                print(f"Moderate loading time: {load_time:.2f}s for {os.path.basename(filepath)}")
             
-            self._update_image_preview(ds) # Call helper for preview logic
+            self._update_image_preview(ds)
             
         except Exception as e:
             self.tag_table.setRowCount(0)
@@ -3171,6 +3944,7 @@ class MainWindow(QMainWindow):
             self.current_ds = None
             self.image_label.clear()
             self.image_label.setVisible(False)
+            self._clear_unsaved_changes()
             FocusAwareMessageBox.critical(self, "Error", f"Error reading file: {filepath}\n{e}")
             logging.error(f"Error reading file {filepath}: {e}", exc_info=True)
 
@@ -3399,22 +4173,35 @@ class MainWindow(QMainWindow):
         arr = (arr * 255).astype(np.uint8)
         return arr
 
-    def populate_tag_table(self, ds): # User's original
+    def populate_tag_table(self, ds):
         self.tag_table.setRowCount(0)
         self._all_tag_rows = []
+        
+        # Temporarily disconnect change tracking to avoid false positives during population
+        try:
+            self.tag_table.itemChanged.disconnect()
+        except:
+            pass  # No connection exists yet
+        
         for elem in ds:
             if elem.tag == (0x7fe0, 0x0010):
                 value = "<Pixel Data not shown>"
-            elif elem.VR in ("OB", "OW", "UN"): # User had "UN" here
+            elif elem.VR in ("OB", "OW", "UN"):
                 value = "<Binary data not shown>"
             else:
                 value = str(elem.value)
             tag_id = f"({elem.tag.group:04X},{elem.tag.element:04X})"
             desc = elem.name
-            row_data = [tag_id, desc, value, ""] # Data for the row
-            # Store the pydicom element itself for reference (e.g. VR, original type)
-            self._all_tag_rows.append({'elem_obj': elem, 'display_row': row_data}) 
-        self.apply_tag_table_filter() # Call to apply filter/populate
+            row_data = [tag_id, desc, value, ""]
+            self._all_tag_rows.append({'elem_obj': elem, 'display_row': row_data})
+        
+        self.apply_tag_table_filter()
+        
+        # Clear unsaved changes flag when loading new file
+        self._clear_unsaved_changes()
+        
+        # Connect change tracking
+        self.tag_table.itemChanged.connect(self._on_tag_item_changed)
 
     def apply_tag_table_filter(self): # User's original logic, adapted to use _all_tag_rows structure
         filter_text = self.search_bar.text().lower()
@@ -3547,6 +4334,8 @@ class MainWindow(QMainWindow):
             msg += f"\nFailed to update: {', '.join(failed_files)}"
         FocusAwareMessageBox.information(self, "Batch Edit Complete", msg)
         
+        self._clear_unsaved_changes()
+
         # Refresh view if the currently displayed file was part of the batch
         if self.current_filepath in filepaths:
             self.display_selected_tree_file()
@@ -3661,19 +4450,45 @@ class MainWindow(QMainWindow):
             FocusAwareMessageBox.critical(self, "Error", f"Failed to update tag: {str(e)}")
 
 
-
-    def batch_edit_tag(self): # Enhanced with tag search
-        """Batch edit tags using searchable interface"""
+    def batch_edit_tag(self):
+        """Batch edit tags using searchable interface with selection validation"""
         selected = self.tree.selectedItems()
         if not selected:
             FocusAwareMessageBox.warning(self, "No Selection", "Please select a node in the tree.")
             return
-        item = selected[0]
-        filepaths = self._collect_instance_filepaths(item)
+        
+        # Check selection level and provide guidance
+        selection_info = self._analyze_batch_edit_selection(selected)
+        
+        if not selection_info['is_valid']:
+            FocusAwareMessageBox.warning(self, "Invalid Selection for Batch Edit", selection_info['message'])
+            return
+        
+        # If we have a valid selection, show info about what will be edited
+        if selection_info['show_confirmation']:
+            reply = FocusAwareMessageBox.question(
+                self, "Confirm Batch Edit Scope",
+                selection_info['confirmation_message'],
+                FocusAwareMessageBox.StandardButton.Yes | FocusAwareMessageBox.StandardButton.No,
+                FocusAwareMessageBox.StandardButton.Yes
+            )
+            if reply != FocusAwareMessageBox.StandardButton.Yes:
+                return
+        
+        # Collect files from the selection
+        filepaths = []
+        for item in selected:
+            item_files = self._collect_instance_filepaths(item)
+            filepaths.extend(item_files)
+        
+        # Remove duplicates
+        filepaths = list(set(filepaths))
+        
         if not filepaths:
-            FocusAwareMessageBox.warning(self, "No Instances", "No DICOM instances found under this node.")
+            FocusAwareMessageBox.warning(self, "No Instances", "No DICOM instances found under the selected nodes.")
             return
 
+        # ... rest of your existing batch_edit_tag method (tag search, confirmation, etc.) ...
         
         # Show tag search dialog
         tag_dialog = TagSearchDialog(self, "Select Tag for Batch Edit")
@@ -3723,7 +4538,7 @@ class MainWindow(QMainWindow):
             
         new_value = value_dialog.new_value
         
-        # Confirm batch operation
+        # Final confirmation with file count
         reply = FocusAwareMessageBox.question(
             self, "Confirm Batch Edit",
             f"This will update the tag '{tag_info['name']}' in {len(filepaths)} files.\n"
@@ -3783,8 +4598,118 @@ class MainWindow(QMainWindow):
             
         FocusAwareMessageBox.information(self, "Batch Edit Complete", msg)
         
+        all_known_files_after_edit = [f_info[0] for f_info in self.loaded_files if os.path.exists(f_info[0])]
+        if all_known_files_after_edit:
+            self._load_dicom_files_from_list(all_known_files_after_edit, "data after batch edit")
+        
+        # Refresh current file display if it was part of the batch
         if self.current_filepath in filepaths:
             self.display_selected_tree_file()
+
+    def _analyze_batch_edit_selection(self, selected_items):
+        """Analyze the selection to determine if it's appropriate for batch editing"""
+        
+        if not selected_items:
+            return {
+                'is_valid': False,
+                'message': "Please select a node in the tree.",
+                'show_confirmation': False
+            }
+        
+        # Analyze what types of nodes are selected
+        depths = [item.depth() for item in selected_items]
+        unique_depths = set(depths)
+        
+        # Check for single instance selection
+        if len(selected_items) == 1 and depths[0] == 3:  # Single instance node
+            return {
+                'is_valid': False,
+                'message': (
+                    "Batch edit requires multiple files to edit.\n\n"
+                    "To batch edit:\n"
+                    "• Select a Series node (edits all instances in that series)\n"
+                    "• Select a Study node (edits all instances in that study)\n"
+                    "• Select a Patient node (edits all instances for that patient)\n"
+                    "• Hold Ctrl and select multiple individual instances\n"
+                    "• Hold Ctrl and select multiple series/studies/patients"
+                ),
+                'show_confirmation': False
+            }
+        
+        # Multiple instances selected
+        if all(depth == 3 for depth in depths):
+            instance_count = len(selected_items)
+            return {
+                'is_valid': True,
+                'message': '',
+                'show_confirmation': True,
+                'confirmation_message': (
+                    f"You have selected {instance_count} individual instances.\n\n"
+                    f"This will batch edit tags in these {instance_count} specific files.\n\n"
+                    "Continue with batch edit?"
+                )
+            }
+        
+        # Series level selection(s)
+        if all(depth == 2 for depth in depths):
+            series_count = len(selected_items)
+            total_files = sum(len(self._collect_instance_filepaths(item)) for item in selected_items)
+            return {
+                'is_valid': True,
+                'message': '',
+                'show_confirmation': True,
+                'confirmation_message': (
+                    f"You have selected {series_count} series.\n\n"
+                    f"This will batch edit tags in approximately {total_files} files across these series.\n\n"
+                    "Continue with batch edit?"
+                )
+            }
+        
+        # Study level selection(s)
+        if all(depth == 1 for depth in depths):
+            study_count = len(selected_items)
+            total_files = sum(len(self._collect_instance_filepaths(item)) for item in selected_items)
+            return {
+                'is_valid': True,
+                'message': '',
+                'show_confirmation': True,
+                'confirmation_message': (
+                    f"You have selected {study_count} studies.\n\n"
+                    f"This will batch edit tags in approximately {total_files} files across these studies.\n\n"
+                    "Continue with batch edit?"
+                )
+            }
+        
+        # Patient level selection(s)
+        if all(depth == 0 for depth in depths):
+            patient_count = len(selected_items)
+            total_files = sum(len(self._collect_instance_filepaths(item)) for item in selected_items)
+            return {
+                'is_valid': True,
+                'message': '',
+                'show_confirmation': True,
+                'confirmation_message': (
+                    f"You have selected {patient_count} patients.\n\n"
+                    f"This will batch edit tags in approximately {total_files} files for these patients.\n\n"
+                    "Continue with batch edit?"
+                )
+            }
+        
+        # Mixed selection levels
+        level_names = {0: "Patient", 1: "Study", 2: "Series", 3: "Instance"}
+        selected_levels = [level_names[depth] for depth in unique_depths]
+        total_files = sum(len(self._collect_instance_filepaths(item)) for item in selected_items)
+        
+        return {
+            'is_valid': True,
+            'message': '',
+            'show_confirmation': True,
+            'confirmation_message': (
+                f"You have selected items at multiple levels: {', '.join(selected_levels)}.\n\n"
+                f"This will batch edit tags in approximately {total_files} files.\n\n"
+                "Continue with batch edit?"
+            )
+        }
     
     def _convert_value_by_vr(self, value_str, vr):
         """Convert string value to appropriate type based on VR"""
@@ -3839,31 +4764,33 @@ class MainWindow(QMainWindow):
 
         # Get output path based on export type
         if export_type == "Directory":
-            output_path = QFileDialog.getExistingDirectory(
-                self, "Select Export Directory", self.default_export_dir
-            )
-            if not output_path:
+            out_dir = self._get_existing_directory("Select Export Directory", self.default_export_dir)
+            if not out_dir:
                 return
-            worker_export_type = "directory"
+            # ... rest unchanged ...
             
         elif export_type == "ZIP":
-            output_path, _ = QFileDialog.getSaveFileName(
-                self, "Save ZIP Archive", self.default_export_dir, "ZIP Archives (*.zip)"
+            out_zip_path, _ = self._get_save_filename(
+                "Save ZIP Archive", 
+                self.default_export_dir, 
+                "ZIP Archives (*.zip)"
             )
-            if not output_path:
+            if not out_zip_path:
                 return
-            if not output_path.lower().endswith('.zip'):
-                output_path += '.zip'
-            worker_export_type = "zip"
+            if not out_zip_path.lower().endswith('.zip'):
+                out_zip_path += '.zip'
+            # ... rest unchanged ...
             
         elif export_type == "ZIP with DICOMDIR":
-            output_path, _ = QFileDialog.getSaveFileName(
-                self, "Save DICOMDIR ZIP Archive", self.default_export_dir, "ZIP Archives (*.zip)"
+            out_zip_path, _ = self._get_save_filename(
+                "Save DICOMDIR ZIP Archive", 
+                self.default_export_dir, 
+                "ZIP Archives (*.zip)"
             )
-            if not output_path:
+            if not out_zip_path:
                 return
-            if not output_path.lower().endswith('.zip'):
-                output_path += '.zip'
+            if not out_zip_path.lower().endswith('.zip'):
+                out_zip_path += '.zip'
             worker_export_type = "dicomdir_zip"
         
         # Start non-blocking export
@@ -5176,6 +6103,328 @@ class MainWindow(QMainWindow):
                     zipf.write(file_path, arcname)
         
         logging.info(f"Created ZIP archive: {output_zip}")
+    
+    def _on_tag_item_changed(self, item):
+        """Called when a tag table item is edited - only track actual changes"""
+        # Only track changes in the "New Value" column (column 3)
+        if item.column() == 3:
+            row = item.row()
+            new_value = item.text().strip()
+            
+            # Get the original value from the "Value" column (column 2)
+            current_value_item = self.tag_table.item(row, 2)
+            original_value = current_value_item.text() if current_value_item else ""
+            
+            # Only flag as changed if there's actually a difference AND new value is not empty
+            if new_value and new_value != original_value:
+                self.has_unsaved_tag_changes = True
+                logging.debug(f"Detected unsaved change in row {row}: '{original_value}' -> '{new_value}'")
+            else:
+                # Value was cleared or changed back to original, check if any other changes exist
+                self._check_for_remaining_changes()
+
+    def _check_for_remaining_changes(self):
+        """Check if any unsaved changes remain in the tag table"""
+        has_changes = False
+        
+        for row in range(self.tag_table.rowCount()):
+            new_value_item = self.tag_table.item(row, 3)
+            current_value_item = self.tag_table.item(row, 2)
+            
+            if new_value_item and current_value_item:
+                new_value = new_value_item.text().strip()
+                current_value = current_value_item.text()
+                
+                # Has changes if new value exists and is different from current
+                if new_value and new_value != current_value:
+                    has_changes = True
+                    break
+        
+        self.has_unsaved_tag_changes = has_changes
+        logging.debug(f"Remaining changes check: {has_changes}")
+
+    def _clear_unsaved_changes(self):
+        """Clear the unsaved changes flag"""
+        self.has_unsaved_tag_changes = False
+        logging.debug("Cleared unsaved changes flag")
+
+    def _prompt_for_unsaved_changes(self):
+        """Prompt user about unsaved changes - simplified to keep/discard only"""
+        current_filename = os.path.basename(self.current_filepath) if self.current_filepath else "current file"
+        
+        msg = (f"You have unsaved tag changes in '{current_filename}'.\n\n"
+            "These changes will be lost if you navigate away.\n\n"
+            "What would you like to do?")
+        
+        msgbox = FocusAwareMessageBox(
+            FocusAwareMessageBox.Icon.Warning,
+            "Unsaved Changes", 
+            msg,
+            FocusAwareMessageBox.StandardButton.NoButton,
+            self
+        )
+        
+        keep_editing_btn = msgbox.addButton("Keep Editing", FocusAwareMessageBox.ButtonRole.RejectRole)
+        discard_btn = msgbox.addButton("Discard Changes", FocusAwareMessageBox.ButtonRole.DestructiveRole)
+        
+        msgbox.setDefaultButton(keep_editing_btn)
+        msgbox.exec()
+        
+        clicked_button = msgbox.clickedButton()
+        
+        if clicked_button == discard_btn:
+            return "discard"
+        else:  # keep_editing_btn or closed dialog
+            return "keep_editing"
+        
+    def _revert_tree_selection_to_current_file(self):
+        """Revert tree selection back to the currently displayed file"""
+        if not self.current_filepath:
+            return
+        
+        # Set flag to prevent recursion
+        self.reverting_selection = True
+        
+        try:
+            # Find the tree item that corresponds to current_filepath
+            current_item = self._find_tree_item_by_filepath(self.current_filepath)
+            
+            if current_item:
+                # Clear current selection
+                self.tree.clearSelection()
+                
+                # Select the current item
+                current_item.setSelected(True)
+                
+                # Ensure the item is visible (expand parents if needed)
+                self._ensure_item_visible(current_item)
+                
+                logging.debug(f"Reverted tree selection to current file: {os.path.basename(self.current_filepath)}")
+            else:
+                logging.warning(f"Could not find tree item for current file: {self.current_filepath}")
+        
+        finally:
+            # Clear the flag
+            self.reverting_selection = False
+    
+    def _find_tree_item_by_filepath(self, filepath):
+        """Find a tree item by its stored filepath"""
+        def search_item(item):
+            # Check if this item has the filepath we're looking for
+            item_filepath = item.data(0, Qt.ItemDataRole.UserRole)
+            if item_filepath == filepath:
+                return item
+            
+            # Search children
+            for i in range(item.childCount()):
+                found = search_item(item.child(i))
+                if found:
+                    return found
+            return None
+        
+        # Search all top-level items (patients)
+        for i in range(self.tree.topLevelItemCount()):
+            found = search_item(self.tree.topLevelItem(i))
+            if found:
+                return found
+        
+        return None
+
+    def _ensure_item_visible(self, item):
+        """Ensure a tree item is visible by expanding its parents"""
+        # Expand all parent items
+        parent = item.parent()
+        while parent:
+            parent.setExpanded(True)
+            parent = parent.parent()
+        
+        # Scroll to make the item visible
+        self.tree.scrollToItem(item)
+
+    def _get_open_filename(self, caption, directory="", filter="", initial_filter=""):
+        """Get filename to open using configured file picker"""
+        dialog = QFileDialog(self, caption, directory, filter)
+        
+        # Configure based on user preference
+        if not self.config.get("file_picker_native", False):
+            dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        
+        if initial_filter:
+            dialog.selectNameFilter(initial_filter)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            files = dialog.selectedFiles()
+            if files:
+                return files[0], dialog.selectedNameFilter()
+        
+        return "", ""
+
+    def _get_save_filename(self, caption, directory="", filter="", initial_filter=""):
+        """Get filename to save using configured file picker"""
+        dialog = QFileDialog(self, caption, directory, filter)
+        dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+        
+        # Configure based on user preference
+        if not self.config.get("file_picker_native", False):
+            dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        
+        if initial_filter:
+            dialog.selectNameFilter(initial_filter)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            files = dialog.selectedFiles()
+            if files:
+                return files[0], dialog.selectedNameFilter()
+        
+        return "", ""
+
+    def _get_existing_directory(self, caption, directory=""):
+        """Get existing directory using configured file picker"""
+        dialog = QFileDialog(self, caption, directory)
+        dialog.setFileMode(QFileDialog.FileMode.Directory)
+        dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
+        
+        # Configure based on user preference
+        if not self.config.get("file_picker_native", False):
+            dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            dirs = dialog.selectedFiles()
+            if dirs:
+                return dirs[0]
+        
+        return ""
+    
+    def show_log_viewer(self):
+        """Show the live log viewer dialog"""
+        log_path = self.config.get("log_path")
+        
+        if not log_path:
+            FocusAwareMessageBox.warning(
+                self, "No Log File", 
+                "No log file path configured.\n\nCheck your configuration file."
+            )
+            return
+        
+        if not os.path.exists(log_path):
+            # Try to create the log directory and file if it doesn't exist
+            try:
+                os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                # Touch the log file
+                with open(log_path, 'a'):
+                    pass
+            except Exception as e:
+                FocusAwareMessageBox.critical(
+                    self, "Log File Error", 
+                    f"Cannot access log file:\n{log_path}\n\nError: {e}"
+                )
+                return
+        
+        # Check if log viewer is already open
+        if hasattr(self, 'log_viewer') and self.log_viewer and self.log_viewer.isVisible():
+            # Bring existing viewer to front
+            self.log_viewer.raise_()
+            self.log_viewer.activateWindow()
+            return
+        
+        # Create new log viewer
+        try:
+            self.log_viewer = LogViewerDialog(log_path, self)
+            self.log_viewer.show()
+            logging.info(f"Opened log viewer for: {log_path}")
+        except Exception as e:
+            FocusAwareMessageBox.critical(
+                self, "Log Viewer Error", 
+                f"Failed to open log viewer:\n{str(e)}"
+            )
+            logging.error(f"Failed to open log viewer: {e}")
+    
+    def open_settings_editor(self):
+        """Open the YAML settings editor dialog"""
+        try:
+            # Determine the config file path (same logic as load_config)
+            system = platform.system()
+            app_name = "fm-dicom"
+            
+            if system == "Windows":
+                appdata = os.environ.get("APPDATA")
+                base_dir = appdata if appdata else os.path.dirname(sys.executable)
+                config_file_path = os.path.join(base_dir, app_name, "config.yml")
+            elif system == "Darwin":
+                config_file_path = os.path.expanduser(f"~/Library/Application Support/{app_name}/config.yml")
+            else:  # Linux/Unix
+                xdg_config_home = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+                config_file_path = os.path.join(xdg_config_home, app_name, "config.yml")
+            
+            # Open the settings editor
+            dialog = SettingsEditorDialog(self.config, config_file_path, self)
+            
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                # Settings were saved, apply the new configuration
+                if hasattr(dialog, 'new_config'):
+                    self._apply_new_config(dialog.new_config)
+            
+        except Exception as e:
+            logging.error(f"Failed to open settings editor: {e}")
+            FocusAwareMessageBox.critical(
+                self, "Settings Error",
+                f"Failed to open settings editor:\n\n{str(e)}"
+            )
+
+    def _apply_new_config(self, new_config):
+        """Apply new configuration settings"""
+        try:
+            # Update the current config
+            old_config = self.config.copy()
+            self.config = new_config
+            
+            # Apply changes that can be applied immediately
+            changes_applied = []
+            
+            # Update export directories
+            if 'default_export_dir' in new_config:
+                self.default_export_dir = os.path.expanduser(str(new_config['default_export_dir']))
+                changes_applied.append("Export directory")
+            
+            if 'default_import_dir' in new_config:
+                self.default_import_dir = os.path.expanduser(str(new_config['default_import_dir']))
+                changes_applied.append("Import directory")
+            
+            # Update image preview setting
+            if 'show_image_preview' in new_config:
+                preview_enabled = bool(new_config['show_image_preview'])
+                self.preview_toggle.setChecked(preview_enabled)
+                changes_applied.append("Image preview setting")
+            
+            # Update theme if changed
+            if 'theme' in new_config and new_config['theme'] != old_config.get('theme'):
+                if new_config['theme'].lower() == 'dark':
+                    set_dark_palette(QApplication.instance())
+                else:
+                    set_light_palette(QApplication.instance())
+                changes_applied.append("Theme")
+            
+            # Update DICOM send config
+            self.dicom_send_config = self.config
+            changes_applied.append("DICOM send settings")
+            
+            # Show what was applied
+            if changes_applied:
+                FocusAwareMessageBox.information(
+                    self, "Settings Applied",
+                    f"Applied changes to:\n\n• " + "\n• ".join(changes_applied) + 
+                    "\n\nNote: Some changes (like logging settings) require restarting the application."
+                )
+            
+            logging.info("Configuration updated successfully")
+            
+        except Exception as e:
+            logging.error(f"Failed to apply new configuration: {e}")
+            FocusAwareMessageBox.warning(
+                self, "Configuration Warning",
+                f"Settings were saved but some changes could not be applied:\n\n{str(e)}\n\n"
+                "You may need to restart the application."
+            )
 
 # --- Main Execution ---
 if __name__ == "__main__":
