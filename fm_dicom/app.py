@@ -5143,38 +5143,34 @@ class MainWindow(QMainWindow):
         if not ok:
             return
 
-        # Get output path based on export type
+        # FIX: Map export_type to worker_export_type
         if export_type == "Directory":
-            out_dir = self._get_existing_directory("Select Export Directory", self.default_export_dir)
-            if not out_dir:
-                return
-            # ... rest unchanged ...
-            
+            worker_export_type = "directory"
         elif export_type == "ZIP":
-            out_zip_path, _ = self._get_save_filename(
-                "Save ZIP Archive", 
-                self.default_export_dir, 
-                "ZIP Archives (*.zip)"
-            )
-            if not out_zip_path:
-                return
-            if not out_zip_path.lower().endswith('.zip'):
-                out_zip_path += '.zip'
-            # ... rest unchanged ...
-            
+            worker_export_type = "zip"
         elif export_type == "ZIP with DICOMDIR":
-            out_zip_path, _ = self._get_save_filename(
-                "Save DICOMDIR ZIP Archive", 
-                self.default_export_dir, 
-                "ZIP Archives (*.zip)"
-            )
-            if not out_zip_path:
-                return
-            if not out_zip_path.lower().endswith('.zip'):
-                out_zip_path += '.zip'
-            worker_export_type = "dicomdir_zip"
+            worker_export_type = "zip_with_dicomdir"
+        else:
+            # Fallback - should not happen but just in case
+            worker_export_type = "directory"
         
-        # Start non-blocking export
+        # Get output path based on export type
+        if worker_export_type == "directory":
+            output_path = QFileDialog.getExistingDirectory(
+                self, "Select Export Directory", 
+                os.path.expanduser("~/Desktop")
+            )
+        else:  # ZIP or ZIP with DICOMDIR
+            output_path, _ = QFileDialog.getSaveFileName(
+                self, "Save Export As", 
+                os.path.expanduser("~/Desktop/dicom_export.zip"),
+                "ZIP files (*.zip)"
+            )
+        
+        if not output_path:
+            return
+
+        # Now start the export worker
         self._start_export_worker(filepaths, worker_export_type, output_path)
 
     def _start_export_worker(self, filepaths, export_type, output_path):
