@@ -324,7 +324,7 @@ class ExportWorker(QThread):
     def __init__(self, filepaths, export_type, output_path, temp_dir=None):
         super().__init__()
         self.filepaths = filepaths
-        self.export_type = export_type  # "directory", "zip", "dicomdir_zip"
+        self.export_type = export_type  # "directory", "zip", "zip_with_dicomdir"
         self.output_path = output_path
         self.temp_dir = temp_dir
         self.cancelled = False
@@ -335,7 +335,7 @@ class ExportWorker(QThread):
                 self._export_directory()
             elif self.export_type == "zip":
                 self._export_zip()
-            elif self.export_type == "dicomdir_zip":
+            elif self.export_type == "zip_with_dicomdir":  # Fixed: changed from "dicomdir_zip"
                 self._export_dicomdir_zip()
             else:
                 raise ValueError(f"Unknown export type: {self.export_type}")
@@ -423,16 +423,20 @@ class ExportWorker(QThread):
         
     def _export_dicomdir_zip(self):
         """Export files as ZIP with DICOMDIR"""
-         # Get output path
-        out_zip_path, _ = self._get_save_filename(
-            "Save DICOMDIR ZIP Archive", 
-            self.default_export_dir, 
-            "ZIP Archives (*.zip)"
-        )
-        if not out_zip_path:
-            return
+        # Use the output path that was already determined in the main thread
+        out_zip_path = self.output_path
+        
         if not out_zip_path.lower().endswith('.zip'):
             out_zip_path += '.zip'
+            self.output_path = out_zip_path  # Update the stored path
+
+        # Ensure we have a temporary directory
+        if self.temp_dir is None:
+            import tempfile
+            self.temp_dir = tempfile.mkdtemp()
+            cleanup_temp = True
+        else:
+            cleanup_temp = False
 
         try:
             # Step 1: Analyze files (10%)
@@ -486,6 +490,11 @@ class ExportWorker(QThread):
             
         except Exception as e:
             self.export_failed.emit(f"DICOMDIR ZIP export failed: {e}")
+        finally:
+            # Clean up temporary directory if we created it
+            if cleanup_temp and self.temp_dir and os.path.exists(self.temp_dir):
+                import shutil
+                shutil.rmtree(self.temp_dir, ignore_errors=True)
     
     def _copy_files_to_dicom_structure(self, file_mapping):
         """Copy files to DICOM standard structure with progress updates"""
