@@ -1,6 +1,6 @@
 import sys
 from PyQt6.QtWidgets import QApplication
-from fm_dicom.app import MainWindow
+from fm_dicom.main_window import MainWindow
 
 def main():
     app = QApplication(sys.argv)

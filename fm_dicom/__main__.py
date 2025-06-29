@@ -2,7 +2,7 @@
 
 import sys
 import typer
-from .app import MainWindow
+from .main_window import MainWindow
 from PyQt6.QtWidgets import QApplication
 
 app_cli = typer.Typer(help="DICOM Tag Editor CLI")
