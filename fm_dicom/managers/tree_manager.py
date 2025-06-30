@@ -253,12 +253,22 @@ class TreeManager(QObject):
     def _build_tree_structure(self, hierarchy):
         """Build the actual tree structure from hierarchy data"""
         logging.debug(f"Building tree structure with {len(hierarchy)} patients")
+        
+        # Calculate statistics
+        total_patients = len(hierarchy)
+        total_studies = 0
+        total_series = 0
+        total_instances = 0
+        total_size_bytes = 0
+        
         for patient, studies in hierarchy.items():
             logging.debug(f"Patient: {patient} has {len(studies)} studies")
             patient_item = QTreeWidgetItem([patient, "", "", ""])
             patient_item.setIcon(0, self.patient_icon)
             patient_item.setData(0, Qt.ItemDataRole.UserRole, None)  # No file for patient
             self.tree.addTopLevelItem(patient_item)
+            
+            total_studies += len(studies)
             
             for study, series_dict in studies.items():
                 logging.debug(f"  Study: {study} has {len(series_dict)} series")
@@ -267,12 +277,16 @@ class TreeManager(QObject):
                 study_item.setData(0, Qt.ItemDataRole.UserRole, None)  # No file for study
                 patient_item.addChild(study_item)
                 
+                total_series += len(series_dict)
+                
                 for series, instances in series_dict.items():
                     logging.debug(f"    Series: {series} has {len(instances)} instances")
                     series_item = QTreeWidgetItem([patient, study, series, ""])
                     series_item.setIcon(2, self.series_icon)
                     series_item.setData(0, Qt.ItemDataRole.UserRole, None)  # No file for series
                     study_item.addChild(series_item)
+                    
+                    total_instances += len(instances)
                     
                     # Sort instances by instance number
                     sorted_instances = sorted(
@@ -284,10 +298,39 @@ class TreeManager(QObject):
                         instance_item = QTreeWidgetItem([patient, study, series, instance_label])
                         instance_item.setData(0, Qt.ItemDataRole.UserRole, instance_data['filepath'])
                         series_item.addChild(instance_item)
+                        
+                        # Calculate file size
+                        try:
+                            file_size = os.path.getsize(instance_data['filepath'])
+                            total_size_bytes += file_size
+                        except (OSError, KeyError):
+                            pass  # Skip if file not accessible
         
         # Expand first level by default
         for i in range(self.tree.topLevelItemCount()):
             self.tree.topLevelItem(i).setExpanded(True)
+        
+        # Update statistics display
+        total_size_gb = total_size_bytes / (1024**3)  # Convert to GB
+        self.main_window.update_stats_display(
+            patients=total_patients,
+            studies=total_studies, 
+            series=total_series,
+            instances=total_instances
+        )
+        self.main_window.update_file_info_display(
+            total_files=total_instances,
+            selected_count=0,
+            current_file=None
+        )
+        
+        # Update summary text  
+        if hasattr(self.main_window, 'summary_label'):
+            if total_instances > 0:
+                size_str = f"{total_size_gb:.2f} GB" if total_size_gb >= 0.01 else f"{total_size_bytes / (1024**2):.1f} MB"
+                self.main_window.summary_label.setText(f"{total_instances} DICOM files loaded ({size_str})")
+            else:
+                self.main_window.summary_label.setText("No DICOM files loaded")
     
     def _on_selection_changed(self):
         """Handle tree selection changes"""
@@ -305,6 +348,14 @@ class TreeManager(QObject):
             if path not in seen:
                 unique_paths.append(path)
                 seen.add(path)
+        
+        # Update file info display with selection count
+        current_file = unique_paths[0] if unique_paths else None
+        self.main_window.update_file_info_display(
+            total_files=len(self.loaded_files),
+            selected_count=len(unique_paths),
+            current_file=current_file
+        )
         
         self.selection_changed.emit(unique_paths)
     

@@ -260,7 +260,7 @@ class MainWindow(QMainWindow, LayoutMixin):
     
     # Context menu and merge functionality (preserved from original)
     def show_tree_context_menu(self, pos: QPoint):
-        """Show tree context menu with merge options"""
+        """Show enhanced tree context menu with all editing operations"""
         item = self.tree.itemAt(pos)
         if not item:
             return
@@ -269,24 +269,233 @@ class MainWindow(QMainWindow, LayoutMixin):
         
         menu = QMenu(self)
         
-        # Merge action (only show if multiple items selected)
-        if len(selected) > 1:
-            merge_action = QAction("Merge", self)
-            merge_action.triggered.connect(self.merge_patients)
-            menu.addAction(merge_action)
+        # View Details (for single item)
+        if len(selected) == 1:
+            details_icon = self.style().standardIcon(self.style().StandardPixmap.SP_FileDialogDetailedView)
+            details_action = QAction(details_icon, "📄 View Details", self)
+            details_action.setShortcut(QKeySequence("Enter"))
+            details_action.triggered.connect(lambda: self.display_selected_tree_file())
+            menu.addAction(details_action)
+            
+            edit_tags_icon = self.style().standardIcon(self.style().StandardPixmap.SP_FileDialogListView)
+            edit_tags_action = QAction(edit_tags_icon, "📝 Edit Tags...", self)
+            edit_tags_action.triggered.connect(lambda: self.display_selected_tree_file())
+            menu.addAction(edit_tags_action)
+            
             menu.addSeparator()
         
-        # Delete action
-        delete_action = QAction(QIcon.fromTheme("edit-delete"), "Delete", self)
+        # Tag operations
+        new_tag_icon = self.style().standardIcon(self.style().StandardPixmap.SP_FileDialogNewFolder)
+        new_tag_action = QAction(new_tag_icon, "➕ New Tag...", self)
+        new_tag_action.setShortcut(QKeySequence("Ctrl+T"))
+        new_tag_action.triggered.connect(self.edit_tag)
+        menu.addAction(new_tag_action)
+        
+        batch_tag_icon = self.style().standardIcon(self.style().StandardPixmap.SP_FileDialogDetailedView)
+        batch_tag_action = QAction(batch_tag_icon, "📦 Batch New Tag...", self)
+        batch_tag_action.setShortcut(QKeySequence("Ctrl+Shift+T"))
+        batch_tag_action.triggered.connect(self.batch_edit_tag)
+        menu.addAction(batch_tag_action)
+        
+        menu.addSeparator()
+        
+        # Patient/Study operations
+        if len(selected) > 1:
+            merge_icon = self.style().standardIcon(self.style().StandardPixmap.SP_ArrowRight)
+            merge_action = QAction(merge_icon, "🔀 Merge Selected", self)
+            merge_action.setShortcut(QKeySequence("Ctrl+M"))
+            merge_action.triggered.connect(self.merge_patients)
+            menu.addAction(merge_action)
+        
+        delete_icon = self.style().standardIcon(self.style().StandardPixmap.SP_TrashIcon)
+        delete_action = QAction(delete_icon, "🗑️ Delete Selected", self)
+        delete_action.setShortcut(QKeySequence.StandardKey.Delete)
         delete_action.triggered.connect(self.delete_selected_items)
         menu.addAction(delete_action)
         
-        # Validate action
-        validate_action = QAction("Validate Selected", self)
+        menu.addSeparator()
+        
+        # Validation and Anonymization
+        validate_icon = self.style().standardIcon(self.style().StandardPixmap.SP_DialogApplyButton)
+        validate_action = QAction(validate_icon, "✅ Validate", self)
+        validate_action.setShortcut(QKeySequence("Ctrl+V"))
         validate_action.triggered.connect(self.validate_dicom_files)
         menu.addAction(validate_action)
         
+        anon_icon = self.style().standardIcon(self.style().StandardPixmap.SP_DesktopIcon)
+        anon_action = QAction(anon_icon, "🎭 Anonymize", self)
+        anon_action.setShortcut(QKeySequence("Ctrl+A"))
+        anon_action.triggered.connect(self.anonymise_selected)
+        menu.addAction(anon_action)
+        
+        menu.addSeparator()
+        
+        # Export and Send
+        send_icon = self.style().standardIcon(self.style().StandardPixmap.SP_ComputerIcon)
+        send_action = QAction(send_icon, "📤 Send via DICOM...", self)
+        send_action.setShortcut(QKeySequence("Ctrl+D"))
+        send_action.triggered.connect(self.dicom_send)
+        menu.addAction(send_action)
+        
+        save_as_icon = self.style().standardIcon(self.style().StandardPixmap.SP_DialogSaveButton)
+        save_as_action = QAction(save_as_icon, "💾 Save As...", self)
+        save_as_action.setShortcut(QKeySequence.StandardKey.SaveAs)
+        save_as_action.triggered.connect(self.save_as)
+        menu.addAction(save_as_action)
+        
+        menu.addSeparator()
+        
+        # Tree navigation
+        if item.childCount() > 0:
+            expand_icon = self.style().standardIcon(self.style().StandardPixmap.SP_ArrowDown)
+            expand_action = QAction(expand_icon, "🔍 Expand All Children", self)
+            expand_action.triggered.connect(lambda: self._expand_item_recursively(item))
+            menu.addAction(expand_action)
+            
+            collapse_icon = self.style().standardIcon(self.style().StandardPixmap.SP_ArrowUp)
+            collapse_action = QAction(collapse_icon, "📁 Collapse All Children", self)
+            collapse_action.triggered.connect(lambda: self._collapse_item_recursively(item))
+            menu.addAction(collapse_action)
+        
+        # Show context menu
         menu.exec(self.tree.viewport().mapToGlobal(pos))
+    
+    def _expand_item_recursively(self, item):
+        """Expand item and all its children recursively"""
+        item.setExpanded(True)
+        for i in range(item.childCount()):
+            self._expand_item_recursively(item.child(i))
+    
+    def _collapse_item_recursively(self, item):
+        """Collapse item and all its children recursively"""
+        for i in range(item.childCount()):
+            self._collapse_item_recursively(item.child(i))
+        item.setExpanded(False)
+    
+    def show_tag_table_context_menu(self, pos: QPoint):
+        """Show enhanced tag table context menu for tag-specific operations"""
+        if not hasattr(self, 'tag_table'):
+            return
+        
+        row = self.tag_table.rowAt(pos.y())
+        if row < 0:
+            return
+            
+        # Get the tag at this row
+        tag_id_item = self.tag_table.item(row, 0)
+        desc_item = self.tag_table.item(row, 1)
+        value_item = self.tag_table.item(row, 2)
+        new_value_item = self.tag_table.item(row, 3)
+        
+        if not tag_id_item:
+            return
+            
+        tag_id = tag_id_item.text()
+        description = desc_item.text() if desc_item else "Unknown"
+        current_value = value_item.text() if value_item else ""
+        new_value = new_value_item.text() if new_value_item else ""
+        
+        menu = QMenu(self)
+        
+        # Edit Value
+        edit_icon = self.style().standardIcon(self.style().StandardPixmap.SP_FileDialogListView)
+        edit_action = QAction(edit_icon, "✏️ Edit Value", self)
+        edit_action.triggered.connect(lambda: self._edit_tag_value_at_row(row))
+        menu.addAction(edit_action)
+        
+        # Add New Tag
+        add_icon = self.style().standardIcon(self.style().StandardPixmap.SP_FileDialogNewFolder)
+        add_action = QAction(add_icon, "➕ Add New Tag...", self)
+        add_action.setShortcut(QKeySequence("Ctrl+T"))
+        add_action.triggered.connect(self.edit_tag)
+        menu.addAction(add_action)
+        
+        # Remove tag (if it has a new value)
+        if new_value:
+            remove_icon = self.style().standardIcon(self.style().StandardPixmap.SP_DialogCancelButton)
+            remove_action = QAction(remove_icon, "🗑️ Clear Edit", self)
+            remove_action.triggered.connect(lambda: self._clear_tag_edit_at_row(row))
+            menu.addAction(remove_action)
+        
+        menu.addSeparator()
+        
+        # Copy operations
+        copy_icon = self.style().standardIcon(self.style().StandardPixmap.SP_FileDialogDetailedView)
+        copy_tag_action = QAction(copy_icon, "📋 Copy Tag ID", self)
+        copy_tag_action.triggered.connect(lambda: self._copy_to_clipboard(tag_id))
+        menu.addAction(copy_tag_action)
+        
+        copy_value_action = QAction(copy_icon, "📋 Copy Value", self)
+        copy_value_action.triggered.connect(lambda: self._copy_to_clipboard(current_value))
+        menu.addAction(copy_value_action)
+        
+        if description != "Unknown":
+            copy_desc_action = QAction(copy_icon, "📋 Copy Description", self)
+            copy_desc_action.triggered.connect(lambda: self._copy_to_clipboard(description))
+            menu.addAction(copy_desc_action)
+        
+        menu.addSeparator()
+        
+        # Find Similar Tags
+        search_icon = self.style().standardIcon(self.style().StandardPixmap.SP_FileDialogInfoView)
+        search_action = QAction(search_icon, "🔍 Find Similar Tags...", self)
+        search_action.triggered.connect(lambda: self._find_similar_tags(description))
+        menu.addAction(search_action)
+        
+        # Show context menu
+        menu.exec(self.tag_table.viewport().mapToGlobal(pos))
+    
+    def _edit_tag_value_at_row(self, row):
+        """Edit the tag value at the specified row"""
+        if row < 0 or row >= self.tag_table.rowCount():
+            return
+            
+        # Focus on the "New Value" column for this row
+        new_value_item = self.tag_table.item(row, 3)
+        if new_value_item:
+            self.tag_table.setCurrentItem(new_value_item)
+            self.tag_table.editItem(new_value_item)
+    
+    def _clear_tag_edit_at_row(self, row):
+        """Clear the tag edit at the specified row"""
+        if row < 0 or row >= self.tag_table.rowCount():
+            return
+            
+        new_value_item = self.tag_table.item(row, 3)
+        if new_value_item:
+            new_value_item.setText("")
+    
+    def _copy_to_clipboard(self, text):
+        """Copy text to clipboard"""
+        from PyQt6.QtWidgets import QApplication
+        clipboard = QApplication.clipboard()
+        clipboard.setText(text)
+        
+        # Show brief status message
+        if hasattr(self, 'status_bar'):
+            self.status_bar.showMessage(f"Copied to clipboard: {text[:50]}{'...' if len(text) > 50 else ''}", 2000)
+    
+    def _find_similar_tags(self, description):
+        """Find similar tags by filtering the tag table"""
+        if not hasattr(self, 'search_bar') or not description:
+            return
+            
+        # Extract key words from description for search
+        search_terms = []
+        common_words = {'the', 'and', 'or', 'of', 'in', 'to', 'for', 'with', 'by'}
+        words = description.lower().split()
+        for word in words:
+            if len(word) > 3 and word not in common_words:
+                search_terms.append(word)
+        
+        if search_terms:
+            # Use the first meaningful word for search
+            search_term = search_terms[0]
+            self.search_bar.setText(search_term)
+            
+            # Show status message
+            if hasattr(self, 'status_bar'):
+                self.status_bar.showMessage(f"Searching for tags containing '{search_term}'", 2000)
     
     # Settings and utility dialogs (original methods preserved)
     def open_settings_editor(self):
