@@ -78,11 +78,11 @@ class ZipExtractionDialog(QProgressDialog):
 
 
 class DicomdirScanDialog(QProgressDialog):
-    """Progress dialog for DICOMDIR scanning"""
+    """Progress dialog for DICOM file scanning"""
     
     def __init__(self, extracted_files, parent=None):
-        super().__init__("Searching for DICOMDIR files...", "Cancel", 0, 100, parent)
-        self.setWindowTitle("Reading DICOMDIR")
+        super().__init__("Searching for DICOM files...", "Cancel", 0, 100, parent)
+        self.setWindowTitle("Scanning DICOM Files")
         self.setMinimumDuration(0)
         self.setAutoClose(False)
         self.setAutoReset(False)
@@ -105,7 +105,7 @@ class DicomdirScanDialog(QProgressDialog):
         if total > 0:
             progress_value = int((current / total) * 100)
             self.setValue(progress_value)
-        self.setLabelText(f"Reading DICOMDIR: {current_file}")
+        self.setLabelText(f"Processing: {current_file}")
         QApplication.processEvents()
         
     def scan_finished(self, dicom_files):

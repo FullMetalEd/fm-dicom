@@ -218,22 +218,33 @@ class TagSearchDialog(QDialog):
         try:
             for tag, (vr, vm, name, is_retired, keyword) in pydicom.datadict.DicomDictionary.items():
                 if not is_retired and keyword:  # Only non-retired tags with keywords
-                    tag_str = f"({tag.group:04X},{tag.element:04X})"
+                    # Convert tag to proper Tag object if needed
+                    if isinstance(tag, int):
+                        # Convert integer to Tag
+                        tag_obj = pydicom.tag.Tag(tag)
+                    elif isinstance(tag, tuple) and len(tag) == 2:
+                        # Convert (group, element) tuple to Tag
+                        tag_obj = pydicom.tag.Tag(tag[0], tag[1])
+                    else:
+                        # Assume it's already a Tag object
+                        tag_obj = tag
+                    
+                    tag_str = f"({tag_obj.group:04X},{tag_obj.element:04X})"
                     
                     # Determine category based on group
-                    if tag.group == 0x0010:
+                    if tag_obj.group == 0x0010:
                         category = "Patient Information"
-                    elif tag.group == 0x0008 and tag.element in [0x0020, 0x0030, 0x0050, 0x0090, 0x1030]:
+                    elif tag_obj.group == 0x0008 and tag_obj.element in [0x0020, 0x0030, 0x0050, 0x0090, 0x1030]:
                         category = "Study Information"
-                    elif tag.group == 0x0008 and tag.element in [0x0021, 0x0031, 0x0060, 0x103E]:
+                    elif tag_obj.group == 0x0008 and tag_obj.element in [0x0021, 0x0031, 0x0060, 0x103E]:
                         category = "Series Information"
-                    elif tag.group == 0x0008:
+                    elif tag_obj.group == 0x0008:
                         category = "Common Tags"
-                    elif tag.group == 0x0018:
+                    elif tag_obj.group == 0x0018:
                         category = "Acquisition Parameters"
-                    elif tag.group == 0x0020:
+                    elif tag_obj.group == 0x0020:
                         category = "Image Information"
-                    elif tag.group == 0x0028:
+                    elif tag_obj.group == 0x0028:
                         category = "Image Information"
                     else:
                         category = "Other"
@@ -302,10 +313,35 @@ class TagSearchDialog(QDialog):
         """Handle selection change"""
         current_row = self.results_table.currentRow()
         if current_row >= 0:
-            data = self.results_table.item(current_row, 0).data(Qt.ItemDataRole.UserRole)
-            if data:
-                self.selected_tag, self.selected_keyword, self.selected_name, self.selected_vr, _ = data
-                self.ok_button.setEnabled(True)
+            item = self.results_table.item(current_row, 0)
+            if item:
+                data = item.data(Qt.ItemDataRole.UserRole)
+                if data:
+                    try:
+                        self.selected_tag, self.selected_keyword, self.selected_name, self.selected_vr, _ = data
+                        self.ok_button.setEnabled(True)
+                        logging.debug(f"Tag selected: {self.selected_tag}")
+                    except (ValueError, TypeError) as e:
+                        logging.warning(f"Error unpacking tag selection data: {e}, data: {data}")
+                        self.selected_tag = None
+                        self.selected_keyword = None
+                        self.selected_name = None
+                        self.selected_vr = None
+                        self.ok_button.setEnabled(False)
+                else:
+                    logging.debug("No UserRole data found for selected item")
+                    self.selected_tag = None
+                    self.selected_keyword = None  
+                    self.selected_name = None
+                    self.selected_vr = None
+                    self.ok_button.setEnabled(False)
+            else:
+                logging.debug("No item found at current row")
+                self.selected_tag = None
+                self.selected_keyword = None
+                self.selected_name = None
+                self.selected_vr = None
+                self.ok_button.setEnabled(False)
         else:
             self.selected_tag = None
             self.selected_keyword = None
