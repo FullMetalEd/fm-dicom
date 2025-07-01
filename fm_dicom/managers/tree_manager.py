@@ -273,7 +273,7 @@ class TreeManager(QObject):
             for study, series_dict in studies.items():
                 logging.debug(f"  Study: {study} has {len(series_dict)} series")
                 study_item = QTreeWidgetItem([patient, study, "", ""])
-                study_item.setIcon(1, self.study_icon)
+                study_item.setIcon(0, self.study_icon)
                 study_item.setData(0, Qt.ItemDataRole.UserRole, None)  # No file for study
                 patient_item.addChild(study_item)
                 
@@ -282,7 +282,7 @@ class TreeManager(QObject):
                 for series, instances in series_dict.items():
                     logging.debug(f"    Series: {series} has {len(instances)} instances")
                     series_item = QTreeWidgetItem([patient, study, series, ""])
-                    series_item.setIcon(2, self.series_icon)
+                    series_item.setIcon(0, self.series_icon)
                     series_item.setData(0, Qt.ItemDataRole.UserRole, None)  # No file for series
                     study_item.addChild(series_item)
                     
@@ -316,7 +316,8 @@ class TreeManager(QObject):
             patients=total_patients,
             studies=total_studies, 
             series=total_series,
-            instances=total_instances
+            instances=total_instances,
+            total_size_gb=total_size_gb
         )
         self.main_window.update_file_info_display(
             total_files=total_instances,

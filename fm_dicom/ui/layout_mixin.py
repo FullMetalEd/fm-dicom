@@ -98,6 +98,24 @@ class LayoutMixin:
         self.tree_search_bar = QLineEdit()
         self.tree_search_bar.setPlaceholderText("Search patients/studies/series/instances...")
         self.tree_search_bar.textChanged.connect(self.filter_tree_items)
+        # Dark theme styling for tree search bar
+        self.tree_search_bar.setStyleSheet("""
+            QLineEdit {
+                background-color: #2c2f33;
+                color: #f5f5f5;
+                border: 1px solid #444;
+                border-radius: 4px;
+                padding: 6px 8px;
+                font-size: 13px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #508cff;
+                background-color: #23272a;
+            }
+            QLineEdit::placeholder {
+                color: #99aab5;
+            }
+        """)
         tree_search_layout.addWidget(self.tree_search_bar)
         left_layout.addLayout(tree_search_layout)
 
@@ -132,6 +150,24 @@ class LayoutMixin:
         self.search_bar = QLineEdit()
         self.search_bar.setPlaceholderText("Search tags by ID or description...")
         self.search_bar.textChanged.connect(self.filter_tag_table)
+        # Dark theme styling for tag search bar
+        self.search_bar.setStyleSheet("""
+            QLineEdit {
+                background-color: #2c2f33;
+                color: #f5f5f5;
+                border: 1px solid #444;
+                border-radius: 4px;
+                padding: 6px 8px;
+                font-size: 13px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #508cff;
+                background-color: #23272a;
+            }
+            QLineEdit::placeholder {
+                color: #99aab5;
+            }
+        """)
         right_layout.addWidget(self.search_bar)
 
         self.tag_table = QTableWidget()
@@ -634,13 +670,20 @@ class LayoutMixin:
             else:
                 self.summary_label.setText(f"{total_files} DICOM files loaded")
     
-    def update_stats_display(self, patients=0, studies=0, series=0, instances=0):
+    def update_stats_display(self, patients=0, studies=0, series=0, instances=0, total_size_gb=0):
         """Update the statistics display"""
         if not hasattr(self, 'stats_label'):
             return
             
         if patients > 0:
-            stats_text = f"{patients}P • {studies}St • {series}Se • {instances}I"
+            # Format size appropriately
+            if total_size_gb >= 0.01:
+                size_str = f"{total_size_gb:.2f} GB"
+            else:
+                size_mb = total_size_gb * 1024
+                size_str = f"{size_mb:.1f} MB"
+            
+            stats_text = f"{patients}P • {studies}St • {series}Se • {instances}I • {size_str}"
             self.stats_label.setText(stats_text)
         else:
             self.stats_label.setText("")

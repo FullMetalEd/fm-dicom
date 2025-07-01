@@ -13,7 +13,7 @@ import logging
 import platform
 import time
 from PyQt6.QtWidgets import QMainWindow, QApplication, QMenu
-from PyQt6.QtGui import QAction, QIcon
+from PyQt6.QtGui import QAction, QIcon, QKeySequence
 from PyQt6.QtCore import Qt, QPoint, QTimer
 
 # Configuration and setup imports
@@ -271,28 +271,24 @@ class MainWindow(QMainWindow, LayoutMixin):
         
         # View Details (for single item)
         if len(selected) == 1:
-            details_icon = self.style().standardIcon(self.style().StandardPixmap.SP_FileDialogDetailedView)
-            details_action = QAction(details_icon, "📄 View Details", self)
+            details_action = QAction("📄 View Details", self)
             details_action.setShortcut(QKeySequence("Enter"))
             details_action.triggered.connect(lambda: self.display_selected_tree_file())
             menu.addAction(details_action)
             
-            edit_tags_icon = self.style().standardIcon(self.style().StandardPixmap.SP_FileDialogListView)
-            edit_tags_action = QAction(edit_tags_icon, "📝 Edit Tags...", self)
+            edit_tags_action = QAction("📝 Edit Tags...", self)
             edit_tags_action.triggered.connect(lambda: self.display_selected_tree_file())
             menu.addAction(edit_tags_action)
             
             menu.addSeparator()
         
         # Tag operations
-        new_tag_icon = self.style().standardIcon(self.style().StandardPixmap.SP_FileDialogNewFolder)
-        new_tag_action = QAction(new_tag_icon, "➕ New Tag...", self)
+        new_tag_action = QAction("➕ New Tag...", self)
         new_tag_action.setShortcut(QKeySequence("Ctrl+T"))
         new_tag_action.triggered.connect(self.edit_tag)
         menu.addAction(new_tag_action)
         
-        batch_tag_icon = self.style().standardIcon(self.style().StandardPixmap.SP_FileDialogDetailedView)
-        batch_tag_action = QAction(batch_tag_icon, "📦 Batch New Tag...", self)
+        batch_tag_action = QAction("📦 Batch New Tag...", self)
         batch_tag_action.setShortcut(QKeySequence("Ctrl+Shift+T"))
         batch_tag_action.triggered.connect(self.batch_edit_tag)
         menu.addAction(batch_tag_action)
@@ -301,14 +297,12 @@ class MainWindow(QMainWindow, LayoutMixin):
         
         # Patient/Study operations
         if len(selected) > 1:
-            merge_icon = self.style().standardIcon(self.style().StandardPixmap.SP_ArrowRight)
-            merge_action = QAction(merge_icon, "🔀 Merge Selected", self)
+            merge_action = QAction("🔀 Merge Selected", self)
             merge_action.setShortcut(QKeySequence("Ctrl+M"))
             merge_action.triggered.connect(self.merge_patients)
             menu.addAction(merge_action)
         
-        delete_icon = self.style().standardIcon(self.style().StandardPixmap.SP_TrashIcon)
-        delete_action = QAction(delete_icon, "🗑️ Delete Selected", self)
+        delete_action = QAction("🗑️ Delete Selected", self)
         delete_action.setShortcut(QKeySequence.StandardKey.Delete)
         delete_action.triggered.connect(self.delete_selected_items)
         menu.addAction(delete_action)
@@ -316,14 +310,12 @@ class MainWindow(QMainWindow, LayoutMixin):
         menu.addSeparator()
         
         # Validation and Anonymization
-        validate_icon = self.style().standardIcon(self.style().StandardPixmap.SP_DialogApplyButton)
-        validate_action = QAction(validate_icon, "✅ Validate", self)
+        validate_action = QAction("✅ Validate", self)
         validate_action.setShortcut(QKeySequence("Ctrl+V"))
         validate_action.triggered.connect(self.validate_dicom_files)
         menu.addAction(validate_action)
         
-        anon_icon = self.style().standardIcon(self.style().StandardPixmap.SP_DesktopIcon)
-        anon_action = QAction(anon_icon, "🎭 Anonymize", self)
+        anon_action = QAction("🎭 Anonymize", self)
         anon_action.setShortcut(QKeySequence("Ctrl+A"))
         anon_action.triggered.connect(self.anonymise_selected)
         menu.addAction(anon_action)
@@ -331,14 +323,12 @@ class MainWindow(QMainWindow, LayoutMixin):
         menu.addSeparator()
         
         # Export and Send
-        send_icon = self.style().standardIcon(self.style().StandardPixmap.SP_ComputerIcon)
-        send_action = QAction(send_icon, "📤 Send via DICOM...", self)
+        send_action = QAction("📤 Send via DICOM...", self)
         send_action.setShortcut(QKeySequence("Ctrl+D"))
         send_action.triggered.connect(self.dicom_send)
         menu.addAction(send_action)
         
-        save_as_icon = self.style().standardIcon(self.style().StandardPixmap.SP_DialogSaveButton)
-        save_as_action = QAction(save_as_icon, "💾 Save As...", self)
+        save_as_action = QAction("💾 Save As...", self)
         save_as_action.setShortcut(QKeySequence.StandardKey.SaveAs)
         save_as_action.triggered.connect(self.save_as)
         menu.addAction(save_as_action)
@@ -347,13 +337,11 @@ class MainWindow(QMainWindow, LayoutMixin):
         
         # Tree navigation
         if item.childCount() > 0:
-            expand_icon = self.style().standardIcon(self.style().StandardPixmap.SP_ArrowDown)
-            expand_action = QAction(expand_icon, "🔍 Expand All Children", self)
+            expand_action = QAction("🔍 Expand All Children", self)
             expand_action.triggered.connect(lambda: self._expand_item_recursively(item))
             menu.addAction(expand_action)
             
-            collapse_icon = self.style().standardIcon(self.style().StandardPixmap.SP_ArrowUp)
-            collapse_action = QAction(collapse_icon, "📁 Collapse All Children", self)
+            collapse_action = QAction("📁 Collapse All Children", self)
             collapse_action.triggered.connect(lambda: self._collapse_item_recursively(item))
             menu.addAction(collapse_action)
         
