@@ -759,6 +759,9 @@ class DicomManager(QObject):
             self.send_progress.setMinimumDuration(0)
             self.send_progress.setValue(0)
             
+            # Store total file count for progress calculation
+            self.send_total_files = len(selected_files)
+            
             # Create and start worker
             from fm_dicom.workers.dicom_send_worker import DicomSendWorker
             self.send_worker = DicomSendWorker(selected_files, send_params, list(unique_sop_classes))
@@ -786,11 +789,19 @@ class DicomManager(QObject):
     
     def _on_send_progress(self, current, success, warnings, failed, current_file):
         """Handle DICOM send progress updates"""
-        if hasattr(self, 'send_progress'):
-            total = success + warnings + failed + current
-            if total > 0:
-                self.send_progress.setValue(int((success + warnings + failed) / total * 100))
-            self.send_progress.setLabelText(f"Sending: {current_file}")
+        if hasattr(self, 'send_progress') and hasattr(self, 'send_total_files'):
+            # Calculate progress based on current file index vs total files
+            if self.send_total_files > 0:
+                progress_percent = int((current / self.send_total_files) * 100)
+                self.send_progress.setValue(progress_percent)
+            
+            # Improve label text to distinguish between test and send phases
+            if current_file.startswith("Testing "):
+                # Extract actual filename from "Testing filename.dcm"
+                actual_filename = current_file.replace("Testing ", "")
+                self.send_progress.setLabelText(f"Checking compatibility: {actual_filename} ({current}/{self.send_total_files})")
+            else:
+                self.send_progress.setLabelText(f"Sending: {current_file} ({current}/{self.send_total_files})")
     
     def _on_send_status(self, status):
         """Handle DICOM send status updates"""

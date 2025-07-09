@@ -120,19 +120,11 @@ class FileManager(QObject):
             )
     
     def _load_directory(self, dir_path):
-        """Load all DICOM files from a directory"""
+        """Load all DICOM files from a directory using comprehensive scanning"""
         logging.info(f"Loading directory: {dir_path}")
         
-        # Check for DICOMDIR first
-        dicomdir_reader = DicomdirReader()
-        dicomdir_files = dicomdir_reader.find_dicomdir(dir_path)
-        
-        if dicomdir_files:
-            logging.info(f"Found DICOMDIR, using it to load files")
-            self._load_from_dicomdir(dicomdir_files[0], dir_path)
-        else:
-            logging.info("No DICOMDIR found, scanning directory recursively")
-            self._scan_directory_recursive(dir_path)
+        # Use comprehensive scanning to handle mixed content
+        self._scan_directory_comprehensive(dir_path)
     
     def _load_zip_file(self, zip_path):
         """Load DICOM files from a ZIP archive"""
@@ -248,6 +240,141 @@ class FileManager(QObject):
                 "No DICOM Files",
                 "No DICOM files found in the selected directory."
             )
+    
+    def _scan_directory_comprehensive(self, dir_path):
+        """Comprehensively scan directory for all DICOM content (DICOMDIR, ZIP, individual files)"""
+        logging.info(f"Starting comprehensive directory scan: {dir_path}")
+        
+        # Phase 1: Inventory all content types
+        dicomdir_files = []
+        zip_files = []
+        individual_files = []
+        
+        # First pass: identify all content types
+        for root, dirs, files in os.walk(dir_path):
+            for file in files:
+                file_path = os.path.join(root, file)
+                
+                if file.upper() == 'DICOMDIR':
+                    dicomdir_files.append(file_path)
+                elif file.lower().endswith('.zip'):
+                    zip_files.append(file_path)
+                # Note: We'll identify individual DICOM files in phase 2
+        
+        # Phase 2: Process each content type and aggregate results
+        all_dicom_files = []
+        total_operations = len(dicomdir_files) + len(zip_files) + (1 if not dicomdir_files else 0)
+        current_operation = 0
+        
+        # Process DICOMDIR files
+        if dicomdir_files:
+            logging.info(f"Found {len(dicomdir_files)} DICOMDIR files")
+            for dicomdir_path in dicomdir_files:
+                current_operation += 1
+                logging.info(f"Processing DICOMDIR {current_operation}/{total_operations}: {dicomdir_path}")
+                
+                try:
+                    dicomdir_reader = DicomdirReader()
+                    dicom_files = dicomdir_reader.read_dicomdir(dicomdir_path)
+                    if dicom_files:
+                        all_dicom_files.extend(dicom_files)
+                        logging.info(f"DICOMDIR loaded {len(dicom_files)} files")
+                except Exception as e:
+                    logging.error(f"Error reading DICOMDIR {dicomdir_path}: {e}")
+        
+        # Process ZIP files
+        if zip_files:
+            logging.info(f"Found {len(zip_files)} ZIP files")
+            for zip_path in zip_files:
+                current_operation += 1
+                logging.info(f"Processing ZIP {current_operation}/{total_operations}: {zip_path}")
+                
+                try:
+                    zip_dicom_files = self._process_zip_file_for_comprehensive_scan(zip_path)
+                    if zip_dicom_files:
+                        all_dicom_files.extend(zip_dicom_files)
+                        logging.info(f"ZIP file loaded {len(zip_dicom_files)} files")
+                except Exception as e:
+                    logging.error(f"Error processing ZIP {zip_path}: {e}")
+        
+        # Process individual DICOM files (only if no DICOMDIR files found)
+        if not dicomdir_files:
+            current_operation += 1
+            logging.info(f"Scanning for individual DICOM files {current_operation}/{total_operations}")
+            
+            try:
+                individual_dicom_files = self._scan_for_individual_dicom_files(dir_path, zip_files)
+                if individual_dicom_files:
+                    all_dicom_files.extend(individual_dicom_files)
+                    logging.info(f"Individual scan found {len(individual_dicom_files)} files")
+            except Exception as e:
+                logging.error(f"Error scanning for individual DICOM files: {e}")
+        
+        # Phase 3: Emit results
+        if all_dicom_files:
+            logging.info(f"Comprehensive scan completed: {len(all_dicom_files)} total DICOM files")
+            self.files_loaded.emit(all_dicom_files)
+        else:
+            FocusAwareMessageBox.information(
+                self.main_window,
+                "No DICOM Files",
+                "No DICOM files found in the selected directory."
+            )
+    
+    def _process_zip_file_for_comprehensive_scan(self, zip_path):
+        """Process a ZIP file during comprehensive scan"""
+        try:
+            # Extract ZIP with progress dialog
+            extraction_dialog = ZipExtractionDialog(zip_path, self.main_window)
+            if extraction_dialog.exec() and extraction_dialog.success:
+                temp_dir = extraction_dialog.temp_dir
+                extracted_files = extraction_dialog.extracted_files
+                
+                # Track temp directory for cleanup
+                self.temp_dirs.append(temp_dir)
+                
+                # Scan extracted files for DICOM content
+                scan_dialog = DicomdirScanDialog(extracted_files, self.main_window)
+                if scan_dialog.exec() and scan_dialog.success:
+                    return scan_dialog.dicom_files
+                else:
+                    logging.warning(f"Failed to scan extracted files from {zip_path}")
+                    return []
+            else:
+                logging.warning(f"Failed to extract ZIP file {zip_path}")
+                return []
+        except Exception as e:
+            logging.error(f"Error processing ZIP file {zip_path}: {e}")
+            return []
+    
+    def _scan_for_individual_dicom_files(self, dir_path, exclude_zip_files):
+        """Scan for individual DICOM files, excluding ZIP files"""
+        import pydicom
+        
+        dicom_files = []
+        exclude_paths = set(exclude_zip_files)
+        
+        for root, dirs, files in os.walk(dir_path):
+            for file in files:
+                file_path = os.path.join(root, file)
+                
+                # Skip ZIP files (they're processed separately)
+                if file_path in exclude_paths:
+                    continue
+                
+                # Skip DICOMDIR files (they're processed separately)
+                if file.upper() == 'DICOMDIR':
+                    continue
+                
+                try:
+                    # Try to read as DICOM
+                    ds = pydicom.dcmread(file_path, stop_before_pixels=True)
+                    dicom_files.append((file_path, ds))
+                except Exception:
+                    # Not a DICOM file, skip silently
+                    continue
+        
+        return dicom_files
     
     def cleanup_temp_dirs(self):
         """Clean up temporary directories"""
