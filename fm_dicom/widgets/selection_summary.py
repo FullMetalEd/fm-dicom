@@ -76,8 +76,10 @@ class LazySelectionSummaryWidget(QWidget):
                     size = os.path.getsize(file_path)
                     self._file_size_cache[file_path] = size
                     total_size += size
-                except:
+                except (OSError, IOError) as e:
                     # Estimate 500KB per file if can't read
+                    import logging
+                    logging.debug(f"Could not get size for {file_path}: {e}")
                     total_size += 500 * 1024
         
         # Format size

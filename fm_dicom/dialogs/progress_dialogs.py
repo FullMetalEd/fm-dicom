@@ -72,8 +72,9 @@ class ZipExtractionDialog(QProgressDialog):
         if self.temp_dir and os.path.exists(self.temp_dir):
             try:
                 shutil.rmtree(self.temp_dir)
-            except:
-                pass
+            except Exception as e:
+                import logging
+                logging.warning(f"Could not remove temp directory {self.temp_dir}: {e}")
         self.reject()
 
 

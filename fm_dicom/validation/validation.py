@@ -440,8 +440,10 @@ class ValueRepresentationRule(ValidationRule):
                         f"Unexpected VR for tag {elem.tag}: found {elem.VR}, expected {expected_vr}",
                         tag=str(elem.tag), file_path=file_path
                     ))
-            except:
+            except Exception as e:
                 # Private tags or unknown tags
+                import logging
+                logging.debug(f"Could not validate VR for tag {elem.tag}: {e}")
                 pass
                 
         return issues

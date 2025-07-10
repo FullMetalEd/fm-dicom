@@ -229,6 +229,8 @@ class ExportWorker(QThread):
                 ds = pydicom.dcmread(fp, stop_before_pixels=True)
                 patient_id = str(getattr(ds, 'PatientID', 'UNKNOWN'))
                 patient_ids.append(patient_id)
-            except:
-                pass
+            except Exception as e:
+                import logging
+                logging.debug(f"Could not read patient ID from {fp}: {e}")
+                patient_ids.append('UNKNOWN')
         return patient_ids

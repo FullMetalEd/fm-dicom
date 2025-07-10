@@ -94,7 +94,8 @@ class DicomManager(QObject):
                     desc = pydicom.datadict.keyword_for_tag(elem.tag)
                     if not desc:
                         desc = "Private Tag" if elem.tag.is_private else "Unknown"
-                except:
+                except Exception as e:
+                    logging.debug(f"Could not get tag description for {elem.tag}: {e}")
                     desc = "Unknown"
                 
                 # Format value for display
@@ -112,7 +113,8 @@ class DicomManager(QObject):
                         value_str = str(elem.value)
                         if len(value_str) > 200:
                             value_str = value_str[:200] + "..."
-                    except:
+                    except Exception as e:
+                        logging.debug(f"Could not format value for tag {elem.tag}: {e}")
                         value_str = "<Cannot display>"
                 
                 # Store row data for filtering
@@ -428,7 +430,8 @@ class DicomManager(QObject):
             else:
                 self.frame_selector.addItem("Frame 1")
                 self.frame_selector.setEnabled(False)
-        except:
+        except Exception as e:
+            logging.debug(f"Could not set up frame selector: {e}")
             self.frame_selector.addItem("Frame 1")
             self.frame_selector.setEnabled(False)
     
@@ -777,6 +780,7 @@ class DicomManager(QObject):
             self.send_worker.send_complete.connect(self._on_send_complete)
             self.send_worker.send_failed.connect(self._on_send_failed)
             self.send_worker.association_status.connect(self._on_send_status)
+            self.send_worker.conversion_progress.connect(self._on_conversion_progress)
             self.send_progress.canceled.connect(self.send_worker.cancel)
             
             # Start worker
@@ -795,6 +799,9 @@ class DicomManager(QObject):
     
     def _on_send_progress(self, current, success, warnings, failed, current_file):
         """Handle DICOM send progress updates"""
+        import logging
+        logging.debug(f"DicomManager: Send progress: {current}/{self.send_total_files} - {current_file}")
+        
         if hasattr(self, 'send_progress') and hasattr(self, 'send_total_files'):
             # Calculate progress based on current file index vs total files
             if self.send_total_files > 0:
@@ -808,21 +815,65 @@ class DicomManager(QObject):
                 self.send_progress.setLabelText(f"Checking compatibility: {actual_filename} ({current}/{self.send_total_files})")
             else:
                 self.send_progress.setLabelText(f"Sending: {current_file} ({current}/{self.send_total_files})")
+            
+            # Make sure the dialog is visible after conversion phase
+            if not self.send_progress.isVisible():
+                logging.warning("DicomManager: Progress dialog was hidden, showing it again")
+                self.send_progress.show()
     
     def _on_send_status(self, status):
         """Handle DICOM send status updates"""
         if hasattr(self, 'send_progress'):
             self.send_progress.setLabelText(status)
+            
+            # Make sure the dialog is visible
+            if not self.send_progress.isVisible():
+                self.send_progress.show()
     
-    def _on_send_complete(self, success, warnings, failed, error_details, converted_count):
+    def _on_conversion_progress(self, current, total, message):
+        """Handle DICOM conversion progress updates"""
+        import logging
+        logging.debug(f"DicomManager: Conversion progress: {current}/{total} - {message}")
+        
+        if hasattr(self, 'send_progress'):
+            # Update progress bar based on conversion progress
+            if total > 0:
+                progress_percent = int((current / total) * 100)
+                self.send_progress.setValue(progress_percent)
+            self.send_progress.setLabelText(message)
+            
+            # Make sure the dialog is visible and not closed
+            if not self.send_progress.isVisible():
+                self.send_progress.show()
+    
+    def _on_send_complete(self, success, warnings, failed, error_details, converted_count, timing_info=None):
         """Handle DICOM send completion"""
+        import logging
+        logging.info("DicomManager: _on_send_complete called")
+        
         if hasattr(self, 'send_progress'):
             self.send_progress.close()
         
-        # Show results
+        # Show results with timing breakdown
         msg = f"DICOM send complete.\nSuccess: {success}\nWarnings: {warnings}\nFailed: {failed}"
         if converted_count > 0:
             msg += f"\nConverted: {converted_count}"
+        
+        # Add timing information
+        if timing_info:
+            msg += "\n\nTiming Breakdown:"
+            if timing_info.get('analysis_time', 0) > 0:
+                msg += f"\nAnalysis: {timing_info['analysis_time']:.1f}s"
+            if timing_info.get('compatibility_check_time', 0) > 0:
+                msg += f"\nCompatibility Check: {timing_info['compatibility_check_time']:.1f}s"
+            if timing_info.get('conversion_time', 0) > 0:
+                msg += f"\nConversion: {timing_info['conversion_time']:.1f}s"
+            if timing_info.get('send_time', 0) > 0:
+                msg += f"\nSending: {timing_info['send_time']:.1f}s"
+            if timing_info.get('total_time', 0) > 0:
+                msg += f"\nTotal: {timing_info['total_time']:.1f}s"
+        
+        logging.info(f"DicomManager: About to show completion dialog with message: {msg}")
         
         if failed == 0:
             FocusAwareMessageBox.information(self.main_window, "DICOM Send Complete", msg)

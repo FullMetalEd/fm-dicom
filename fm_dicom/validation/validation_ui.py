@@ -448,7 +448,9 @@ class ValidationResultsDialog(QDialog):
                     try:
                         tag_name = pydicom.datadict.keyword_for_tag(tag)
                         display_name = tag_name if tag_name else tag
-                    except:
+                    except Exception as e:
+                        import logging
+                        logging.debug(f"Could not get tag name for {tag}: {e}")
                         display_name = tag
                     stats_html += f"<li>{display_name}: {data['percentage']:.1f}% complete</li>"
                 stats_html += "</ul>"
