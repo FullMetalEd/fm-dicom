@@ -11,6 +11,23 @@ def get_default_user_dir():
     return str(QDir.homePath())
 
 
+def get_config_path():
+    """Get the platform-specific configuration file path"""
+    system = platform.system()
+    app_name = "fm-dicom"
+
+    # Determine platform-specific default paths
+    if system == "Windows":
+        appdata = os.environ.get("APPDATA")
+        base_dir = appdata if appdata else os.path.dirname(sys.executable)  # Use exe dir if APPDATA not found (portable case)
+        return os.path.join(base_dir, app_name, "config.yml")
+    elif system == "Darwin":  # macOS
+        return os.path.expanduser(f"~/Library/Application Support/{app_name}/config.yml")
+    else:  # Linux/Unix like systems
+        xdg_config_home = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+        return os.path.join(xdg_config_home, app_name, "config.yml")
+
+
 def ensure_dir_exists(file_path):
     if not file_path:
         # Logging might not be set up when this is first called by load_config for default log path

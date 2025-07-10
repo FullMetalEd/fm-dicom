@@ -17,7 +17,7 @@ from PyQt6.QtGui import QAction, QIcon, QKeySequence
 from PyQt6.QtCore import Qt, QPoint, QTimer
 
 # Configuration and setup imports
-from fm_dicom.config.config_manager import load_config, setup_logging, get_default_user_dir
+from fm_dicom.config.config_manager import load_config, setup_logging, get_default_user_dir, get_config_path
 from fm_dicom.config.dicom_setup import setup_gdcm_integration
 from fm_dicom.themes.theme_manager import set_light_palette, set_dark_palette
 
@@ -251,6 +251,11 @@ class MainWindow(QMainWindow, LayoutMixin):
     
     def dicom_send(self):
         """Show DICOM send dialog - delegates to DicomManager"""
+        selected_items = self.tree.selectedItems() if hasattr(self, 'tree') else []
+        self.dicom_manager.show_dicom_send_dialog(self.selected_files, selected_items)
+    
+    def show_dicom_send_dialog(self):
+        """Show DICOM send dialog - delegates to DicomManager (for menu/toolbar)"""
         selected_items = self.tree.selectedItems() if hasattr(self, 'tree') else []
         self.dicom_manager.show_dicom_send_dialog(self.selected_files, selected_items)
     
@@ -488,7 +493,8 @@ class MainWindow(QMainWindow, LayoutMixin):
     # Settings and utility dialogs (original methods preserved)
     def open_settings_editor(self):
         """Show settings dialog"""
-        dialog = SettingsEditorDialog(self.config, "config.yaml", self)
+        config_path = get_config_path()
+        dialog = SettingsEditorDialog(self.config, config_path, self)
         if dialog.exec():
             # Apply any settings changes
             if hasattr(dialog, 'new_config'):

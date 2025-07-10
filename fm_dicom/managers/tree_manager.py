@@ -28,6 +28,7 @@ class TreeManager(QObject):
         self.tree = main_window.tree
         self.file_metadata = {}
         self.loaded_files = []
+        self.hierarchy = {}  # Store hierarchy data for performance
         
         # Setup icons
         self._setup_icons()
@@ -52,6 +53,9 @@ class TreeManager(QObject):
         hierarchy = self._build_hierarchy(files)
         if hierarchy is None:  # Cancelled
             return
+        
+        # Store hierarchy for performance optimization
+        self.hierarchy = hierarchy
         
         # Populate tree widget
         self._build_tree_structure(hierarchy)
@@ -123,6 +127,9 @@ class TreeManager(QObject):
             
             self.loaded_files = fresh_loaded_files
                 
+            # Store hierarchy for performance optimization
+            self.hierarchy = hierarchy
+            
             # Rebuild tree structure
             progress.setValue(80)
             progress.setLabelText("Building tree structure...")

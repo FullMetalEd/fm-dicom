@@ -399,7 +399,15 @@ class SettingsEditorDialog(QDialog):
             
             # Ensure directory exists
             config_dir = os.path.dirname(self.config_file_path)
-            os.makedirs(config_dir, exist_ok=True)
+            if config_dir:  # Only try to create directory if path is not empty
+                try:
+                    os.makedirs(config_dir, exist_ok=True)
+                    logging.info(f"Ensured config directory exists: {config_dir}")
+                except Exception as dir_error:
+                    raise Exception(f"Failed to create config directory '{config_dir}': {dir_error}")
+            else:
+                # If config_dir is empty, the path is relative - this shouldn't happen with proper paths
+                raise Exception(f"Invalid config path - cannot determine directory for '{self.config_file_path}'. This usually indicates a relative path was used instead of an absolute path.")
             
             # Save the new configuration
             with open(self.config_file_path, 'w', encoding='utf-8') as f:

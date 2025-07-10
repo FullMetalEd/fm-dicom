@@ -691,6 +691,11 @@ class DicomManager(QObject):
             return
         
         try:
+            # Get pre-built hierarchy data from TreeManager for performance
+            hierarchy_data = None
+            if hasattr(self.main_window, 'tree_manager') and hasattr(self.main_window.tree_manager, 'hierarchy'):
+                hierarchy_data = getattr(self.main_window.tree_manager, 'hierarchy', None)
+            
             # Show file selection dialog first
             loaded_files = [(path, None) for path in file_paths]  # Convert to expected format
             
@@ -698,7 +703,8 @@ class DicomManager(QObject):
             selection_dialog = DicomSendSelectionDialog(
                 loaded_files, 
                 selected_items, 
-                self.main_window
+                self.main_window,
+                hierarchy_data=hierarchy_data
             )
             
             if selection_dialog.exec():
