@@ -940,7 +940,7 @@ class MainWindow(QMainWindow, LayoutMixin):
         updated_count = 0
         failed_files = []
         
-        progress = QProgressDialog("Merging patients...", "Cancel", 0, len(files_to_update), self)
+        progress = FocusAwareProgressDialog("Merging patients...", "Cancel", 0, len(files_to_update), self)
         progress.setWindowTitle("Merging Patients")
         progress.setMinimumDuration(0)
         progress.setValue(0)
@@ -981,7 +981,7 @@ class MainWindow(QMainWindow, LayoutMixin):
         updated_count = 0
         failed_files = []
         
-        progress = QProgressDialog("Merging studies...", "Cancel", 0, len(files_to_update), self)
+        progress = FocusAwareProgressDialog("Merging studies...", "Cancel", 0, len(files_to_update), self)
         progress.setWindowTitle("Merging Studies")
         progress.setMinimumDuration(0)
         progress.setValue(0)
@@ -1023,7 +1023,7 @@ class MainWindow(QMainWindow, LayoutMixin):
         updated_count = 0
         failed_files = []
         
-        progress = QProgressDialog("Merging series...", "Cancel", 0, len(files_to_update), self)
+        progress = FocusAwareProgressDialog("Merging series...", "Cancel", 0, len(files_to_update), self)
         progress.setWindowTitle("Merging Series")
         progress.setMinimumDuration(0)
         progress.setValue(0)
@@ -1160,7 +1160,7 @@ class MainWindow(QMainWindow, LayoutMixin):
         import tempfile
         
         # Create progress dialog
-        self.export_progress = QProgressDialog("Preparing export...", "Cancel", 0, 100, self)
+        self.export_progress = FocusAwareProgressDialog("Preparing export...", "Cancel", 0, 100, self)
         self.export_progress.setWindowTitle("Export Progress")
         self.export_progress.setMinimumDuration(0)
         self.export_progress.setValue(0)

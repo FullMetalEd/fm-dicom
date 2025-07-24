@@ -12,10 +12,10 @@ import shutil
 
 from fm_dicom.workers.zip_worker import ZipExtractionWorker
 from fm_dicom.workers.dicom_worker import DicomdirScanWorker
-from fm_dicom.widgets.focus_aware import FocusAwareMessageBox
+from fm_dicom.widgets.focus_aware import FocusAwareMessageBox, FocusAwareProgressDialog
 
 
-class ZipExtractionDialog(QProgressDialog):
+class ZipExtractionDialog(FocusAwareProgressDialog):
     """Progress dialog for ZIP extraction"""
     
     def __init__(self, zip_path, parent=None):
@@ -78,7 +78,7 @@ class ZipExtractionDialog(QProgressDialog):
         self.reject()
 
 
-class DicomdirScanDialog(QProgressDialog):
+class DicomdirScanDialog(FocusAwareProgressDialog):
     """Progress dialog for DICOM file scanning"""
     
     def __init__(self, extracted_files, parent=None):

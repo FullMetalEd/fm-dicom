@@ -12,6 +12,8 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QTreeWidgetItem, QProgressDialog, QApplication
 )
+
+from fm_dicom.widgets.focus_aware import FocusAwareProgressDialog
 from PyQt6.QtGui import QFont
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 
@@ -203,7 +205,7 @@ class DicomSendSelectionDialog(QDialog):
         # For very large datasets, also show a progress dialog
         total_files = len(self.loaded_files) if self.loaded_files else 0
         if total_files > 5000:
-            self.progress_dialog = QProgressDialog("Loading file hierarchy...", "Cancel", 0, 100, self)
+            self.progress_dialog = FocusAwareProgressDialog("Loading file hierarchy...", "Cancel", 0, 100, self)
             self.progress_dialog.setWindowTitle("Loading DICOM Files")
             self.progress_dialog.setMinimumDuration(0)
             self.progress_dialog.setValue(0)
@@ -485,7 +487,7 @@ class DicomSendSelectionDialog(QDialog):
         # Show progress dialog for large datasets
         progress = None
         if total_instances > 1000:
-            progress = QProgressDialog("Populating file selection tree...", "Cancel", 0, total_instances, self)
+            progress = FocusAwareProgressDialog("Populating file selection tree...", "Cancel", 0, total_instances, self)
             progress.setWindowTitle("Building File Tree")
             progress.setMinimumDuration(0)
             progress.setValue(0)

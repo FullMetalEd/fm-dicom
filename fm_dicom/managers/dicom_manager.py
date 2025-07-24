@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import QTableWidgetItem, QApplication
 from PyQt6.QtCore import QObject, pyqtSignal, Qt
 from PyQt6.QtGui import QPixmap, QImage
 
-from fm_dicom.widgets.focus_aware import FocusAwareMessageBox
+from fm_dicom.widgets.focus_aware import FocusAwareMessageBox, FocusAwareProgressDialog
 from fm_dicom.validation.validation_ui import run_validation
 from fm_dicom.anonymization.anonymization_ui import run_anonymization
 from fm_dicom.tag_browser.tag_browser import TagSearchDialog, ValueEntryDialog
@@ -259,7 +259,7 @@ class DicomManager(QObject):
         updated_count = 0
         failed_files = []
         
-        progress = QProgressDialog(f"Saving changes to {level}...", "Cancel", 0, len(filepaths), self.main_window)
+        progress = FocusAwareProgressDialog(f"Saving changes to {level}...", "Cancel", 0, len(filepaths), self.main_window)
         progress.setWindowTitle("Saving Tag Changes")
         progress.setMinimumDuration(0)
         progress.setValue(0)
@@ -763,7 +763,7 @@ class DicomManager(QObject):
             
             # Create progress dialog
             from PyQt6.QtWidgets import QProgressDialog
-            self.send_progress = QProgressDialog("Preparing DICOM send...", "Cancel", 0, 100, self.main_window)
+            self.send_progress = FocusAwareProgressDialog("Preparing DICOM send...", "Cancel", 0, 100, self.main_window)
             self.send_progress.setWindowTitle("DICOM Send Progress")
             self.send_progress.setMinimumDuration(0)
             self.send_progress.setValue(0)
@@ -1000,7 +1000,7 @@ class DicomManager(QObject):
         failed_files = []
         
         from PyQt6.QtWidgets import QProgressDialog
-        progress = QProgressDialog(f"Batch editing {tag_info['name']}...", "Cancel", 0, len(file_paths), self.main_window)
+        progress = FocusAwareProgressDialog(f"Batch editing {tag_info['name']}...", "Cancel", 0, len(file_paths), self.main_window)
         progress.setWindowTitle("Batch Tag Edit")
         progress.setMinimumDuration(0)
         progress.setValue(0)

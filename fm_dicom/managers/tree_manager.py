@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import QTreeWidgetItem, QProgressDialog, QApplication
 from PyQt6.QtCore import QObject, pyqtSignal, Qt
 from PyQt6.QtGui import QIcon
 
-from fm_dicom.widgets.focus_aware import FocusAwareMessageBox
+from fm_dicom.widgets.focus_aware import FocusAwareMessageBox, FocusAwareProgressDialog
 
 
 class TreeManager(QObject):
@@ -72,7 +72,7 @@ class TreeManager(QObject):
             return
             
         # Show progress dialog
-        progress = QProgressDialog("Refreshing tree...", "Cancel", 0, 100, self.main_window)
+        progress = FocusAwareProgressDialog("Refreshing tree...", "Cancel", 0, 100, self.main_window)
         progress.setWindowTitle("Refreshing File Tree")
         progress.setMinimumDuration(0)
         progress.setValue(0)
@@ -158,7 +158,7 @@ class TreeManager(QObject):
         
         if needs_header_reading and progress_dialog is None:
             # Progress dialog for loading headers
-            progress = QProgressDialog("Loading DICOM headers...", "Cancel", 0, len(files), self.main_window)
+            progress = FocusAwareProgressDialog("Loading DICOM headers...", "Cancel", 0, len(files), self.main_window)
             progress.setWindowTitle("Loading DICOM Files")
             progress.setMinimumDuration(0)
             progress.setValue(0)
