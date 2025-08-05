@@ -17,6 +17,7 @@ import csv
 import json
 from datetime import datetime
 from .validation import DicomValidator, ValidationSeverity, CollectionValidationResult
+from fm_dicom.widgets.focus_aware import FocusAwareProgressDialog
 
 class ValidationWorker(QThread):
     """Worker thread for running validation without blocking UI"""
@@ -69,7 +70,7 @@ class ValidationWorker(QThread):
             empty_result = CollectionValidationResult()
             self.validation_complete.emit(empty_result)
 
-class ValidationProgressDialog(QProgressDialog):
+class ValidationProgressDialog(FocusAwareProgressDialog):
     """Progress dialog for validation operations"""
     
     def __init__(self, file_paths, parent=None):
@@ -459,11 +460,23 @@ class ValidationResultsDialog(QDialog):
         
     def export_report(self):
         """Export validation report as HTML"""
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, "Export Validation Report", 
-            f"validation_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
-            "HTML Files (*.html)"
-        )
+        # Create dialog and configure based on user preference
+        default_filename = f"validation_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+        dialog = QFileDialog(self, "Export Validation Report", default_filename, "HTML Files (*.html)")
+        dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+        dialog.setDefaultSuffix("html")
+        
+        # Configure native dialog preference (check if parent has config)
+        if hasattr(self.parent(), 'config') and not self.parent().config.get("file_picker_native", False):
+            dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        
+        if dialog.exec():
+            file_paths = dialog.selectedFiles()
+            if not file_paths:
+                return
+            file_path = file_paths[0]
+        else:
+            return
         
         if file_path:
             try:
@@ -476,11 +489,23 @@ class ValidationResultsDialog(QDialog):
                 
     def export_csv(self):
         """Export validation issues as CSV"""
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, "Export Issues CSV",
-            f"validation_issues_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            "CSV Files (*.csv)"
-        )
+        # Create dialog and configure based on user preference
+        default_filename = f"validation_issues_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        dialog = QFileDialog(self, "Export Issues CSV", default_filename, "CSV Files (*.csv)")
+        dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+        dialog.setDefaultSuffix("csv")
+        
+        # Configure native dialog preference (check if parent has config)
+        if hasattr(self.parent(), 'config') and not self.parent().config.get("file_picker_native", False):
+            dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        
+        if dialog.exec():
+            file_paths = dialog.selectedFiles()
+            if not file_paths:
+                return
+            file_path = file_paths[0]
+        else:
+            return
         
         if file_path:
             try:

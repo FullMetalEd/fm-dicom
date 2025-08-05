@@ -24,6 +24,12 @@ dependencies = [
 dev = [
     "pyinstaller>=6.13.0",  
 ]
+test = [
+    "pytest-mock>=3.12.0",
+    "pytest-cov>=4.0.0",
+    "pytest>=8.4.1",
+    "pytest-qt>=4.5.0",
+]
 
 [project.scripts]
 fm-dicom = "fm_dicom.main:main"

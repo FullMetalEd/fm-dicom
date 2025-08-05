@@ -30,6 +30,7 @@ from .anonymization import (
     DateShifter,  # This was missing!
     UIDMapper    # Also add this for completeness
 )
+from fm_dicom.widgets.focus_aware import FocusAwareProgressDialog
 
 class AnonymizationWorker(QThread):
     """Worker thread for anonymization without blocking UI"""
@@ -72,7 +73,7 @@ class AnonymizationWorker(QThread):
             result.add_failure("General", f"Anonymization failed: {str(e)}")
             self.anonymization_complete.emit(result)
 
-class AnonymizationProgressDialog(QProgressDialog):
+class AnonymizationProgressDialog(FocusAwareProgressDialog):
     """Progress dialog for anonymization operations"""
     
     def __init__(self, template, file_paths, parent=None):
@@ -932,11 +933,23 @@ class AnonymizationResultsDialog(QDialog):
             
     def export_errors(self):
         """Export error report"""
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, "Export Error Report",
-            f"anonymization_errors_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-            "Text Files (*.txt)"
-        )
+        # Create dialog and configure based on user preference
+        default_filename = f"anonymization_errors_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        dialog = QFileDialog(self, "Export Error Report", default_filename, "Text Files (*.txt)")
+        dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+        dialog.setDefaultSuffix("txt")
+        
+        # Configure native dialog preference (check if parent has config)
+        if hasattr(self.parent(), 'config') and not self.parent().config.get("file_picker_native", False):
+            dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        
+        if dialog.exec():
+            file_paths = dialog.selectedFiles()
+            if not file_paths:
+                return
+            file_path = file_paths[0]
+        else:
+            return
         
         if file_path:
             try:

@@ -15,6 +15,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from fm_dicom.widgets.focus_aware import FocusAwareMessageBox
 from fm_dicom.dialogs.progress_dialogs import ZipExtractionDialog, DicomdirScanDialog
 from fm_dicom.core.dicomdir_reader import DicomdirReader
+from fm_dicom.utils.file_dialogs import get_file_dialog_manager
 
 
 class FileManager(QObject):
@@ -37,9 +38,11 @@ class FileManager(QObject):
         
         start_dir = self.config.get("default_import_dir", os.path.expanduser("~"))
         
-        file_path, _ = QFileDialog.getOpenFileName(
+        # Use enhanced file dialog manager
+        dialog_manager = get_file_dialog_manager(self.config)
+        file_path = dialog_manager.open_file_dialog(
             self.main_window,
-            "Open DICOM File",
+            "Open DICOM File", 
             start_dir,
             "All Files (*);;DICOM Files (*.dcm *.dicom);;ZIP Archives (*.zip)"
         )
@@ -54,7 +57,9 @@ class FileManager(QObject):
         
         start_dir = self.config.get("default_import_dir", os.path.expanduser("~"))
         
-        dir_path = QFileDialog.getExistingDirectory(
+        # Use enhanced file dialog manager
+        dialog_manager = get_file_dialog_manager(self.config)
+        dir_path = dialog_manager.open_directory_dialog(
             self.main_window,
             "Open Directory",
             start_dir

@@ -1,5 +1,6 @@
 from PyQt6.QtWidgets import QMessageBox, QProgressDialog, QApplication
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QEvent
+import os
 
 
 class FocusAwareMessageBox(QMessageBox):
@@ -83,16 +84,32 @@ class FocusAwareProgressDialog(QProgressDialog):
         
         # Configure non-focus-stealing behavior
         self._configure_focus_behavior()
+        
+        # Install event filter to handle keyboard events
+        self.installEventFilter(self)
     
     def _configure_focus_behavior(self):
         """Configure the dialog to not steal focus when app doesn't have focus"""
-        # If app doesn't have focus, prevent focus stealing
+        # If app doesn't have focus, prevent focus stealing and workspace following
         if not self._app_has_focus():
-            self.setWindowFlags(
+            window_flags = (
                 self.windowFlags() | 
-                Qt.WindowType.WindowDoesNotAcceptFocus
+                Qt.WindowType.WindowDoesNotAcceptFocus |
+                Qt.WindowType.WindowStaysOnTopHint
             )
+            
+            # Additional Wayland/Hyprland specific flags
+            if self._is_wayland():
+                window_flags |= Qt.WindowType.Tool
+            
+            self.setWindowFlags(window_flags)
             self.setModal(False)  # Don't block other apps
+        else:
+            # App has focus, allow normal behavior but prevent workspace following
+            window_flags = self.windowFlags()
+            if self._is_wayland():
+                window_flags |= Qt.WindowType.Tool
+            self.setWindowFlags(window_flags)
     
     def show(self):
         """Override show to recheck focus behavior"""
@@ -103,6 +120,30 @@ class FocusAwareProgressDialog(QProgressDialog):
         """Override exec to recheck focus behavior"""
         self._configure_focus_behavior()
         return super().exec()
+    
+    def eventFilter(self, obj, event):
+        """Filter events to prevent accidental cancellation"""
+        if obj == self and event.type() == QEvent.Type.KeyPress:
+            # Prevent Enter/Return from canceling the dialog accidentally
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                # Look for cancel button more reliably
+                from PyQt6.QtWidgets import QPushButton
+                cancel_buttons = self.findChildren(QPushButton)
+                cancel_button = None
+                
+                # Find the cancel button
+                for button in cancel_buttons:
+                    if button.text().lower() in ['cancel', '&cancel']:
+                        cancel_button = button
+                        break
+                
+                # Only allow cancellation if the cancel button has focus
+                if cancel_button and cancel_button.hasFocus():
+                    return super().eventFilter(obj, event)
+                
+                # Otherwise, ignore the key press to prevent accidental cancellation
+                return True
+        return super().eventFilter(obj, event)
     
     def _app_has_focus(self):
         """Check if our app currently has focus"""
@@ -119,5 +160,21 @@ class FocusAwareProgressDialog(QProgressDialog):
         for widget in app.topLevelWidgets():
             if widget.isActiveWindow():
                 return True
+        
+        # Wayland/Hyprland specific check - check if we're the focused application
+        if self._is_wayland():
+            # On Wayland, activeWindow() may not work reliably
+            # Check if any of our windows are visible and potentially focused
+            for widget in app.topLevelWidgets():
+                if widget.isVisible() and not widget.isMinimized():
+                    return True
                 
         return False
+    
+    def _is_wayland(self):
+        """Check if we're running on Wayland"""
+        return (
+            os.environ.get('WAYLAND_DISPLAY') is not None or
+            os.environ.get('QT_QPA_PLATFORM') == 'wayland' or
+            'wayland' in os.environ.get('QT_QPA_PLATFORM', '').lower()
+        )

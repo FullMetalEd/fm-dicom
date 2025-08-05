@@ -287,10 +287,21 @@ class PerformanceResultsDialog(QDialog):
     
     def export_csv(self):
         """Export performance results to CSV"""
-        filename, _ = QFileDialog.getSaveFileName(
-            self, "Export Performance Results", "performance_results.csv", "CSV Files (*.csv)"
-        )
-        if not filename:
+        # Create dialog and configure based on user preference
+        dialog = QFileDialog(self, "Export Performance Results", "performance_results.csv", "CSV Files (*.csv)")
+        dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+        dialog.setDefaultSuffix("csv")
+        
+        # Configure native dialog preference (check if parent has config)
+        if hasattr(self.parent(), 'config') and not self.parent().config.get("file_picker_native", False):
+            dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        
+        if dialog.exec():
+            filenames = dialog.selectedFiles()
+            if not filenames:
+                return
+            filename = filenames[0]
+        else:
             return
             
         try:
@@ -318,10 +329,21 @@ class PerformanceResultsDialog(QDialog):
     
     def export_report(self):
         """Export detailed performance report"""
-        filename, _ = QFileDialog.getSaveFileName(
-            self, "Export Performance Report", "performance_report.txt", "Text Files (*.txt)"
-        )
-        if not filename:
+        # Create dialog and configure based on user preference
+        dialog = QFileDialog(self, "Export Performance Report", "performance_report.txt", "Text Files (*.txt)")
+        dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+        dialog.setDefaultSuffix("txt")
+        
+        # Configure native dialog preference (check if parent has config)
+        if hasattr(self.parent(), 'config') and not self.parent().config.get("file_picker_native", False):
+            dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        
+        if dialog.exec():
+            filenames = dialog.selectedFiles()
+            if not filenames:
+                return
+            filename = filenames[0]
+        else:
             return
             
         try:
