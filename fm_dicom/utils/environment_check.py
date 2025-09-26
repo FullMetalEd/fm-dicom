@@ -58,27 +58,53 @@ class EnvironmentChecker:
         """Check if running on Hyprland specifically"""
         return self.get_desktop_environment() == 'hyprland'
     
+    def _test_qt_wayland_availability(self) -> bool:
+        """Test if Qt6 Wayland platform plugin is available"""
+        try:
+            import subprocess
+            # Try to get Qt platform plugins
+            result = subprocess.run(
+                ['python3', '-c',
+                 'from PyQt6.QtWidgets import QApplication; import sys; '
+                 'app = QApplication(sys.argv); '
+                 'print("wayland" in [p.data().decode() for p in app.platformName() if hasattr(app, "availablePlugins")])'],
+                capture_output=True, timeout=5, env={**os.environ, 'QT_QPA_PLATFORM': 'wayland'}
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
     def check_qt_environment(self) -> Dict[str, any]:
         """Check Qt environment configuration"""
         issues = []
         recommendations = []
         warnings = []
-        
+
         if not self.is_wayland():
             return {
                 'issues': [],
-                'recommendations': ['Environment appears to be X11, no Wayland-specific configuration needed'],
+                'recommendations': ['Environment appears to be X11, Qt will use X11/XCB platform automatically'],
                 'warnings': [],
                 'score': 100
             }
-        
+
+        # Test if Wayland platform is actually available
+        wayland_available = self._test_qt_wayland_availability()
+
         # Check Qt platform
         qt_platform = os.environ.get('QT_QPA_PLATFORM', '')
         if not qt_platform:
-            issues.append("QT_QPA_PLATFORM not set")
-            recommendations.append("Set QT_QPA_PLATFORM=wayland")
+            if wayland_available:
+                issues.append("QT_QPA_PLATFORM not set")
+                recommendations.append("Set QT_QPA_PLATFORM=wayland")
+            else:
+                warnings.append("QT_QPA_PLATFORM not set, but Wayland platform plugin not available")
+                recommendations.append("Qt will use X11 compatibility mode automatically")
         elif 'wayland' not in qt_platform.lower():
-            warnings.append(f"QT_QPA_PLATFORM={qt_platform} - consider 'wayland'")
+            if wayland_available:
+                warnings.append(f"QT_QPA_PLATFORM={qt_platform} - consider 'wayland'")
+            else:
+                recommendations.append("Current platform setting is appropriate (Wayland plugin not available)")
         
         # Check platform theme
         qt_theme = os.environ.get('QT_QPA_PLATFORMTHEME', '')
