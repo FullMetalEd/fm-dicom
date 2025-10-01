@@ -12,10 +12,11 @@ import shutil
 from PyQt6.QtWidgets import QFileDialog, QApplication
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from fm_dicom.widgets.focus_aware import FocusAwareMessageBox
+from fm_dicom.widgets.focus_aware import FocusAwareMessageBox, FocusAwareProgressDialog
 from fm_dicom.dialogs.progress_dialogs import ZipExtractionDialog, DicomdirScanDialog
 from fm_dicom.core.dicomdir_reader import DicomdirReader
 from fm_dicom.utils.file_dialogs import get_file_dialog_manager
+# Temporarily commented out for testing - from fm_dicom.utils.threaded_processor import FastDicomScanner
 
 
 class FileManager(QObject):
@@ -42,7 +43,7 @@ class FileManager(QObject):
         dialog_manager = get_file_dialog_manager(self.config)
         file_path = dialog_manager.open_file_dialog(
             self.main_window,
-            "Open DICOM File", 
+            "Open DICOM File",
             start_dir,
             "All Files (*);;DICOM Files (*.dcm *.dicom);;ZIP Archives (*.zip)"
         )
@@ -196,54 +197,97 @@ class FileManager(QObject):
             )
     
     def _scan_directory_recursive(self, dir_path):
-        """Recursively scan directory for DICOM files"""
+        """Recursively scan directory for DICOM files with optimized processing"""
         import pydicom
-        
+
         dicom_files = []
-        file_count = 0
-        
-        # Count files first for progress
+
+        # First pass: collect all file paths
+        all_file_paths = []
+        logging.info(f"Scanning directory structure: {dir_path}")
+
         for root, dirs, files in os.walk(dir_path):
-            file_count += len(files)
-        
-        if file_count == 0:
+            for file in files:
+                file_path = os.path.join(root, file)
+                all_file_paths.append(file_path)
+
+        if not all_file_paths:
             FocusAwareMessageBox.information(
                 self.main_window,
                 "Empty Directory",
                 "No files found in the selected directory."
             )
             return
-        
-        # Progress tracking
+
+        logging.info(f"Found {len(all_file_paths)} total files, pre-filtering for DICOM content")
+
+        # Pre-filter using fast DICOM detection (temporarily disabled)
+        # potential_dicom_files = FastDicomScanner.filter_dicom_files(all_file_paths)
+        potential_dicom_files = all_file_paths  # Use all files for now
+
+        if not potential_dicom_files:
+            FocusAwareMessageBox.information(
+                self.main_window,
+                "No DICOM Files",
+                "No potential DICOM files found in the selected directory."
+            )
+            return
+
+        logging.info(f"Pre-filtering found {len(potential_dicom_files)} potential DICOM files")
+
+        # Show progress dialog for DICOM processing
+        progress = FocusAwareProgressDialog(
+            "Processing DICOM files...",
+            "Cancel",
+            0,
+            len(potential_dicom_files),
+            self.main_window
+        )
+        progress.setWindowTitle("Loading Directory")
+        progress.setMinimumDuration(0)
+        progress.show()
+
+        # Process potential DICOM files with better progress updates
         processed = 0
-        
-        # Scan files
-        for root, dirs, files in os.walk(dir_path):
-            for file in files:
-                file_path = os.path.join(root, file)
-                processed += 1
-                
-                try:
-                    # Try to read as DICOM
-                    ds = pydicom.dcmread(file_path, stop_before_pixels=True)
-                    dicom_files.append((file_path, ds))
-                    
-                except Exception:
-                    # Not a DICOM file, skip silently
-                    continue
-                
-                # Update progress occasionally
-                if processed % 100 == 0:
-                    QApplication.processEvents()
-        
+        successful_files = 0
+
+        for file_path in potential_dicom_files:
+            if progress.wasCanceled():
+                logging.info(f"Directory scan cancelled after processing {processed} files")
+                progress.close()
+                return
+
+            try:
+                # Try to read as DICOM
+                ds = pydicom.dcmread(file_path, stop_before_pixels=True)
+                dicom_files.append((file_path, ds))
+                successful_files += 1
+
+            except Exception as e:
+                # Not a valid DICOM file, skip silently
+                if processed < 5:  # Log first few errors for debugging
+                    logging.debug(f"Failed to read as DICOM: {file_path} - {e}")
+                continue
+
+            processed += 1
+
+            # Update progress more frequently for responsiveness
+            if processed % 10 == 0 or processed == len(potential_dicom_files):
+                progress.setValue(processed)
+                progress.setLabelText(f"Processed {successful_files} DICOM files\n({processed}/{len(potential_dicom_files)} files checked)")
+                QApplication.processEvents()
+
+        progress.close()
+
         if dicom_files:
-            logging.info(f"Directory scan found {len(dicom_files)} DICOM files")
+            logging.info(f"Directory scan completed: {len(dicom_files)} DICOM files from {len(all_file_paths)} total files")
             self.files_loaded.emit(dicom_files)
         else:
             FocusAwareMessageBox.information(
                 self.main_window,
-                "No DICOM Files",
-                "No DICOM files found in the selected directory."
+                "No Valid DICOM Files",
+                f"No valid DICOM files found in the selected directory.\n"
+                f"Checked {len(potential_dicom_files)} potential files from {len(all_file_paths)} total files."
             )
     
     def _scan_directory_comprehensive(self, dir_path):

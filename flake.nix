@@ -25,6 +25,7 @@
           ] ++ (with pkgs; [
             qt6.wrapQtAppsHook
             copyDesktopItems
+            makeWrapper
           ]);
 
           propagatedBuildInputs = with pkgs.python3Packages; [
@@ -42,6 +43,11 @@
           buildInputs = with pkgs; [
             qt6.qtbase
             qt6.qtwayland
+            kdePackages.qtwayland  # Newer Qt6 Wayland implementation
+            qt6ct
+            zenity
+            xdg-desktop-portal
+            xdg-desktop-portal-gtk
           ];
 
           # Desktop entry configuration
@@ -64,6 +70,16 @@
             # Create icons directories
             mkdir -p $out/share/icons/hicolor/48x48/apps
             cp ${./fm_dicom/fm-dicom.png} $out/share/icons/hicolor/48x48/apps/fm-dicom.png
+
+            # Wrap the binary to include runtime dependencies
+            wrapProgram $out/bin/fm-dicom \
+              --prefix PATH : ${pkgs.lib.makeBinPath [
+                pkgs.zenity
+                pkgs.qt6ct
+                pkgs.xdg-desktop-portal
+                pkgs.xdg-desktop-portal-gtk
+              ]} \
+              --prefix QT_PLUGIN_PATH : "${pkgs.qt6.qtbase}/lib/qt-6/plugins:${pkgs.qt6.qtwayland}/lib/qt-6/plugins:${pkgs.kdePackages.qtwayland}/lib/qt-6/plugins"
           '';
 
           meta = with pkgs.lib; {

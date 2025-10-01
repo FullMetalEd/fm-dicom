@@ -13,6 +13,7 @@ from PyQt6.QtCore import QObject, pyqtSignal, Qt
 from PyQt6.QtGui import QIcon
 
 from fm_dicom.widgets.focus_aware import FocusAwareMessageBox, FocusAwareProgressDialog
+# Temporarily commented out for testing - from fm_dicom.utils.threaded_processor import ThreadedDicomProcessor, DicomProcessingResult, FastDicomScanner
 
 
 class TreeManager(QObject):
@@ -29,10 +30,23 @@ class TreeManager(QObject):
         self.file_metadata = {}
         self.loaded_files = []
         self.hierarchy = {}  # Store hierarchy data for performance
-        
+
+        # Performance optimization settings from config
+        perf_config = main_window.config.get('performance', {})
+        self.use_threaded_processing = perf_config.get('use_threaded_processing', True)
+        self.thread_threshold = perf_config.get('thread_threshold', 100)
+        self.max_workers = perf_config.get('max_worker_threads', 4)
+        self.batch_size = perf_config.get('batch_size', 50)
+        self.progress_frequency = perf_config.get('progress_update_frequency', 20)
+
+        # Threaded processor
+        self.threaded_processor = None
+        self.progressive_hierarchy = {}  # Build hierarchy progressively
+        self.processing_stats = {'processed': 0, 'total': 0, 'errors': 0}
+
         # Setup icons
         self._setup_icons()
-        
+
         # Connect tree signals
         self.tree.itemSelectionChanged.connect(self._on_selection_changed)
     
@@ -44,27 +58,209 @@ class TreeManager(QObject):
         self.series_icon = style.standardIcon(style.StandardPixmap.SP_FileDialogDetailedView)
     
     def populate_tree(self, files):
-        """Populate tree with DICOM file hierarchy"""
+        """Populate tree with DICOM file hierarchy using optimized processing"""
         logging.info(f"Starting tree population with {len(files)} files")
         self.tree.clear()
         self.file_metadata = {}
         self.loaded_files = files
-        
+
+        # Extract file paths from mixed input formats
+        file_paths = self._extract_file_paths(files)
+
+        # Temporarily disable threaded processing due to import issue
+        logging.info(f"Using sequential processing for {len(file_paths)} files")
+        # Use original method for all datasets
         hierarchy = self._build_hierarchy(files)
         if hierarchy is None:  # Cancelled
             return
-        
+
         # Store hierarchy for performance optimization
         self.hierarchy = hierarchy
-        
+
         # Populate tree widget
         self._build_tree_structure(hierarchy)
-        
+
         # Update status
         total_files = len(files)
         self.tree_populated.emit(total_files)
-        
+
         logging.info(f"Tree populated with {total_files} files")
+
+    def _extract_file_paths(self, files):
+        """Extract file paths from mixed input formats (paths, tuples)"""
+        file_paths = []
+        for file_info in files:
+            if isinstance(file_info, tuple):
+                file_paths.append(file_info[0])  # Extract path from (path, dataset) tuple
+            else:
+                file_paths.append(file_info)  # Already just a path
+        return file_paths
+
+    def _populate_tree_threaded(self, file_paths):
+        """Populate tree using threaded processing for large datasets"""
+        # Initialize processing state
+        self.progressive_hierarchy = {}
+        self.processing_stats = {'processed': 0, 'total': len(file_paths), 'errors': 0}
+
+        # Pre-filter files to remove obvious non-DICOM files (temporarily disabled)
+        # filtered_paths = FastDicomScanner.filter_dicom_files(file_paths)
+        filtered_paths = file_paths  # Use all files for now
+        # if len(filtered_paths) != len(file_paths):
+        #     logging.info(f"Pre-filtered {len(file_paths)} files to {len(filtered_paths)} potential DICOM files")
+
+        # Create threaded processor (temporarily disabled)
+        # self.threaded_processor = ThreadedDicomProcessor(
+        #     max_workers=self.max_workers,
+        #     batch_size=self.batch_size
+        # )
+
+        # Connect signals for progressive updates (temporarily disabled)
+        # self.threaded_processor.progress_updated.connect(self._on_threaded_progress)
+        # self.threaded_processor.file_processed.connect(self._on_file_processed)
+        # self.threaded_processor.batch_completed.connect(self._on_batch_completed)
+        # self.threaded_processor.processing_finished.connect(self._on_processing_finished)
+        # self.threaded_processor.processing_error.connect(self._on_processing_error)
+
+        # Show progress dialog (temporarily disabled)
+        # self.progress_dialog = FocusAwareProgressDialog(
+        #     f"Processing {len(filtered_paths)} DICOM files...",
+        #     "Cancel",
+        #     0,
+        #     len(filtered_paths),
+        #     self.main_window
+        # )
+        # self.progress_dialog.setWindowTitle("Loading DICOM Files")
+        # self.progress_dialog.setMinimumDuration(0)
+        # self.progress_dialog.canceled.connect(self.threaded_processor.cancel_processing)
+        # self.progress_dialog.show()
+
+        # Start threaded processing (temporarily disabled)
+        # self.threaded_processor.process_files(
+        #     filtered_paths,
+        #     read_pixels=False,  # Headers only for hierarchy building
+        #     required_tags=None  # Use defaults
+        # )
+
+    def _on_threaded_progress(self, current, total, current_file):
+        """Handle progress updates from threaded processor"""
+        if hasattr(self, 'progress_dialog') and self.progress_dialog:
+            self.progress_dialog.setValue(current)
+            self.progress_dialog.setLabelText(f"Processing: {current_file}\n({current}/{total} files)")
+            QApplication.processEvents()
+
+    def _on_file_processed(self, result):
+        """Handle single file processing completion"""
+        if result.success:
+            # Add to progressive hierarchy
+            self._add_to_progressive_hierarchy(result)
+        else:
+            self.processing_stats['errors'] += 1
+            if self.processing_stats['errors'] <= 5:  # Log first few errors
+                logging.warning(f"Failed to process {result.file_path}: {result.error}")
+
+    def _on_batch_completed(self, batch_results):
+        """Handle batch completion - update tree structure progressively"""
+        # Update tree with current hierarchy state
+        if self.progressive_hierarchy:
+            # Build tree incrementally - only add new nodes
+            self._update_tree_structure_progressive(self.progressive_hierarchy)
+
+    def _on_processing_finished(self):
+        """Handle completion of all threaded processing"""
+        if hasattr(self, 'progress_dialog') and self.progress_dialog:
+            self.progress_dialog.close()
+
+        # Final hierarchy build and tree update
+        self.hierarchy = self.progressive_hierarchy
+        self._build_tree_structure(self.hierarchy)
+
+        # Convert file paths back to loaded_files format
+        self.loaded_files = []
+        for patient_data in self.hierarchy.values():
+            for study_data in patient_data.values():
+                for series_data in study_data.values():
+                    for instance_data in series_data.values():
+                        filepath = instance_data['filepath']
+                        dataset = instance_data.get('dataset')
+                        if dataset:
+                            self.loaded_files.append((filepath, dataset))
+                        else:
+                            self.loaded_files.append(filepath)
+
+        # Update status
+        total_files = len(self.loaded_files)
+        errors = self.processing_stats['errors']
+        self.tree_populated.emit(total_files)
+
+        logging.info(f"Threaded tree population completed: {total_files} files, {errors} errors")
+
+    def _on_processing_error(self, error_message):
+        """Handle processing error"""
+        if hasattr(self, 'progress_dialog') and self.progress_dialog:
+            self.progress_dialog.close()
+
+        FocusAwareMessageBox.critical(
+            self.main_window,
+            "Processing Error",
+            f"Error during threaded DICOM processing:\n\n{error_message}"
+        )
+
+    def _add_to_progressive_hierarchy(self, result):
+        """Add processing result to progressive hierarchy"""
+        if not result.success or not result.metadata:
+            return
+
+        metadata = result.metadata
+        dataset = result.dataset
+
+        # Extract hierarchy information from metadata
+        patient_id = metadata.get('PatientID', 'Unknown ID')
+        patient_name = metadata.get('PatientName', 'Unknown Name')
+        patient_label = f"{patient_name} ({patient_id})"
+
+        study_uid = metadata.get('StudyInstanceUID', 'Unknown StudyUID')
+        study_desc = metadata.get('StudyDescription', 'No Study Description')
+        study_label = f"{study_desc} [{study_uid}]"
+
+        series_uid = metadata.get('SeriesInstanceUID', 'Unknown SeriesUID')
+        series_desc = metadata.get('SeriesDescription', 'No Series Description')
+        series_label = f"{series_desc} [{series_uid}]"
+
+        # Create instance label
+        instance_number = metadata.get('InstanceNumber')
+        sop_uid = metadata.get('SOPInstanceUID', os.path.basename(result.file_path))
+
+        if instance_number:
+            instance_label = f"Instance {instance_number} [{sop_uid}]"
+            try:
+                instance_sort_key = int(instance_number)
+            except (ValueError, TypeError):
+                instance_sort_key = 999999
+        else:
+            instance_label = f"{os.path.basename(result.file_path)} [{sop_uid}]"
+            instance_sort_key = 999999
+
+        # Store metadata for the UI
+        self.file_metadata[result.file_path] = (
+            patient_label, study_label, series_label, instance_label
+        )
+
+        # Build progressive hierarchy
+        self.progressive_hierarchy.setdefault(patient_label, {}).setdefault(
+            study_label, {}
+        ).setdefault(series_label, {})[instance_label] = {
+            'filepath': result.file_path,
+            'sort_key': instance_sort_key,
+            'instance_number': instance_number,
+            'dataset': dataset
+        }
+
+    def _update_tree_structure_progressive(self, hierarchy):
+        """Update tree structure progressively during processing"""
+        # This method could implement progressive tree building
+        # For now, we'll update the full tree periodically
+        # In a future optimization, we could add only new nodes
+        pass
     
     def refresh_tree(self):
         """Refresh the tree with current loaded files, showing progress"""

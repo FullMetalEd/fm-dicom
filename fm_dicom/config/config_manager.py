@@ -205,7 +205,18 @@ def load_config(config_path_override=None):
         "recent_paths": [],
         "theme": "dark",
         "language": "en",
-        "file_picker_native": False  # ADD THIS LINE - False = use Python/Qt picker by default
+        "file_picker_native": False,  # False = use Python/Qt picker by default
+
+        # Performance optimization settings
+        "performance": {
+            "use_threaded_processing": True,    # Enable multi-threaded DICOM processing
+            "thread_threshold": 100,            # Use threads for datasets > 100 files
+            "max_worker_threads": 4,            # Number of worker threads
+            "batch_size": 50,                   # Files per processing batch
+            "progress_update_frequency": 20,    # Update progress every N files
+            "enable_file_prefiltering": True,   # Pre-filter files before DICOM reading
+            "lazy_loading": False               # Future: Enable lazy loading (not implemented yet)
+        }
     }
 
     paths_to_check = []
