@@ -17,9 +17,9 @@ from fm_dicom.widgets.focus_aware import FocusAwareMessageBox, FocusAwareProgres
 
 class ZipExtractionDialog(FocusAwareProgressDialog):
     """Progress dialog for ZIP extraction"""
-    
+
     def __init__(self, zip_path, parent=None):
-        super().__init__("Preparing to extract ZIP...", "Cancel", 0, 100, parent)
+        super().__init__("Preparing to extract ZIP...", "Cancel", 0, 100, parent, fixed_width=550)
         self.setWindowTitle("Extracting ZIP Archive")
         self.setMinimumDuration(0)
         self.setAutoClose(False)
@@ -44,7 +44,9 @@ class ZipExtractionDialog(FocusAwareProgressDialog):
         if total > 0:
             progress_value = int((current / total) * 100)
             self.setValue(progress_value)
-        self.setLabelText(f"Extracting: {os.path.basename(filename)} ({current}/{total})")
+        # Use consistent format with percentage and progress count
+        progress_text = f"Extracting ({current}/{total}): {os.path.basename(filename)}"
+        self.setLabelText(progress_text)
         QApplication.processEvents()
         
     def extraction_finished(self, temp_dir, extracted_files):
@@ -80,9 +82,9 @@ class ZipExtractionDialog(FocusAwareProgressDialog):
 
 class DicomdirScanDialog(FocusAwareProgressDialog):
     """Progress dialog for DICOM file scanning"""
-    
+
     def __init__(self, extracted_files, parent=None):
-        super().__init__("Searching for DICOM files...", "Cancel", 0, 100, parent)
+        super().__init__("Searching for DICOM files...", "Cancel", 0, 100, parent, fixed_width=550)
         self.setWindowTitle("Scanning DICOM Files")
         self.setMinimumDuration(0)
         self.setAutoClose(False)
@@ -106,7 +108,9 @@ class DicomdirScanDialog(FocusAwareProgressDialog):
         if total > 0:
             progress_value = int((current / total) * 100)
             self.setValue(progress_value)
-        self.setLabelText(f"Processing: {current_file}")
+        # Use consistent format with progress count
+        progress_text = f"Processing ({current}/{total}): {os.path.basename(current_file)}"
+        self.setLabelText(progress_text)
         QApplication.processEvents()
         
     def scan_finished(self, dicom_files):

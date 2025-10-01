@@ -77,7 +77,7 @@ class AnonymizationProgressDialog(FocusAwareProgressDialog):
     """Progress dialog for anonymization operations"""
     
     def __init__(self, template, file_paths, parent=None):
-        super().__init__("Initializing anonymization...", "Cancel", 0, len(file_paths), parent)
+        super().__init__("Initializing anonymization...", "Cancel", 0, len(file_paths), parent, fixed_width=550)
         self.setWindowTitle("DICOM Anonymization")
         self.setMinimumDuration(0)
         self.setAutoClose(False)
@@ -98,7 +98,9 @@ class AnonymizationProgressDialog(FocusAwareProgressDialog):
         
     def update_progress(self, progress, current_file):
         self.setValue(progress)
-        self.setLabelText(f"Anonymizing: {os.path.basename(current_file)}")
+        # Use consistent format with progress count
+        progress_text = f"Anonymizing ({progress}/{len(self.file_paths)}): {os.path.basename(current_file)}"
+        self.setLabelText(progress_text)
         QApplication.processEvents()
         
     def anonymization_finished(self, result):

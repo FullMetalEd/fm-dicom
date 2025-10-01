@@ -74,10 +74,57 @@ class FileDialogManager:
         """Determine if we should use portal dialog"""
         force_portal = self.config.get('force_portal', False)
         native_enabled = self.config.get('file_picker_native', False)
-        
-        return (force_portal or 
-                (native_enabled and self._is_wayland() and self._is_portal_available()))
-    
+
+        # Only use portal if explicitly forced, not when user wants native dialogs
+        # Native dialogs should use Qt's native dialog system, not portal
+        return (force_portal and not native_enabled)
+
+    def _is_linux(self) -> bool:
+        """Check if running on Linux"""
+        import platform
+        return platform.system().lower() == 'linux'
+
+    def _try_system_file_dialog(self, parent: QWidget, title: str, start_dir: str, filter_str: str, dialog_type: str):
+        """Try to use actual system file manager for file dialogs"""
+        try:
+            import subprocess
+            import os
+
+            if dialog_type == 'file':
+                # Use zenity for file selection - it integrates with system file manager
+                cmd = ['zenity', '--file-selection', f'--title={title}']
+                if start_dir and os.path.exists(start_dir):
+                    cmd.append(f'--filename={start_dir}/')
+
+                # Add file filters
+                if 'DICOM' in filter_str:
+                    cmd.extend(['--file-filter=DICOM Files | *.dcm *.dicom'])
+                if 'ZIP' in filter_str:
+                    cmd.extend(['--file-filter=ZIP Archives | *.zip'])
+                cmd.extend(['--file-filter=All Files | *'])
+
+            elif dialog_type == 'directory':
+                cmd = ['zenity', '--file-selection', '--directory', f'--title={title}']
+                if start_dir and os.path.exists(start_dir):
+                    cmd.append(f'--filename={start_dir}/')
+            else:
+                return None
+
+            # Run the command
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            if result.returncode == 0 and result.stdout.strip():
+                selected_path = result.stdout.strip()
+                if os.path.exists(selected_path):
+                    return selected_path
+
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
+            pass
+        except Exception as e:
+            import logging
+            logging.debug(f"System file dialog failed: {e}")
+
+        return None
+
     def _portal_open_file(self, parent: QWidget, title: str, start_dir: str, 
                          filter_str: str) -> Optional[str]:
         """Open file using XDG Desktop Portal"""
@@ -169,20 +216,26 @@ class FileDialogManager:
             warning_text += "\n\nFile dialogs may not use your system file manager."
             FocusAwareMessageBox.warning(parent, "Environment Warning", warning_text)
         
-        # Try portal first if configured
+        # If user wants native and we're on Linux, try to use actual system file manager
+        native_enabled = self.config.get('file_picker_native', False)
+        if native_enabled and self._is_linux():
+            result = self._try_system_file_dialog(parent, title, start_dir, filter_str, 'file')
+            if result is not None:
+                return result
+
+        # Try portal if configured
         if self._use_portal_dialog():
             result = self._portal_open_file(parent, title, start_dir, filter_str)
             if result is not None:
                 return result
             # Fall back to Qt dialog if portal fails
-        
+
         # Use Qt dialog with proper configuration
         dialog = QFileDialog(parent, title, start_dir, filter_str)
         dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptOpen)
         dialog.setFileMode(QFileDialog.FileMode.ExistingFile)
-        
-        # Configure native dialog preference  
-        native_enabled = self.config.get('file_picker_native', False)
+
+        # Configure native dialog preference
         if not native_enabled:
             dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
         
@@ -191,19 +244,30 @@ class FileDialogManager:
             return files[0] if files else None
         return None
     
-    def open_directory_dialog(self, parent: QWidget, title: str, 
+    def open_directory_dialog(self, parent: QWidget, title: str,
                              start_dir: str) -> Optional[str]:
-        """Open directory dialog with portal integration"""
-        # Try portal first if configured
+        """Open directory dialog with system integration"""
+        # If user wants native and we're on Linux, try to use actual system file manager
+        native_enabled = self.config.get('file_picker_native', False)
+        if native_enabled and self._is_linux():
+            result = self._try_system_file_dialog(parent, title, start_dir, '', 'directory')
+            if result is not None:
+                return result
+
+        # Try portal if configured
         if self._use_portal_dialog():
             result = self._portal_open_directory(parent, title, start_dir)
             if result is not None:
                 return result
-        
+
         # Use Qt dialog
         dialog = QFileDialog(parent, title, start_dir)
         dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptOpen)
         dialog.setFileMode(QFileDialog.FileMode.Directory)
+
+        # Configure native dialog preference
+        if not native_enabled:
+            dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
         dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
         
         # Configure native dialog preference

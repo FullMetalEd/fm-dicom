@@ -1,4 +1,4 @@
-from PyQt6.QtWidgets import QMessageBox, QProgressDialog, QApplication
+from PyQt6.QtWidgets import QMessageBox, QProgressDialog, QApplication, QLabel
 from PyQt6.QtCore import Qt, QEvent
 import os
 
@@ -77,16 +77,172 @@ class FocusAwareMessageBox(QMessageBox):
 
 
 class FocusAwareProgressDialog(QProgressDialog):
-    """QProgressDialog that doesn't steal focus unless app is already active"""
-    
-    def __init__(self, labelText, cancelButtonText, minimum, maximum, parent=None):
+    """QProgressDialog that doesn't steal focus unless app is already active
+
+    Enhanced with:
+    - Fixed width to prevent resizing when text changes
+    - Text truncation with ellipsis for long filenames
+    - Tooltips showing full text when truncated
+    - Consistent sizing across different progress operations
+    """
+
+    def __init__(self, labelText, cancelButtonText, minimum, maximum, parent=None, fixed_width=550):
         super().__init__(labelText, cancelButtonText, minimum, maximum, parent)
-        
+
         # Configure non-focus-stealing behavior
         self._configure_focus_behavior()
-        
+
         # Install event filter to handle keyboard events
         self.installEventFilter(self)
+
+        # Configure fixed sizing and text handling
+        self._fixed_width = fixed_width
+        self._original_label_text = labelText
+        self._setup_consistent_sizing()
+
+    def _setup_consistent_sizing(self):
+        """Configure consistent dialog sizing"""
+        self.setFixedWidth(self._fixed_width)
+        self.setMinimumHeight(160)  # Increased height for multi-line text
+
+        # Configure label for text wrapping and multi-line support
+        label = self.findChild(QLabel)
+        if label:
+            label.setWordWrap(True)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            # Set maximum width slightly less than dialog to account for margins
+            label.setMaximumWidth(self._fixed_width - 40)
+            # Set minimum height to accommodate 2-3 lines of text
+            label.setMinimumHeight(60)
+            # Allow text to use available vertical space
+            label.setSizePolicy(label.sizePolicy().horizontalPolicy(), label.sizePolicy().Expanding)
+
+    def setLabelText(self, text):
+        """Override setLabelText to handle text truncation and tooltips"""
+        # Format text for better multi-line display if it contains DICOM info
+        formatted_text = self._format_text_for_display(text)
+        truncated_text = self._truncate_text(formatted_text)
+        super().setLabelText(truncated_text)
+
+        # Set tooltip if text was truncated
+        if truncated_text != formatted_text:
+            self.setToolTip(text)
+        else:
+            self.setToolTip("")
+
+    def _format_text_for_display(self, text):
+        """Format text for better multi-line display in progress dialogs"""
+        # For DICOM operations, try to use multiple lines for better readability
+        if self._contains_dicom_info(text) and len(text) > 70:
+            # Split long text into two lines at natural break points
+            parts = text.split(': ', 1)
+            if len(parts) == 2:
+                operation, details = parts
+                # If details are long, try to break them sensibly
+                if len(details) > 50:
+                    # Look for natural break points (path separators, patient info, etc.)
+                    if os.path.sep in details:
+                        # For file paths, break at directory separator
+                        path_parts = details.split(os.path.sep)
+                        if len(path_parts) > 2:
+                            mid_point = len(path_parts) // 2
+                            line1 = os.path.sep.join(path_parts[:mid_point]) + os.path.sep
+                            line2 = os.path.sep.join(path_parts[mid_point:])
+                            return f"{operation}:\n{line1}\n{line2}"
+                    elif ' | ' in details:
+                        # For structured info, break at pipe separators
+                        info_parts = details.split(' | ')
+                        if len(info_parts) > 2:
+                            mid_point = len(info_parts) // 2
+                            line1 = ' | '.join(info_parts[:mid_point])
+                            line2 = ' | '.join(info_parts[mid_point:])
+                            return f"{operation}:\n{line1}\n{line2}"
+
+        return text
+
+    def _truncate_text(self, text, max_length=90):
+        """Truncate text with ellipsis if too long, preserving important DICOM information"""
+        if len(text) <= max_length:
+            return text
+
+        # For DICOM progress text, try to preserve important identifiers
+        if self._contains_dicom_info(text):
+            return self._truncate_dicom_text(text, max_length)
+
+        # For file paths, try to show filename and some of the path
+        if os.path.sep in text:
+            path_parts = text.split(os.path.sep)
+            filename = path_parts[-1]
+            if len(filename) <= max_length - 10:  # Leave room for "..." and some path
+                remaining_length = max_length - len(filename) - 4  # 4 for "..." + separator
+                if remaining_length > 0:
+                    partial_path = text[:remaining_length]
+                    return f"{partial_path}...{os.path.sep}{filename}"
+
+        # Generic truncation
+        return text[:max_length-3] + "..." if len(text) > max_length else text
+
+    def _contains_dicom_info(self, text):
+        """Check if text contains DICOM-specific information"""
+        dicom_indicators = [
+            'Patient', 'Study', 'Series', 'Instance', 'UID',
+            '.dcm', '.dicom', 'Anonymizing', 'Validating',
+            'CT_', 'MR_', 'US_', 'XA_', 'RF_'  # Common modality prefixes
+        ]
+        return any(indicator in text for indicator in dicom_indicators)
+
+    def _truncate_dicom_text(self, text, max_length):
+        """Smart truncation for DICOM-related text"""
+        # Try to preserve important parts: operation, count, and key identifiers
+        parts = text.split(': ', 1)  # Split on first colon
+        if len(parts) == 2:
+            prefix, content = parts
+
+            # Keep the operation prefix (e.g., "Processing (1/10)")
+            if len(prefix) < max_length - 20:  # Leave room for content
+                remaining_length = max_length - len(prefix) - 3  # 3 for ": "
+
+                # Try to preserve important identifiers in content
+                if remaining_length > 10:
+                    truncated_content = self._preserve_important_identifiers(content, remaining_length)
+                    return f"{prefix}: {truncated_content}"
+
+        # Fallback to generic truncation
+        return text[:max_length-3] + "..."
+
+    def _preserve_important_identifiers(self, content, max_length):
+        """Preserve important medical/DICOM identifiers when truncating"""
+        # Look for patterns like Patient IDs, Series numbers, UIDs
+        import re
+
+        # Find important patterns
+        uid_match = re.search(r'\d+\.\d+\.\d+[\d\.]*', content)  # UIDs
+        patient_match = re.search(r'Patient[\s_]*[:\-]?[\s]*([^\s\-_]+)', content, re.IGNORECASE)
+        series_match = re.search(r'Series[\s_]*[:\-]?[\s]*(\d+)', content, re.IGNORECASE)
+        instance_match = re.search(r'Instance[\s_]*[:\-]?[\s]*(\d+)', content, re.IGNORECASE)
+
+        # Build truncated version preserving key info
+        important_parts = []
+
+        if patient_match and len(important_parts) < 3:
+            important_parts.append(f"Pat:{patient_match.group(1)[:8]}")
+        if series_match and len(important_parts) < 3:
+            important_parts.append(f"Ser:{series_match.group(1)}")
+        if instance_match and len(important_parts) < 3:
+            important_parts.append(f"Inst:{instance_match.group(1)}")
+        if uid_match and len(important_parts) < 2:
+            uid_short = uid_match.group(0)
+            if len(uid_short) > 12:
+                uid_short = uid_short[:8] + "..."
+            important_parts.append(f"UID:{uid_short}")
+
+        if important_parts:
+            result = " | ".join(important_parts)
+            if len(result) <= max_length:
+                return result
+
+        # Fallback: just truncate normally
+        return content[:max_length-3] + "..." if len(content) > max_length else content
     
     def _configure_focus_behavior(self):
         """Configure the dialog to not steal focus when app doesn't have focus"""

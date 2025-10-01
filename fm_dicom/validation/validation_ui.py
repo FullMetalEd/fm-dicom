@@ -74,7 +74,7 @@ class ValidationProgressDialog(FocusAwareProgressDialog):
     """Progress dialog for validation operations"""
     
     def __init__(self, file_paths, parent=None):
-        super().__init__("Initializing validation...", "Cancel", 0, len(file_paths), parent)
+        super().__init__("Initializing validation...", "Cancel", 0, len(file_paths), parent, fixed_width=550)
         self.setWindowTitle("DICOM Validation")
         self.setMinimumDuration(0)
         self.setAutoClose(False)
@@ -94,7 +94,9 @@ class ValidationProgressDialog(FocusAwareProgressDialog):
         
     def update_progress(self, progress, current_file):
         self.setValue(progress)
-        self.setLabelText(f"Validating: {os.path.basename(current_file)}")
+        # Use consistent format with progress count
+        progress_text = f"Validating ({progress}/{len(self.file_paths)}): {os.path.basename(current_file)}"
+        self.setLabelText(progress_text)
         QApplication.processEvents()
         
     def validation_finished(self, result):

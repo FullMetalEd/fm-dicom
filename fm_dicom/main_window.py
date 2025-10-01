@@ -32,7 +32,7 @@ from fm_dicom.managers.dicom_manager import DicomManager
 # Existing modules that will be preserved
 from fm_dicom.anonymization.anonymization import TemplateManager
 from fm_dicom.widgets.focus_aware import FocusAwareMessageBox, FocusAwareProgressDialog
-from fm_dicom.dialogs.utility_dialogs import LogViewerDialog, SettingsEditorDialog
+from fm_dicom.dialogs.utility_dialogs import LogViewerDialog, SettingsEditorDialog, ConfigDiagnosticsDialog
 from fm_dicom.dialogs.results_dialogs import FileAnalysisResultsDialog, PerformanceResultsDialog
 from fm_dicom.workers.export_worker import ExportWorker
 
@@ -508,9 +508,14 @@ class MainWindow(QMainWindow, LayoutMixin):
             dialog.show()
         else:
             FocusAwareMessageBox.information(
-                self, "No Log File", 
+                self, "No Log File",
                 "No log file found or logging is not configured."
             )
+
+    def show_config_diagnostics(self):
+        """Show configuration diagnostics dialog"""
+        dialog = ConfigDiagnosticsDialog(self)
+        dialog.exec()
     
     def manage_templates(self):
         """Manage anonymization templates"""

@@ -6,14 +6,17 @@ import os
 import yaml
 import logging
 import shutil
+import platform
+import sys
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QTextEdit, QLabel,
-    QCheckBox, QGroupBox, QFormLayout, QApplication
+    QCheckBox, QGroupBox, QFormLayout, QApplication, QTabWidget, QWidget, QTreeWidget, QTreeWidgetItem
 )
 from PyQt6.QtGui import QFont
 from PyQt6.QtCore import Qt, QTimer
 
 from fm_dicom.widgets.focus_aware import FocusAwareMessageBox
+from fm_dicom.config.config_manager import get_config_diagnostics, get_config_path, load_config
 
 
 class LogViewerDialog(QDialog):
@@ -457,3 +460,203 @@ class SettingsEditorDialog(QDialog):
             )
             if reply != FocusAwareMessageBox.StandardButton.Yes:
                 raise ValueError(f"Missing required configuration keys: {missing_keys}")
+
+
+class ConfigDiagnosticsDialog(QDialog):
+    """Dialog showing configuration diagnostics and troubleshooting information"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Configuration Diagnostics")
+        self.setModal(True)
+        self.resize(800, 600)
+
+        self.setup_ui()
+        self.load_diagnostics()
+
+    def setup_ui(self):
+        """Set up the user interface"""
+        layout = QVBoxLayout(self)
+
+        # Create tab widget
+        self.tab_widget = QTabWidget()
+
+        # Diagnostics tab
+        self.diagnostics_tab = QWidget()
+        self.setup_diagnostics_tab()
+        self.tab_widget.addTab(self.diagnostics_tab, "Diagnostics")
+
+        # Configuration tab
+        self.config_tab = QWidget()
+        self.setup_config_tab()
+        self.tab_widget.addTab(self.config_tab, "Current Config")
+
+        # Paths tab
+        self.paths_tab = QWidget()
+        self.setup_paths_tab()
+        self.tab_widget.addTab(self.paths_tab, "Path Analysis")
+
+        layout.addWidget(self.tab_widget)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+
+        refresh_button = QPushButton("Refresh")
+        refresh_button.clicked.connect(self.load_diagnostics)
+        button_layout.addWidget(refresh_button)
+
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(self.accept)
+        button_layout.addWidget(close_button)
+
+        layout.addLayout(button_layout)
+
+    def setup_diagnostics_tab(self):
+        """Set up the diagnostics tab"""
+        layout = QVBoxLayout(self.diagnostics_tab)
+
+        # System info
+        system_label = QLabel("System Information:")
+        system_label.setFont(QFont("", 0, QFont.Weight.Bold))
+        layout.addWidget(system_label)
+
+        self.system_info = QTextEdit()
+        self.system_info.setMaximumHeight(120)
+        self.system_info.setReadOnly(True)
+        layout.addWidget(self.system_info)
+
+        # Environment variables
+        env_label = QLabel("Environment Variables:")
+        env_label.setFont(QFont("", 0, QFont.Weight.Bold))
+        layout.addWidget(env_label)
+
+        self.env_tree = QTreeWidget()
+        self.env_tree.setHeaderLabels(["Variable", "Value", "Accessible"])
+        self.env_tree.setMaximumHeight(150)
+        layout.addWidget(self.env_tree)
+
+        # Issues and recommendations
+        issues_label = QLabel("Issues and Recommendations:")
+        issues_label.setFont(QFont("", 0, QFont.Weight.Bold))
+        layout.addWidget(issues_label)
+
+        self.issues_text = QTextEdit()
+        self.issues_text.setReadOnly(True)
+        layout.addWidget(self.issues_text)
+
+    def setup_config_tab(self):
+        """Set up the configuration tab"""
+        layout = QVBoxLayout(self.config_tab)
+
+        config_label = QLabel("Current Configuration:")
+        config_label.setFont(QFont("", 0, QFont.Weight.Bold))
+        layout.addWidget(config_label)
+
+        self.config_text = QTextEdit()
+        self.config_text.setReadOnly(True)
+        self.config_text.setFont(QFont("Consolas, Monaco, monospace"))
+        layout.addWidget(self.config_text)
+
+    def setup_paths_tab(self):
+        """Set up the paths analysis tab"""
+        layout = QVBoxLayout(self.paths_tab)
+
+        paths_label = QLabel("Configuration Path Analysis:")
+        paths_label.setFont(QFont("", 0, QFont.Weight.Bold))
+        layout.addWidget(paths_label)
+
+        self.paths_tree = QTreeWidget()
+        self.paths_tree.setHeaderLabels(["Path", "Exists", "Writable", "Notes"])
+        layout.addWidget(self.paths_tree)
+
+    def load_diagnostics(self):
+        """Load and display diagnostic information"""
+        try:
+            # Load diagnostics
+            diagnostics = get_config_diagnostics()
+            config = load_config()
+
+            # Update system info
+            system_info = [
+                f"System: {diagnostics['system']}",
+                f"Running from executable: {diagnostics['is_executable']}",
+                f"Python executable: {sys.executable}",
+                f"Working directory: {os.getcwd()}"
+            ]
+            self.system_info.setPlainText("\n".join(system_info))
+
+            # Update environment variables
+            self.env_tree.clear()
+            for var_name, var_info in diagnostics.get('environment_vars', {}).items():
+                item = QTreeWidgetItem([
+                    var_name,
+                    var_info.get('value', 'Not set'),
+                    "Yes" if var_info.get('accessible', False) else "No"
+                ])
+                self.env_tree.addTopLevelItem(item)
+
+            # Update paths analysis
+            self.paths_tree.clear()
+            for path_info in diagnostics.get('paths_checked', []):
+                notes = []
+                if path_info.get('exists'):
+                    notes.append("File exists")
+                if path_info.get('parent_writable'):
+                    notes.append("Directory writable")
+                elif not path_info.get('exists'):
+                    notes.append("Can create new file")
+
+                if not notes:
+                    notes.append("Issues detected")
+
+                item = QTreeWidgetItem([
+                    path_info.get('path', 'Unknown'),
+                    "Yes" if path_info.get('exists') else "No",
+                    "Yes" if path_info.get('parent_writable') else "No",
+                    ", ".join(notes)
+                ])
+                self.paths_tree.addTopLevelItem(item)
+
+            # Update issues and recommendations
+            issues = []
+            config_issues = config.get('_config_issues', {})
+
+            if config_issues.get('using_memory_only'):
+                issues.append("⚠️ Configuration could not be saved to disk - using memory only")
+                issues.append(f"   Attempted path: {config_issues.get('preferred_path', 'Unknown')}")
+                issues.append("   Consider:")
+                issues.append("   - Running as administrator")
+                issues.append("   - Checking folder permissions")
+                issues.append("   - Using portable mode")
+
+            if platform.system() == "Windows" and not diagnostics['is_executable']:
+                issues.append("ℹ️ Running from Python script in development mode")
+                issues.append("   Config will be created based on APPDATA/user profile")
+
+            if not issues:
+                issues.append("✅ No configuration issues detected")
+
+            self.issues_text.setPlainText("\n".join(issues))
+
+            # Update configuration display
+            config_display = {}
+            for key, value in config.items():
+                if not key.startswith('_'):  # Skip internal diagnostic keys
+                    config_display[key] = value
+
+            config_yaml = yaml.dump(config_display, default_flow_style=False, sort_keys=True)
+            self.config_text.setPlainText(config_yaml)
+
+            # Resize columns
+            self.env_tree.resizeColumnToContents(0)
+            self.env_tree.resizeColumnToContents(1)
+            self.paths_tree.resizeColumnToContents(0)
+            self.paths_tree.resizeColumnToContents(1)
+            self.paths_tree.resizeColumnToContents(2)
+
+        except Exception as e:
+            error_text = f"Error loading diagnostics: {e}"
+            self.system_info.setPlainText(error_text)
+            self.issues_text.setPlainText(error_text)
+            self.config_text.setPlainText(error_text)

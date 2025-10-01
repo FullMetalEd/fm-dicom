@@ -159,15 +159,21 @@ class MenuToolbarMixin:
     def _setup_help_menu(self, menubar):
         """Setup Help menu"""
         help_menu = menubar.addMenu("&Help")
-        
+
         # View Logs
         logs_action = QAction("View &Logs", self)
         logs_action.setStatusTip("Open log viewer")
         logs_action.triggered.connect(self.show_log_viewer)
         help_menu.addAction(logs_action)
-        
+
+        # Configuration Diagnostics
+        diagnostics_action = QAction("Configuration &Diagnostics", self)
+        diagnostics_action.setStatusTip("Show configuration diagnostics and troubleshooting information")
+        diagnostics_action.triggered.connect(self.show_config_diagnostics)
+        help_menu.addAction(diagnostics_action)
+
         help_menu.addSeparator()
-        
+
         # About
         about_action = QAction("&About", self)
         about_action.setStatusTip("About this application")

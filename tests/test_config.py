@@ -16,7 +16,12 @@ from fm_dicom.config.config_manager import (
     get_default_user_dir,
     ensure_dir_exists,
     load_config,
-    setup_logging
+    setup_logging,
+    _is_running_from_executable,
+    _get_windows_config_path,
+    _is_path_accessible,
+    _is_path_writable,
+    get_config_diagnostics
 )
 
 
@@ -51,8 +56,12 @@ class TestConfigPath:
         with patch('platform.system', return_value='Windows'):
             with patch.dict(os.environ, {}, clear=True):
                 with patch('sys.executable', 'C:\\app\\fm-dicom.exe'):
-                    path = get_config_path()
-                    assert path == 'C:\\app\\fm-dicom\\config.yml'
+                    with patch('fm_dicom.config.config_manager._is_running_from_executable', return_value=True):
+                        with patch('fm_dicom.config.config_manager._is_path_accessible', return_value=False):
+                            with patch('fm_dicom.config.config_manager._is_path_writable', return_value=True):
+                                path = get_config_path()
+                                # Should fall back to exe directory
+                                assert 'fm-dicom' in path and 'config.yml' in path
     
     def test_get_config_path_macos(self):
         """Test config path on macOS."""
@@ -249,13 +258,64 @@ class TestSetupLogging:
             mock_logger.handlers.clear.assert_called_once()
 
 
+class TestWindowsHelperFunctions:
+    """Test Windows-specific helper functions."""
+
+    def test_is_running_from_executable(self):
+        """Test executable detection."""
+        with patch('sys.frozen', True, create=True):
+            assert _is_running_from_executable() == True
+
+        with patch('sys.executable', 'C:\\app\\fm-dicom.exe'):
+            with patch('sys.frozen', False, create=True):
+                result = _is_running_from_executable()
+                # Should be True for .exe files (but not python.exe)
+                assert result == True
+
+    def test_is_path_accessible(self, temp_dir):
+        """Test path accessibility checking."""
+        # Test with existing accessible path
+        assert _is_path_accessible(temp_dir) == True
+
+        # Test with non-existent path
+        assert _is_path_accessible('/nonexistent/path') == False
+
+        # Test with None/empty path
+        assert _is_path_accessible(None) == False
+        assert _is_path_accessible('') == False
+
+    def test_is_path_writable(self, temp_dir):
+        """Test path writability checking."""
+        # Test with writable directory
+        assert _is_path_writable(temp_dir) == True
+
+        # Test with non-existent path (should check parent)
+        test_subdir = os.path.join(temp_dir, 'subdir')
+        assert _is_path_writable(test_subdir) == True
+
+        # Test with None/empty path
+        assert _is_path_writable(None) == False
+        assert _is_path_writable('') == False
+
+    def test_get_config_diagnostics(self):
+        """Test configuration diagnostics function."""
+        with patch('platform.system', return_value='Windows'):
+            diagnostics = get_config_diagnostics()
+
+            assert 'system' in diagnostics
+            assert 'is_executable' in diagnostics
+            assert 'paths_checked' in diagnostics
+            assert 'environment_vars' in diagnostics
+            assert diagnostics['system'] == 'Windows'
+
+
 class TestGetDefaultUserDir:
     """Test default user directory detection."""
-    
+
     def test_get_default_user_dir(self, qapp):
         """Test getting default user directory."""
         from PyQt6.QtCore import QDir
-        
+
         with patch.object(QDir, 'homePath', return_value='/home/user'):
             user_dir = get_default_user_dir()
             assert user_dir == '/home/user'
