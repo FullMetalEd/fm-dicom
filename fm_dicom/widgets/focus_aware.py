@@ -115,7 +115,8 @@ class FocusAwareProgressDialog(QProgressDialog):
             # Set minimum height to accommodate 2-3 lines of text
             label.setMinimumHeight(60)
             # Allow text to use available vertical space
-            label.setSizePolicy(label.sizePolicy().horizontalPolicy(), label.sizePolicy().Expanding)
+            from PyQt6.QtWidgets import QSizePolicy
+            label.setSizePolicy(label.sizePolicy().horizontalPolicy(), QSizePolicy.Policy.Expanding)
 
     def setLabelText(self, text):
         """Override setLabelText to handle text truncation and tooltips"""
