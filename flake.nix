@@ -77,7 +77,7 @@
             wrapProgram $out/bin/fm-dicom \
               --prefix PATH : ${pkgs.lib.makeBinPath [
                 pkgs.zenity
-                pkgs.qt6ct
+                pkgs.qt6Packages.qt6ct
                 pkgs.xdg-desktop-portal
                 pkgs.xdg-desktop-portal-gtk
               ]} \
@@ -137,7 +137,7 @@
             qt6.qtbase
             qt6.qtwayland
             kdePackages.qtwayland
-            qt6ct
+            qt6Packages.qt6ct
             zenity
             xdg-desktop-portal
             xdg-desktop-portal-gtk
