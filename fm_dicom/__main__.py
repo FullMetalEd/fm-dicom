@@ -2,6 +2,14 @@
 
 import sys
 import typer
+
+# Apply pydicom patches before importing other modules that use pydicom
+try:
+    from .utils.pydicom_patch import apply_pydicom_patch
+    apply_pydicom_patch()
+except ImportError:
+    pass
+
 from .main_window import MainWindow
 from PyQt6.QtWidgets import QApplication
 

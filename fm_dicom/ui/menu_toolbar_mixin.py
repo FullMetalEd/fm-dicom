@@ -19,8 +19,11 @@ class MenuToolbarMixin:
         
         # File menu
         self._setup_file_menu(menubar)
-        
-        # Edit menu  
+
+        # Add menu (for appending files to existing dataset)
+        self._setup_add_menu(menubar)
+
+        # Edit menu
         self._setup_edit_menu(menubar)
         
         # View menu
@@ -43,13 +46,13 @@ class MenuToolbarMixin:
         open_action.triggered.connect(self.open_file)
         file_menu.addAction(open_action)
         
-        # Open Directory  
+        # Open Directory
         open_dir_action = QAction("Open &Directory...", self)
         open_dir_action.setShortcut("Ctrl+D")
         open_dir_action.setStatusTip("Open a directory containing DICOM files")
         open_dir_action.triggered.connect(self.open_directory)
         file_menu.addAction(open_dir_action)
-        
+
         file_menu.addSeparator()
         
         # Recent files submenu would go here
@@ -62,7 +65,33 @@ class MenuToolbarMixin:
         exit_action.setStatusTip("Exit the application")
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
-    
+
+    def _setup_add_menu(self, menubar):
+        """Setup Add menu for appending files to existing dataset"""
+        add_menu = menubar.addMenu("&Add")
+
+        # Add File
+        add_file_action = QAction("&Add File...", self)
+        add_file_action.setShortcut("Ctrl+Shift+O")
+        add_file_action.setStatusTip("Add a DICOM file to currently loaded files")
+        add_file_action.triggered.connect(self.append_file)
+        add_menu.addAction(add_file_action)
+
+        # Add Directory
+        add_dir_action = QAction("Add &Directory...", self)
+        add_dir_action.setShortcut("Ctrl+Shift+D")
+        add_dir_action.setStatusTip("Add a directory containing DICOM files to currently loaded files")
+        add_dir_action.triggered.connect(self.append_directory)
+        add_menu.addAction(add_dir_action)
+
+        add_menu.addSeparator()
+
+        # Add ZIP Archive
+        add_zip_action = QAction("Add &ZIP Archive...", self)
+        add_zip_action.setStatusTip("Add DICOM files from a ZIP archive to currently loaded files")
+        add_zip_action.triggered.connect(self.append_file)  # ZIP files are handled by append_file
+        add_menu.addAction(add_zip_action)
+
     def _setup_edit_menu(self, menubar):
         """Setup Edit menu"""
         edit_menu = menubar.addMenu("&Edit")
@@ -205,7 +234,22 @@ class MenuToolbarMixin:
         act_open_dir.setToolTip("Open directory")
         act_open_dir.triggered.connect(self.open_directory)
         toolbar.addAction(act_open_dir)
-        
+
+        toolbar.addSeparator()
+
+        # Add File (append)
+        add_icon = self.style().standardIcon(self.style().StandardPixmap.SP_DialogOpenButton)
+        act_add_file = QAction(add_icon, "Add File", self)
+        act_add_file.setToolTip("Add DICOM file to currently loaded files")
+        act_add_file.triggered.connect(self.append_file)
+        toolbar.addAction(act_add_file)
+
+        # Add Directory (append)
+        act_add_dir = QAction(QIcon.fromTheme("folder-new"), "Add Directory", self)
+        act_add_dir.setToolTip("Add directory to currently loaded files")
+        act_add_dir.triggered.connect(self.append_directory)
+        toolbar.addAction(act_add_dir)
+
         toolbar.addSeparator()
         
         # Delete

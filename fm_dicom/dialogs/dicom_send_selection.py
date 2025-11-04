@@ -229,8 +229,8 @@ class DicomSendSelectionDialog(QDialog):
         loading_item.setFlags(Qt.ItemFlag.NoItemFlags)  # Make it non-interactive
         self.tree_widget.addTopLevelItem(loading_item)
         
-        # Expand to show the loading message
-        self.tree_widget.expandAll()
+        # Expand only the loading item to show the message (avoid performance lag)
+        loading_item.setExpanded(True)
         
         # Disable buttons until loading is complete
         if hasattr(self, 'send_btn') and self.send_btn:
@@ -291,10 +291,16 @@ class DicomSendSelectionDialog(QDialog):
                     progress_percent = int((current / total) * 100) if total > 0 else 0
                     loading_item.setText(0, f"{status} ({progress_percent}%)")
             
-            # Update progress dialog if visible
+            # Update progress dialog if visible (with robust null checking)
             if self.progress_dialog:
-                self.progress_dialog.setValue(current)
-                self.progress_dialog.setLabelText(status)
+                try:
+                    self.progress_dialog.setValue(current)
+                    # Double-check progress_dialog is still valid before calling setLabelText
+                    if self.progress_dialog is not None:
+                        self.progress_dialog.setLabelText(status)
+                except (AttributeError, RuntimeError):
+                    # Dialog was closed/destroyed during update - ignore the error
+                    self.progress_dialog = None
                 
         except Exception as e:
             logging.error(f"Error in _on_population_progress: {e}", exc_info=True)
@@ -797,30 +803,16 @@ class DicomSendSelectionDialog(QDialog):
         return total_size
     
     def _expand_tree_intelligently(self, hierarchy):
-        """Expand tree intelligently based on size to improve performance"""
-        total_patients = len(hierarchy)
-        
-        # If small dataset, expand all
-        if total_patients <= 3:
-            self.tree_widget.expandAll()
-            return
-        
-        # For larger datasets, expand only patient level initially
+        """Expand tree to PATIENT level only for maximum performance with lazy loading"""
+        # Only expand patient level - this shows studies but keeps series/instances lazy
         for i in range(self.tree_widget.topLevelItemCount()):
             patient_item = self.tree_widget.topLevelItem(i)
             patient_item.setExpanded(True)
-            
-            # Only expand studies if there are few of them
-            if patient_item.childCount() <= 3:
-                for j in range(patient_item.childCount()):
-                    study_item = patient_item.child(j)
-                    study_item.setExpanded(True)
-                    
-                    # Only expand series if there are very few
-                    if study_item.childCount() <= 2:
-                        for k in range(study_item.childCount()):
-                            series_item = study_item.child(k)
-                            series_item.setExpanded(True)
+
+            # Do NOT expand studies - let users expand them manually
+            # This keeps series/instances lazy loaded for optimal performance
+            # User sees: Patient -> Studies (collapsed)
+            # User can click study to see: Patient -> Study -> Series (lazy loaded)
     
     def _set_initial_selection(self):
         """Set initial selection based on what user had selected in main tree"""

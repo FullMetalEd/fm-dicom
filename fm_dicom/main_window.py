@@ -147,6 +147,7 @@ class MainWindow(QMainWindow, LayoutMixin):
         """Setup signal connections between managers and UI"""
         # File manager signals
         self.file_manager.files_loaded.connect(self.tree_manager.populate_tree)
+        self.file_manager.files_to_append.connect(lambda files: self.tree_manager.populate_tree(files, append=True))
         self.file_manager.loading_started.connect(lambda: self.status_bar.showMessage("Loading files..."))
         self.file_manager.loading_finished.connect(lambda: self.status_bar.showMessage("Ready"))
         
@@ -196,7 +197,15 @@ class MainWindow(QMainWindow, LayoutMixin):
     def open_directory(self):
         """Open a directory - delegates to FileManager"""
         self.file_manager.open_directory()
-    
+
+    def append_file(self):
+        """Append a DICOM file to currently loaded files - delegates to FileManager"""
+        self.file_manager.append_file()
+
+    def append_directory(self):
+        """Append a directory to currently loaded files - delegates to FileManager"""
+        self.file_manager.append_directory()
+
     def load_path(self, path):
         """Load files from path - delegates to FileManager"""
         self.file_manager.load_path(path)
@@ -311,8 +320,43 @@ class MainWindow(QMainWindow, LayoutMixin):
         delete_action.setShortcut(QKeySequence.StandardKey.Delete)
         delete_action.triggered.connect(self.delete_selected_items)
         menu.addAction(delete_action)
-        
+
         menu.addSeparator()
+
+        # Duplication functionality
+        duplication_level = self.tree_manager._determine_context_duplication_level(selected)
+        if duplication_level:
+            # Main duplication action with configuration dialog
+            duplicate_action = QAction(f"🔄 Duplicate {duplication_level.title()}", self)
+            duplicate_action.triggered.connect(lambda: self.tree_manager._duplicate_selected_items(duplication_level))
+            menu.addAction(duplicate_action)
+
+            # Quick duplication presets
+            quick_instance_action = QAction("⚡ Quick Duplicate (New Instance UIDs)", self)
+            quick_instance_action.triggered.connect(lambda: self.tree_manager._quick_duplicate_instances())
+            menu.addAction(quick_instance_action)
+
+            quick_all_action = QAction("🆕 Quick Duplicate (All New UIDs)", self)
+            quick_all_action.triggered.connect(lambda: self.tree_manager._quick_duplicate_all_new())
+            menu.addAction(quick_all_action)
+
+            menu.addSeparator()
+
+        # Show duplicated items management if any exist
+        if hasattr(self.tree_manager, 'duplication_manager') and self.tree_manager.duplication_manager.get_duplicated_items():
+            view_duplicates_action = QAction("👁️ View Duplicated Items", self)
+            view_duplicates_action.triggered.connect(self.tree_manager._view_duplicated_items)
+            menu.addAction(view_duplicates_action)
+
+            save_duplicates_action = QAction("💾 Save Duplicated Items...", self)
+            save_duplicates_action.triggered.connect(self.tree_manager._save_duplicated_items)
+            menu.addAction(save_duplicates_action)
+
+            clear_duplicates_action = QAction("🧹 Clear Duplicated Items", self)
+            clear_duplicates_action.triggered.connect(self.tree_manager._clear_duplicated_items)
+            menu.addAction(clear_duplicates_action)
+
+            menu.addSeparator()
         
         # Validation and Anonymization
         validate_action = QAction("✅ Validate", self)

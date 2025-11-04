@@ -13,13 +13,29 @@ class FocusAwareMessageBox(QMessageBox):
         self._configure_focus_behavior()
     
     def _configure_focus_behavior(self):
-        """Configure the dialog to not steal focus when app doesn't have focus"""
-        # If app doesn't have focus, prevent focus stealing
-        if not self._app_has_focus():
-            self.setWindowFlags(
-                self.windowFlags() | 
-                Qt.WindowType.WindowDoesNotAcceptFocus
-            )
+        """Configure the dialog to NEVER steal focus unless app is actively being used"""
+        # Use conservative window flags
+        window_flags = self.windowFlags()
+
+        # On Hyprland, be extremely aggressive about preventing focus stealing
+        if self._is_hyprland():
+            # NEVER steal focus on Hyprland
+            window_flags |= Qt.WindowType.WindowDoesNotAcceptFocus
+            self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+
+        elif self._is_wayland():
+            # On other Wayland compositors, be very conservative
+            if not self._app_has_focus():
+                window_flags |= Qt.WindowType.WindowDoesNotAcceptFocus
+                self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+
+        else:
+            # X11 behavior - only steal focus if app clearly has focus
+            if not self._app_has_focus():
+                window_flags |= Qt.WindowType.WindowDoesNotAcceptFocus
+                self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+
+        self.setWindowFlags(window_flags)
     
     def show(self):
         """Override show to recheck focus behavior"""
@@ -32,23 +48,48 @@ class FocusAwareMessageBox(QMessageBox):
         return super().exec()
     
     def _app_has_focus(self):
-        """Check if our app currently has focus"""
+        """Check if our app currently has focus - EXTREMELY conservative to prevent focus stealing"""
         app = QApplication.instance()
         if app is None:
             return False
-        
-        # Check if any of our app's windows have focus
+
+        # On Hyprland, NEVER claim focus - be maximally conservative
+        if self._is_hyprland():
+            return False  # Always assume we don't have focus on Hyprland
+
+        # On other Wayland compositors, be very conservative
+        if self._is_wayland():
+            # Only claim focus if we have VERY strong evidence
+            active_window = app.activeWindow()
+            focus_widget = app.focusWidget()
+
+            if (active_window is not None and
+                active_window.hasFocus() and
+                active_window.isActiveWindow() and
+                focus_widget is not None):
+
+                # Verify the focus widget belongs to our application
+                for widget in app.topLevelWidgets():
+                    if (focus_widget.window() == widget and
+                        widget == active_window and
+                        widget.hasFocus() and
+                        widget.isActiveWindow()):
+                        return True
+
+            return False  # Default to no focus on Wayland
+
+        # X11 behavior - slightly less conservative but still careful
         active_window = app.activeWindow()
-        if active_window is not None:
+        if active_window is not None and active_window.hasFocus():
             return True
-        
-        # Additional check: see if any top-level widgets are active
+
+        # Additional check for X11 only
         for widget in app.topLevelWidgets():
-            if widget.isActiveWindow():
+            if widget.isActiveWindow() and widget.hasFocus():
                 return True
-                
+
         return False
-    
+
     @staticmethod
     def information(parent, title, text, *args, **kwargs):
         """Drop-in replacement for QMessageBox.information"""
@@ -75,6 +116,22 @@ class FocusAwareMessageBox(QMessageBox):
             msgbox.setDefaultButton(defaultButton)
         return msgbox.exec()
 
+    def _is_wayland(self):
+        """Check if we're running on Wayland"""
+        return (
+            os.environ.get('WAYLAND_DISPLAY') is not None or
+            os.environ.get('QT_QPA_PLATFORM') == 'wayland' or
+            'wayland' in os.environ.get('QT_QPA_PLATFORM', '').lower()
+        )
+
+    def _is_hyprland(self):
+        """Check if we're running on Hyprland specifically"""
+        return (
+            os.environ.get('HYPRLAND_INSTANCE_SIGNATURE') is not None or
+            'hyprland' in os.environ.get('XDG_CURRENT_DESKTOP', '').lower() or
+            'hyprland' in os.environ.get('WAYLAND_DISPLAY', '').lower()
+        )
+
 
 class FocusAwareProgressDialog(QProgressDialog):
     """QProgressDialog that doesn't steal focus unless app is already active
@@ -89,21 +146,21 @@ class FocusAwareProgressDialog(QProgressDialog):
     def __init__(self, labelText, cancelButtonText, minimum, maximum, parent=None, fixed_width=550):
         super().__init__(labelText, cancelButtonText, minimum, maximum, parent)
 
-        # Configure non-focus-stealing behavior
+        # Configure fixed sizing and text handling FIRST
+        self._fixed_width = fixed_width
+        self._original_label_text = labelText
+        self._setup_consistent_sizing()
+
+        # Configure non-focus-stealing behavior (after _fixed_width is set)
         self._configure_focus_behavior()
 
         # Install event filter to handle keyboard events
         self.installEventFilter(self)
 
-        # Configure fixed sizing and text handling
-        self._fixed_width = fixed_width
-        self._original_label_text = labelText
-        self._setup_consistent_sizing()
-
     def _setup_consistent_sizing(self):
         """Configure consistent dialog sizing"""
         self.setFixedWidth(self._fixed_width)
-        self.setMinimumHeight(160)  # Increased height for multi-line text
+        self.setMinimumHeight(200)  # Ensure adequate height for progress bar, text, and buttons
 
         # Configure label for text wrapping and multi-line support
         label = self.findChild(QLabel)
@@ -246,42 +303,59 @@ class FocusAwareProgressDialog(QProgressDialog):
         return content[:max_length-3] + "..." if len(content) > max_length else content
     
     def _configure_focus_behavior(self):
-        """Configure the dialog to not steal focus when app doesn't have focus"""
-        if self._is_wayland():
-            # Wayland-specific configuration for better behavior
-            window_flags = (
-                Qt.WindowType.Dialog |
-                Qt.WindowType.WindowStaysOnTopHint
-            )
+        """Configure the dialog to NEVER steal focus unless app is actively being used"""
+        # Always default to non-modal and non-focus-stealing
+        self.setModal(False)
 
+        # Use conservative window flags - NO WindowStaysOnTopHint
+        window_flags = Qt.WindowType.Dialog
+
+        # On Hyprland, be extremely aggressive about preventing focus stealing
+        if self._is_hyprland():
+            # NEVER steal focus on Hyprland - always use non-focus flags
+            window_flags |= Qt.WindowType.WindowDoesNotAcceptFocus
+            self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+
+        elif self._is_wayland():
+            # On other Wayland compositors, be very conservative
             if not self._app_has_focus():
-                # Don't steal focus if app isn't active
                 window_flags |= Qt.WindowType.WindowDoesNotAcceptFocus
-                self.setModal(False)  # Don't block other apps
-            else:
-                # App has focus, normal modal behavior
-                self.setModal(True)
-
-            self.setWindowFlags(window_flags)
-
-            # Set explicit size constraints for Wayland
-            self.setMinimumSize(300, 120)
-            self.resize(400, 150)
+                self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+            # Even if app has focus, don't make it modal to avoid disrupting workflow
 
         else:
-            # X11 behavior - original logic
+            # X11 behavior - only steal focus if app clearly has focus
             if not self._app_has_focus():
-                window_flags = (
-                    self.windowFlags() |
-                    Qt.WindowType.WindowDoesNotAcceptFocus
-                )
-                self.setWindowFlags(window_flags)
-                self.setModal(False)
-    
+                window_flags |= Qt.WindowType.WindowDoesNotAcceptFocus
+                self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+            else:
+                # Only on X11 with clear focus do we allow modal behavior
+                self.setModal(True)
+
+        self.setWindowFlags(window_flags)
+
+        # Set explicit size constraints for all platforms
+        self.setMinimumSize(self._fixed_width, 180)
+        self.resize(self._fixed_width, 200)
+
     def show(self):
-        """Override show to recheck focus behavior"""
+        """Override show to recheck focus behavior and ensure proper sizing"""
         self._configure_focus_behavior()
+        self._ensure_adequate_sizing()
         super().show()
+
+    def _ensure_adequate_sizing(self):
+        """Ensure dialog has adequate size to show all content"""
+        # Force minimum size to ensure progress bar and buttons are visible
+        min_width = max(self._fixed_width, 500)  # Never smaller than 500px
+        min_height = max(200, self.sizeHint().height())  # At least 200px or size hint
+
+        self.setMinimumSize(min_width, min_height)
+
+        # If current size is smaller than minimum, resize
+        current_size = self.size()
+        if current_size.width() < min_width or current_size.height() < min_height:
+            self.resize(min_width, min_height)
     
     def exec(self):
         """Override exec to recheck focus behavior"""
@@ -322,34 +396,60 @@ class FocusAwareProgressDialog(QProgressDialog):
                 app.processEvents()
     
     def _app_has_focus(self):
-        """Check if our app currently has focus"""
+        """Check if our app currently has focus - EXTREMELY conservative to prevent focus stealing"""
         app = QApplication.instance()
         if app is None:
             return False
 
+        # On Hyprland, NEVER claim focus - be maximally conservative
+        if self._is_hyprland():
+            return False  # Always assume we don't have focus on Hyprland
+
+        # On other Wayland compositors, be very conservative
         if self._is_wayland():
-            # On Wayland, assume we have focus if we're showing dialogs
-            # This prevents flickering and improves responsiveness
-            # The user initiated the action, so we should behave as if we have focus
-            return True
-        else:
-            # X11 behavior - original logic
-            # Check if any of our app's windows have focus
+            # Only claim focus if we have VERY strong evidence
             active_window = app.activeWindow()
-            if active_window is not None:
+            focus_widget = app.focusWidget()
+
+            if (active_window is not None and
+                active_window.hasFocus() and
+                active_window.isActiveWindow() and
+                focus_widget is not None):
+
+                # Verify the focus widget belongs to our application
+                for widget in app.topLevelWidgets():
+                    if (focus_widget.window() == widget and
+                        widget == active_window and
+                        widget.hasFocus() and
+                        widget.isActiveWindow()):
+                        return True
+
+            return False  # Default to no focus on Wayland
+
+        # X11 behavior - slightly less conservative but still careful
+        active_window = app.activeWindow()
+        if active_window is not None and active_window.hasFocus():
+            return True
+
+        # Additional check for X11 only
+        for widget in app.topLevelWidgets():
+            if widget.isActiveWindow() and widget.hasFocus():
                 return True
 
-            # Additional check: see if any top-level widgets are active
-            for widget in app.topLevelWidgets():
-                if widget.isActiveWindow():
-                    return True
-
         return False
-    
+
     def _is_wayland(self):
         """Check if we're running on Wayland"""
         return (
             os.environ.get('WAYLAND_DISPLAY') is not None or
             os.environ.get('QT_QPA_PLATFORM') == 'wayland' or
             'wayland' in os.environ.get('QT_QPA_PLATFORM', '').lower()
+        )
+
+    def _is_hyprland(self):
+        """Check if we're running on Hyprland specifically"""
+        return (
+            os.environ.get('HYPRLAND_INSTANCE_SIGNATURE') is not None or
+            'hyprland' in os.environ.get('XDG_CURRENT_DESKTOP', '').lower() or
+            'hyprland' in os.environ.get('WAYLAND_DISPLAY', '').lower()
         )

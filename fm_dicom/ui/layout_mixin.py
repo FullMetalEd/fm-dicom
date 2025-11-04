@@ -52,6 +52,24 @@ class LayoutMixin:
         act_open_dir.triggered.connect(self.open_directory)
         toolbar.addAction(act_open_dir)
 
+        toolbar.addSeparator()
+
+        # Add File (append to existing files)
+        add_icon = self.style().standardIcon(self.style().StandardPixmap.SP_DialogOpenButton)
+        act_add_file = QAction(add_icon, "Add File", self)
+        act_add_file.setShortcut(QKeySequence("Ctrl+Shift+A"))
+        act_add_file.setToolTip("Add DICOM file to currently loaded files (Ctrl+Shift+A)")
+        act_add_file.triggered.connect(self.append_file)
+        toolbar.addAction(act_add_file)
+
+        # Add Directory (append to existing files)
+        add_dir_icon = self.style().standardIcon(self.style().StandardPixmap.SP_DirOpenIcon)
+        act_add_dir = QAction(add_dir_icon, "Add Directory", self)
+        act_add_dir.setShortcut(QKeySequence("Ctrl+Shift+D"))
+        act_add_dir.setToolTip("Add directory to currently loaded files (Ctrl+Shift+D)")
+        act_add_dir.triggered.connect(self.append_directory)
+        toolbar.addAction(act_add_dir)
+
         # Save changes
         save_icon = self.style().standardIcon(self.style().StandardPixmap.SP_DialogSaveButton)
         self.toolbar_save_action = QAction(save_icon, "Save Changes", self)
@@ -400,7 +418,34 @@ class LayoutMixin:
         open_dir_action.setStatusTip("Open a directory containing DICOM files")
         open_dir_action.triggered.connect(self.open_directory)
         file_menu.addAction(open_dir_action)
-        
+
+        file_menu.addSeparator()
+
+        # Add Menu (for appending files to existing dataset)
+        add_menu = menubar.addMenu("&Add")
+
+        # Add File
+        add_file_action = QAction("&Add File...", self)
+        add_file_action.setShortcut(QKeySequence("Ctrl+Shift+A"))
+        add_file_action.setStatusTip("Add a DICOM file to currently loaded files")
+        add_file_action.triggered.connect(self.append_file)
+        add_menu.addAction(add_file_action)
+
+        # Add Directory
+        add_dir_action = QAction("Add &Directory...", self)
+        add_dir_action.setShortcut(QKeySequence("Ctrl+Shift+D"))
+        add_dir_action.setStatusTip("Add a directory containing DICOM files to currently loaded files")
+        add_dir_action.triggered.connect(self.append_directory)
+        add_menu.addAction(add_dir_action)
+
+        add_menu.addSeparator()
+
+        # Add ZIP Archive
+        add_zip_action = QAction("Add &ZIP Archive...", self)
+        add_zip_action.setStatusTip("Add DICOM files from a ZIP archive to currently loaded files")
+        add_zip_action.triggered.connect(self.append_file)  # ZIP files are handled by append_file
+        add_menu.addAction(add_zip_action)
+
         file_menu.addSeparator()
         
         # Save actions

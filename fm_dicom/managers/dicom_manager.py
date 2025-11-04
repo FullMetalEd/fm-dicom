@@ -48,13 +48,33 @@ class DicomManager(QObject):
     
     def load_dicom_tags(self, file_path):
         """Load DICOM tags for a file into the tag table"""
-        if not file_path or not os.path.exists(file_path):
+        if not file_path:
             self.clear_tag_table()
             return
-        
+
         try:
-            # Read DICOM file
-            ds = pydicom.dcmread(file_path)
+            # Try to get dataset from memory items first (for duplicated items)
+            ds = None
+            if hasattr(self.main_window, 'tree_manager'):
+                # Check if this is a memory item (duplicated item)
+                if file_path in self.main_window.tree_manager.memory_items:
+                    ds = self.main_window.tree_manager.memory_items[file_path]
+                    logging.info(f"Loading memory item: {file_path}")
+                else:
+                    # Try to read from disk
+                    if os.path.exists(file_path):
+                        ds = pydicom.dcmread(file_path)
+                        logging.info(f"Loading disk file: {file_path}")
+            else:
+                # Fallback to disk read
+                if os.path.exists(file_path):
+                    ds = pydicom.dcmread(file_path)
+
+            # If we couldn't get a dataset, clear and return
+            if ds is None:
+                self.clear_tag_table()
+                return
+
             self.current_file = file_path
             self.current_dataset = ds
             

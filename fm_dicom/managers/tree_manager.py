@@ -29,7 +29,8 @@ class TreeManager(QObject):
         super().__init__()
         self.main_window = main_window
         self.tree = main_window.tree
-        self.file_metadata = {}
+        self.file_metadata = {}  # Disk-based DICOM files
+        self.memory_items = {}   # In-memory duplicated items (survive refresh)
         self.loaded_files = []
         self.hierarchy = {}  # Store hierarchy data for performance
 
@@ -49,15 +50,42 @@ class TreeManager(QObject):
         # Duplication manager
         self.duplication_manager = DuplicationManager(main_window)
 
+        # Duplication progress tracking
+        self.duplication_progress_dialog = None
+
+        # Connect to duplication signals for progress indication
+        self.duplication_manager.duplication_started.connect(self._on_duplication_started)
+        self.duplication_manager.duplication_progress.connect(self._on_duplication_progress)
+        self.duplication_manager.duplication_completed.connect(self._on_duplication_completed)
+        self.duplication_manager.duplication_error.connect(self._on_duplication_error)
+
         # Setup icons
         self._setup_icons()
 
-        # Setup context menu
-        self._setup_context_menu()
+        # Context menu integration is handled by main_window
 
         # Connect tree signals
         self.tree.itemSelectionChanged.connect(self._on_selection_changed)
-    
+
+    def _on_selection_changed(self):
+        """Handle tree selection change - load DICOM data for selected item"""
+        try:
+            selected_items = self.tree.selectedItems()
+
+            # Emit signal with file paths for main window to handle
+            selected_files = []
+            for item in selected_items:
+                # Get file path from item data
+                file_path = item.data(0, Qt.ItemDataRole.UserRole)
+                if file_path:
+                    selected_files.append(file_path)
+
+            # Emit the selection changed signal
+            self.selection_changed.emit(selected_files)
+
+        except Exception as e:
+            logging.error(f"Error in tree selection changed: {e}", exc_info=True)
+
     def _setup_icons(self):
         """Setup icons for tree items"""
         style = self.main_window.style()
@@ -65,83 +93,22 @@ class TreeManager(QObject):
         self.study_icon = style.standardIcon(style.StandardPixmap.SP_DirIcon)
         self.series_icon = style.standardIcon(style.StandardPixmap.SP_FileDialogDetailedView)
 
-    def _setup_context_menu(self):
-        """Setup context menu for tree widget"""
-        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.tree.customContextMenuRequested.connect(self._show_context_menu)
-
-    def _show_context_menu(self, position: QPoint):
-        """Show context menu for tree items"""
-        item = self.tree.itemAt(position)
-        if item is None:
-            return
-
-        # Determine what level we're at and what actions are appropriate
-        selected_items = self.tree.selectedItems()
-        if not selected_items:
-            return
-
-        context_menu = QMenu(self.tree)
-
-        # Add duplication actions based on selection
-        duplication_level = self._determine_context_duplication_level(selected_items)
-
-        if duplication_level:
-            # Add main duplication action
-            duplicate_action = QAction(f"Duplicate {duplication_level.title()}", context_menu)
-            duplicate_action.triggered.connect(lambda: self._duplicate_selected_items(duplication_level))
-            context_menu.addAction(duplicate_action)
-
-            # Add quick duplication presets
-            context_menu.addSeparator()
-
-            # Quick duplicate with new instance UIDs only
-            quick_instance_action = QAction("Quick Duplicate (New Instance UIDs)", context_menu)
-            quick_instance_action.triggered.connect(lambda: self._quick_duplicate_instances())
-            context_menu.addAction(quick_instance_action)
-
-            # Quick duplicate with all new UIDs
-            quick_all_action = QAction("Quick Duplicate (All New UIDs)", context_menu)
-            quick_all_action.triggered.connect(lambda: self._quick_duplicate_all_new())
-            context_menu.addAction(quick_all_action)
-
-        context_menu.addSeparator()
-
-        # Standard actions (existing functionality)
-        expand_action = QAction("Expand All", context_menu)
-        expand_action.triggered.connect(self.expand_all)
-        context_menu.addAction(expand_action)
-
-        collapse_action = QAction("Collapse All", context_menu)
-        collapse_action.triggered.connect(self.collapse_all)
-        context_menu.addAction(collapse_action)
-
-        # Show duplicated items management if any exist
-        if self.duplication_manager.get_duplicated_items():
-            context_menu.addSeparator()
-
-            view_duplicates_action = QAction("View Duplicated Items", context_menu)
-            view_duplicates_action.triggered.connect(self._view_duplicated_items)
-            context_menu.addAction(view_duplicates_action)
-
-            save_duplicates_action = QAction("Save Duplicated Items...", context_menu)
-            save_duplicates_action.triggered.connect(self._save_duplicated_items)
-            context_menu.addAction(save_duplicates_action)
-
-            clear_duplicates_action = QAction("Clear Duplicated Items", context_menu)
-            clear_duplicates_action.triggered.connect(self._clear_duplicated_items)
-            context_menu.addAction(clear_duplicates_action)
-
-        # Show the menu
-        global_position = self.tree.mapToGlobal(position)
-        context_menu.exec(global_position)
+    # Context menu integration handled by main_window's show_tree_context_menu
     
-    def populate_tree(self, files):
+    def populate_tree(self, files, append=False):
         """Populate tree with DICOM file hierarchy using optimized processing"""
-        logging.info(f"Starting tree population with {len(files)} files")
-        self.tree.clear()
-        self.file_metadata = {}
-        self.loaded_files = files
+        if append:
+            logging.info(f"Appending {len(files)} files to existing tree ({len(self.loaded_files)} already loaded)")
+        else:
+            logging.info(f"Starting tree population with {len(files)} files")
+
+        if not append:
+            self.tree.clear()
+            self.file_metadata = {}
+            self.loaded_files = files
+        else:
+            # Append mode - extend existing data instead of replacing
+            self.loaded_files.extend(files)
 
         # Extract file paths from mixed input formats
         file_paths = self._extract_file_paths(files)
@@ -150,19 +117,24 @@ class TreeManager(QObject):
         if (self.use_threaded_processing and
             len(file_paths) > self.thread_threshold):
             logging.info(f"Using threaded processing for {len(file_paths)} files (threshold: {self.thread_threshold})")
+            self._append_mode = append  # Store for threaded processing completion
             self._populate_tree_threaded(file_paths)
         else:
             logging.info(f"Using sequential processing for {len(file_paths)} files")
             # Use original method for smaller datasets or when threading disabled
-            hierarchy = self._build_hierarchy(files)
-            if hierarchy is None:  # Cancelled
+            new_hierarchy = self._build_hierarchy(files)
+            if new_hierarchy is None:  # Cancelled
                 return
 
-            # Store hierarchy for performance optimization
-            self.hierarchy = hierarchy
+            if append and self.hierarchy:
+                # Merge new hierarchy with existing one
+                self.hierarchy = self._merge_hierarchies(self.hierarchy, new_hierarchy)
+            else:
+                # Store hierarchy for performance optimization
+                self.hierarchy = new_hierarchy
 
-            # Populate tree widget
-            self._build_tree_structure(hierarchy)
+            # Populate tree widget (full rebuild for now - could optimize later)
+            self._build_tree_structure(self.hierarchy)
 
             # Update status
             total_files = len(files)
@@ -254,11 +226,20 @@ class TreeManager(QObject):
             self.progress_dialog.close()
 
         # Final hierarchy build and tree update
-        self.hierarchy = self.progressive_hierarchy
+        if hasattr(self, '_append_mode') and self._append_mode and self.hierarchy:
+            # Merge progressive hierarchy with existing hierarchy
+            self.hierarchy = self._merge_hierarchies(self.hierarchy, self.progressive_hierarchy)
+        else:
+            self.hierarchy = self.progressive_hierarchy
         self._build_tree_structure(self.hierarchy)
 
         # Convert file paths back to loaded_files format
-        self.loaded_files = []
+        if not (hasattr(self, '_append_mode') and self._append_mode):
+            # Replace mode - rebuild loaded_files from hierarchy
+            self.loaded_files = []
+
+        # Extract files from current hierarchy and add to loaded_files
+        new_files = []
         for patient_data in self.hierarchy.values():
             for study_data in patient_data.values():
                 for series_data in study_data.values():
@@ -266,9 +247,20 @@ class TreeManager(QObject):
                         filepath = instance_data['filepath']
                         dataset = instance_data.get('dataset')
                         if dataset:
-                            self.loaded_files.append((filepath, dataset))
+                            new_files.append((filepath, dataset))
                         else:
-                            self.loaded_files.append(filepath)
+                            new_files.append(filepath)
+
+        if hasattr(self, '_append_mode') and self._append_mode:
+            # Append mode - extend loaded_files with new files only
+            existing_paths = {f[0] if isinstance(f, tuple) else f for f in self.loaded_files}
+            for new_file in new_files:
+                new_path = new_file[0] if isinstance(new_file, tuple) else new_file
+                if new_path not in existing_paths:
+                    self.loaded_files.append(new_file)
+        else:
+            # Replace mode
+            self.loaded_files = new_files
 
         # Update status
         total_files = len(self.loaded_files)
@@ -365,7 +357,8 @@ class TreeManager(QObject):
             QApplication.processEvents()
             
             self.tree.clear()
-            self.file_metadata = {}
+            self.file_metadata = {}  # Clear disk-based items only
+            # Keep memory_items - these are duplicated items that should survive refresh
             
             # Rebuild hierarchy - force re-reading from disk to get updated data
             progress.setValue(30)
@@ -384,8 +377,18 @@ class TreeManager(QObject):
             if file_paths:
                 logging.debug(f"First file path: {file_paths[0]}")
             
-            # Force fresh read from disk by passing just paths (not cached datasets)
-            hierarchy = self._build_hierarchy(file_paths, progress, 30, 80)
+            # Combine disk files and memory items for hierarchy building
+            combined_files = []
+
+            # Add disk files (force fresh read from disk)
+            combined_files.extend(file_paths)
+
+            # Add memory items (duplicated items that should be preserved)
+            for memory_path, memory_dataset in self.memory_items.items():
+                combined_files.append((memory_path, memory_dataset))
+
+            logging.info(f"Building hierarchy with {len(file_paths)} disk files and {len(self.memory_items)} memory items")
+            hierarchy = self._build_hierarchy(combined_files, progress, 30, 80)
             
             if progress.wasCanceled():
                 return
@@ -535,7 +538,51 @@ class TreeManager(QObject):
                 return None
         
         return hierarchy
-    
+
+    def _merge_hierarchies(self, existing_hierarchy, new_hierarchy):
+        """Merge a new hierarchy into an existing hierarchy"""
+        logging.info(f"Merging hierarchies: {len(existing_hierarchy)} + {len(new_hierarchy)} patients")
+
+        # Deep copy existing hierarchy to avoid modifying original
+        merged_hierarchy = existing_hierarchy.copy()
+
+        for patient_label, new_studies in new_hierarchy.items():
+            if patient_label not in merged_hierarchy:
+                # New patient - add directly
+                merged_hierarchy[patient_label] = new_studies
+                logging.debug(f"Added new patient: {patient_label}")
+            else:
+                # Existing patient - merge studies
+                existing_studies = merged_hierarchy[patient_label]
+                for study_label, new_series in new_studies.items():
+                    if study_label not in existing_studies:
+                        # New study - add directly
+                        existing_studies[study_label] = new_series
+                        logging.debug(f"Added new study: {study_label}")
+                    else:
+                        # Existing study - merge series
+                        existing_series = existing_studies[study_label]
+                        for series_label, new_instances in new_series.items():
+                            if series_label not in existing_series:
+                                # New series - add directly
+                                existing_series[series_label] = new_instances
+                                logging.debug(f"Added new series: {series_label}")
+                            else:
+                                # Existing series - merge instances
+                                existing_instances = existing_series[series_label]
+                                for instance_label, instance_data in new_instances.items():
+                                    if instance_label not in existing_instances:
+                                        # New instance - add directly
+                                        existing_instances[instance_label] = instance_data
+                                        logging.debug(f"Added new instance: {instance_label}")
+                                    else:
+                                        # Duplicate instance - this could happen if same file loaded twice
+                                        # For now, we'll keep the existing one and log a warning
+                                        logging.warning(f"Duplicate instance found: {instance_label}")
+
+        logging.info(f"Hierarchy merge complete: {len(merged_hierarchy)} total patients")
+        return merged_hierarchy
+
     def _build_tree_structure(self, hierarchy):
         """Build the actual tree structure from hierarchy data"""
         logging.debug(f"Building tree structure with {len(hierarchy)} patients")
@@ -741,9 +788,10 @@ class TreeManager(QObject):
             if (f[0] if isinstance(f, tuple) else f) not in files_to_remove
         ]
         
-        # Remove from metadata
+        # Remove from metadata (both disk and memory)
         for file_path in files_to_remove:
             self.file_metadata.pop(file_path, None)
+            self.memory_items.pop(file_path, None)
         
         # Remove items from tree
         for item in selected_items:
@@ -764,6 +812,7 @@ class TreeManager(QObject):
         """Clear all tree contents"""
         self.tree.clear()
         self.file_metadata.clear()
+        self.memory_items.clear()  # Also clear memory items
         self.loaded_files.clear()
         self.tree_populated.emit(0)
         
@@ -784,7 +833,12 @@ class TreeManager(QObject):
         self.tree.clearSelection()
     
     def get_file_metadata(self, file_path):
-        """Get metadata for a specific file"""
+        """Get metadata for a specific file from either disk cache or memory items"""
+        # First check memory items (duplicated items)
+        if file_path in self.memory_items:
+            return self.memory_items[file_path]
+
+        # Then check disk-based file metadata
         return self.file_metadata.get(file_path)
     
     def get_loaded_files(self):
@@ -874,14 +928,8 @@ class TreeManager(QObject):
                 file_paths, uid_config
             )
 
-            if duplicated_items:
-                FocusAwareMessageBox.information(
-                    self.main_window,
-                    "Duplication Complete",
-                    f"Successfully duplicated {len(duplicated_items)} items.\n\n"
-                    f"Use 'View Duplicated Items' from the context menu to see them, "
-                    f"or 'Save Duplicated Items' to write them to disk."
-                )
+            # Success message will be handled by duplication_completed signal
+            # Integration and tree refresh will be handled by signal handlers
 
         except Exception as e:
             logging.error(f"Failed to duplicate selected items: {e}", exc_info=True)
@@ -918,12 +966,8 @@ class TreeManager(QObject):
                 file_paths, uid_config
             )
 
-            if duplicated_items:
-                FocusAwareMessageBox.information(
-                    self.main_window,
-                    "Quick Duplication Complete",
-                    f"Duplicated {len(duplicated_items)} items with new Instance UIDs."
-                )
+            # Success message will be handled by duplication_completed signal
+            # Integration and tree refresh will be handled by signal handlers
 
         except Exception as e:
             logging.error(f"Quick duplicate instances failed: {e}", exc_info=True)
@@ -956,15 +1000,139 @@ class TreeManager(QObject):
                 file_paths, uid_config
             )
 
-            if duplicated_items:
-                FocusAwareMessageBox.information(
-                    self.main_window,
-                    "Quick Duplication Complete",
-                    f"Duplicated {len(duplicated_items)} items with all new UIDs."
-                )
+            # Success message will be handled by duplication_completed signal
+            # Integration and tree refresh will be handled by signal handlers
 
         except Exception as e:
             logging.error(f"Quick duplicate all new failed: {e}", exc_info=True)
+
+    def _integrate_duplicated_items(self, duplicated_items):
+        """Integrate duplicated DICOM items into the tree manager's data structures"""
+        try:
+            for duplicated_item in duplicated_items:
+                # Create a virtual path for the duplicated item
+                # Use original path with a suffix to make it unique
+                original_path = duplicated_item.original_path
+                base_name = os.path.splitext(os.path.basename(original_path))[0]
+
+                # Generate unique virtual path using new UIDs
+                if 'SOPInstanceUID' in duplicated_item.new_uids:
+                    # Use part of the new SOP Instance UID to make it unique
+                    instance_uid_part = duplicated_item.new_uids['SOPInstanceUID'].split('.')[-1][:8]
+                    virtual_path = f"{original_path}_duplicate_{instance_uid_part}"
+                else:
+                    # Fallback to using timestamp-based ID
+                    import time
+                    virtual_path = f"{original_path}_duplicate_{int(time.time())}"
+
+                # Add to memory items (these survive tree refresh)
+                self.memory_items[virtual_path] = duplicated_item.duplicated_dataset
+
+                # Add to loaded files list
+                if virtual_path not in self.loaded_files:
+                    self.loaded_files.append(virtual_path)
+
+                logging.info(f"Integrated duplicated item: {virtual_path}")
+
+        except Exception as e:
+            logging.error(f"Failed to integrate duplicated items: {e}", exc_info=True)
+
+    def _on_duplication_started(self, level: str, count: int):
+        """Handle duplication started signal - show progress dialog"""
+        try:
+            level_name = level.title() if level != "mixed" else "Selected Items"
+            self.duplication_progress_dialog = FocusAwareProgressDialog(
+                f"Duplicating {count} {level_name}...", "Cancel", 0, count, self.main_window
+            )
+            self.duplication_progress_dialog.setWindowTitle(f"Duplicating {level_name}")
+            self.duplication_progress_dialog.setMinimumDuration(0)
+            self.duplication_progress_dialog.setValue(0)
+            self.duplication_progress_dialog.show()
+
+            # Connect cancel to duplication manager if it supports cancellation
+            # For now, just close dialog - cancellation can be added later if needed
+            self.duplication_progress_dialog.canceled.connect(self._on_duplication_cancelled)
+
+            logging.info(f"Started duplication progress dialog for {count} {level} items")
+
+        except Exception as e:
+            logging.error(f"Error showing duplication progress: {e}", exc_info=True)
+
+    def _on_duplication_progress(self, current: int, total: int):
+        """Handle duplication progress signal - update progress dialog"""
+        try:
+            if self.duplication_progress_dialog:
+                progress_percent = int((current / total) * 100) if total > 0 else 0
+                self.duplication_progress_dialog.setValue(current)
+                self.duplication_progress_dialog.setLabelText(
+                    f"Processing item {current} of {total} ({progress_percent}%)"
+                )
+                QApplication.processEvents()  # Keep UI responsive
+
+        except Exception as e:
+            logging.error(f"Error updating duplication progress: {e}", exc_info=True)
+
+    def _on_duplication_completed(self, duplicated_items: list):
+        """Handle duplication completed signal - close progress, integrate items, refresh tree"""
+        try:
+            # Close progress dialog
+            if self.duplication_progress_dialog:
+                self.duplication_progress_dialog.close()
+                self.duplication_progress_dialog = None
+
+            if duplicated_items:
+                # Integrate duplicated items into memory storage
+                self._integrate_duplicated_items(duplicated_items)
+
+                # Refresh the tree to show new items (now includes memory items)
+                self.refresh_tree()
+
+                # Show success message
+                FocusAwareMessageBox.information(
+                    self.main_window,
+                    "Duplication Complete",
+                    f"Successfully duplicated {len(duplicated_items)} items.\n\n"
+                    f"The duplicated items are now visible in the tree. "
+                    f"Use 'Save Duplicated Items' to write them to disk if needed."
+                )
+
+            logging.info(f"Duplication completed with {len(duplicated_items)} items")
+
+        except Exception as e:
+            logging.error(f"Error handling duplication completion: {e}", exc_info=True)
+
+    def _on_duplication_error(self, error_message: str):
+        """Handle duplication error signal - close progress and show error"""
+        try:
+            # Close progress dialog
+            if self.duplication_progress_dialog:
+                self.duplication_progress_dialog.close()
+                self.duplication_progress_dialog = None
+
+            # Show error message
+            FocusAwareMessageBox.critical(
+                self.main_window,
+                "Duplication Error",
+                f"Duplication failed:\n\n{error_message}"
+            )
+
+            logging.error(f"Duplication error: {error_message}")
+
+        except Exception as e:
+            logging.error(f"Error handling duplication error: {e}", exc_info=True)
+
+    def _on_duplication_cancelled(self):
+        """Handle duplication cancelled by user"""
+        try:
+            # Close progress dialog
+            if self.duplication_progress_dialog:
+                self.duplication_progress_dialog.close()
+                self.duplication_progress_dialog = None
+
+            logging.info("Duplication cancelled by user")
+
+        except Exception as e:
+            logging.error(f"Error handling duplication cancellation: {e}", exc_info=True)
 
     def _view_duplicated_items(self):
         """Show a list of duplicated items"""
