@@ -8,12 +8,14 @@ selection handling, and hierarchy management.
 import os
 import logging
 import pydicom
-from PyQt6.QtWidgets import QTreeWidgetItem, QProgressDialog, QApplication
-from PyQt6.QtCore import QObject, pyqtSignal, Qt
-from PyQt6.QtGui import QIcon
+from PyQt6.QtWidgets import QTreeWidgetItem, QProgressDialog, QApplication, QMenu
+from PyQt6.QtCore import QObject, pyqtSignal, Qt, QPoint
+from PyQt6.QtGui import QIcon, QAction
 
 from fm_dicom.widgets.focus_aware import FocusAwareMessageBox, FocusAwareProgressDialog
-# Temporarily commented out for testing - from fm_dicom.utils.threaded_processor import ThreadedDicomProcessor, DicomProcessingResult, FastDicomScanner
+from fm_dicom.utils.threaded_processor import ThreadedDicomProcessor, DicomProcessingResult, FastDicomScanner
+from fm_dicom.managers.duplication_manager import DuplicationManager, UIDConfiguration
+from fm_dicom.dialogs.uid_configuration_dialog import UIDConfigurationDialog
 
 
 class TreeManager(QObject):
@@ -44,8 +46,14 @@ class TreeManager(QObject):
         self.progressive_hierarchy = {}  # Build hierarchy progressively
         self.processing_stats = {'processed': 0, 'total': 0, 'errors': 0}
 
+        # Duplication manager
+        self.duplication_manager = DuplicationManager(main_window)
+
         # Setup icons
         self._setup_icons()
+
+        # Setup context menu
+        self._setup_context_menu()
 
         # Connect tree signals
         self.tree.itemSelectionChanged.connect(self._on_selection_changed)
@@ -56,6 +64,77 @@ class TreeManager(QObject):
         self.patient_icon = style.standardIcon(style.StandardPixmap.SP_ComputerIcon)
         self.study_icon = style.standardIcon(style.StandardPixmap.SP_DirIcon)
         self.series_icon = style.standardIcon(style.StandardPixmap.SP_FileDialogDetailedView)
+
+    def _setup_context_menu(self):
+        """Setup context menu for tree widget"""
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._show_context_menu)
+
+    def _show_context_menu(self, position: QPoint):
+        """Show context menu for tree items"""
+        item = self.tree.itemAt(position)
+        if item is None:
+            return
+
+        # Determine what level we're at and what actions are appropriate
+        selected_items = self.tree.selectedItems()
+        if not selected_items:
+            return
+
+        context_menu = QMenu(self.tree)
+
+        # Add duplication actions based on selection
+        duplication_level = self._determine_context_duplication_level(selected_items)
+
+        if duplication_level:
+            # Add main duplication action
+            duplicate_action = QAction(f"Duplicate {duplication_level.title()}", context_menu)
+            duplicate_action.triggered.connect(lambda: self._duplicate_selected_items(duplication_level))
+            context_menu.addAction(duplicate_action)
+
+            # Add quick duplication presets
+            context_menu.addSeparator()
+
+            # Quick duplicate with new instance UIDs only
+            quick_instance_action = QAction("Quick Duplicate (New Instance UIDs)", context_menu)
+            quick_instance_action.triggered.connect(lambda: self._quick_duplicate_instances())
+            context_menu.addAction(quick_instance_action)
+
+            # Quick duplicate with all new UIDs
+            quick_all_action = QAction("Quick Duplicate (All New UIDs)", context_menu)
+            quick_all_action.triggered.connect(lambda: self._quick_duplicate_all_new())
+            context_menu.addAction(quick_all_action)
+
+        context_menu.addSeparator()
+
+        # Standard actions (existing functionality)
+        expand_action = QAction("Expand All", context_menu)
+        expand_action.triggered.connect(self.expand_all)
+        context_menu.addAction(expand_action)
+
+        collapse_action = QAction("Collapse All", context_menu)
+        collapse_action.triggered.connect(self.collapse_all)
+        context_menu.addAction(collapse_action)
+
+        # Show duplicated items management if any exist
+        if self.duplication_manager.get_duplicated_items():
+            context_menu.addSeparator()
+
+            view_duplicates_action = QAction("View Duplicated Items", context_menu)
+            view_duplicates_action.triggered.connect(self._view_duplicated_items)
+            context_menu.addAction(view_duplicates_action)
+
+            save_duplicates_action = QAction("Save Duplicated Items...", context_menu)
+            save_duplicates_action.triggered.connect(self._save_duplicated_items)
+            context_menu.addAction(save_duplicates_action)
+
+            clear_duplicates_action = QAction("Clear Duplicated Items", context_menu)
+            clear_duplicates_action.triggered.connect(self._clear_duplicated_items)
+            context_menu.addAction(clear_duplicates_action)
+
+        # Show the menu
+        global_position = self.tree.mapToGlobal(position)
+        context_menu.exec(global_position)
     
     def populate_tree(self, files):
         """Populate tree with DICOM file hierarchy using optimized processing"""
@@ -67,24 +146,29 @@ class TreeManager(QObject):
         # Extract file paths from mixed input formats
         file_paths = self._extract_file_paths(files)
 
-        # Temporarily disable threaded processing due to import issue
-        logging.info(f"Using sequential processing for {len(file_paths)} files")
-        # Use original method for all datasets
-        hierarchy = self._build_hierarchy(files)
-        if hierarchy is None:  # Cancelled
-            return
+        # Decide whether to use threaded processing based on config and dataset size
+        if (self.use_threaded_processing and
+            len(file_paths) > self.thread_threshold):
+            logging.info(f"Using threaded processing for {len(file_paths)} files (threshold: {self.thread_threshold})")
+            self._populate_tree_threaded(file_paths)
+        else:
+            logging.info(f"Using sequential processing for {len(file_paths)} files")
+            # Use original method for smaller datasets or when threading disabled
+            hierarchy = self._build_hierarchy(files)
+            if hierarchy is None:  # Cancelled
+                return
 
-        # Store hierarchy for performance optimization
-        self.hierarchy = hierarchy
+            # Store hierarchy for performance optimization
+            self.hierarchy = hierarchy
 
-        # Populate tree widget
-        self._build_tree_structure(hierarchy)
+            # Populate tree widget
+            self._build_tree_structure(hierarchy)
 
-        # Update status
-        total_files = len(files)
-        self.tree_populated.emit(total_files)
+            # Update status
+            total_files = len(files)
+            self.tree_populated.emit(total_files)
 
-        logging.info(f"Tree populated with {total_files} files")
+            logging.info(f"Tree populated with {total_files} files")
 
     def _extract_file_paths(self, files):
         """Extract file paths from mixed input formats (paths, tuples)"""
@@ -102,44 +186,43 @@ class TreeManager(QObject):
         self.progressive_hierarchy = {}
         self.processing_stats = {'processed': 0, 'total': len(file_paths), 'errors': 0}
 
-        # Pre-filter files to remove obvious non-DICOM files (temporarily disabled)
-        # filtered_paths = FastDicomScanner.filter_dicom_files(file_paths)
-        filtered_paths = file_paths  # Use all files for now
-        # if len(filtered_paths) != len(file_paths):
-        #     logging.info(f"Pre-filtered {len(file_paths)} files to {len(filtered_paths)} potential DICOM files")
+        # Pre-filter files to remove obvious non-DICOM files
+        filtered_paths = FastDicomScanner.filter_dicom_files(file_paths)
+        if len(filtered_paths) != len(file_paths):
+            logging.info(f"Pre-filtered {len(file_paths)} files to {len(filtered_paths)} potential DICOM files")
 
-        # Create threaded processor (temporarily disabled)
-        # self.threaded_processor = ThreadedDicomProcessor(
-        #     max_workers=self.max_workers,
-        #     batch_size=self.batch_size
-        # )
+        # Create threaded processor
+        self.threaded_processor = ThreadedDicomProcessor(
+            max_workers=self.max_workers,
+            batch_size=self.batch_size
+        )
 
-        # Connect signals for progressive updates (temporarily disabled)
-        # self.threaded_processor.progress_updated.connect(self._on_threaded_progress)
-        # self.threaded_processor.file_processed.connect(self._on_file_processed)
-        # self.threaded_processor.batch_completed.connect(self._on_batch_completed)
-        # self.threaded_processor.processing_finished.connect(self._on_processing_finished)
-        # self.threaded_processor.processing_error.connect(self._on_processing_error)
+        # Connect signals for progressive updates
+        self.threaded_processor.progress_updated.connect(self._on_threaded_progress)
+        self.threaded_processor.file_processed.connect(self._on_file_processed)
+        self.threaded_processor.batch_completed.connect(self._on_batch_completed)
+        self.threaded_processor.processing_finished.connect(self._on_processing_finished)
+        self.threaded_processor.processing_error.connect(self._on_processing_error)
 
-        # Show progress dialog (temporarily disabled)
-        # self.progress_dialog = FocusAwareProgressDialog(
-        #     f"Processing {len(filtered_paths)} DICOM files...",
-        #     "Cancel",
-        #     0,
-        #     len(filtered_paths),
-        #     self.main_window
-        # )
-        # self.progress_dialog.setWindowTitle("Loading DICOM Files")
-        # self.progress_dialog.setMinimumDuration(0)
-        # self.progress_dialog.canceled.connect(self.threaded_processor.cancel_processing)
-        # self.progress_dialog.show()
+        # Show progress dialog
+        self.progress_dialog = FocusAwareProgressDialog(
+            f"Processing {len(filtered_paths)} DICOM files...",
+            "Cancel",
+            0,
+            len(filtered_paths),
+            self.main_window
+        )
+        self.progress_dialog.setWindowTitle("Loading DICOM Files")
+        self.progress_dialog.setMinimumDuration(0)
+        self.progress_dialog.canceled.connect(self.threaded_processor.cancel_processing)
+        self.progress_dialog.show()
 
-        # Start threaded processing (temporarily disabled)
-        # self.threaded_processor.process_files(
-        #     filtered_paths,
-        #     read_pixels=False,  # Headers only for hierarchy building
-        #     required_tags=None  # Use defaults
-        # )
+        # Start threaded processing
+        self.threaded_processor.process_files(
+            filtered_paths,
+            read_pixels=False,  # Headers only for hierarchy building
+            required_tags=None  # Use defaults
+        )
 
     def _on_threaded_progress(self, current, total, current_file):
         """Handle progress updates from threaded processor"""
@@ -711,3 +794,264 @@ class TreeManager(QObject):
     def get_file_count(self):
         """Get total number of loaded files"""
         return len(self.loaded_files)
+
+    # Duplication functionality
+
+    def _determine_context_duplication_level(self, selected_items):
+        """Determine the appropriate duplication level based on selected items"""
+        if not selected_items:
+            return None
+
+        # Analyze the selection to determine the most appropriate level
+        levels = set()
+        for item in selected_items:
+            level = self._get_item_level(item)
+            if level:
+                levels.add(level)
+
+        # If mixed selection, return "mixed"
+        if len(levels) > 1:
+            return "mixed"
+        elif len(levels) == 1:
+            return list(levels)[0]
+        else:
+            return "instance"  # Default
+
+    def _get_item_level(self, item):
+        """Determine the hierarchy level of a tree item"""
+        # Count the depth to determine level
+        depth = 0
+        parent = item.parent()
+        while parent is not None:
+            depth += 1
+            parent = parent.parent()
+
+        if depth == 0:
+            return "patient"
+        elif depth == 1:
+            return "study"
+        elif depth == 2:
+            return "series"
+        else:
+            return "instance"
+
+    def _duplicate_selected_items(self, duplication_level):
+        """Duplicate selected items with user configuration"""
+        try:
+            selected_items = self.tree.selectedItems()
+            if not selected_items:
+                FocusAwareMessageBox.warning(
+                    self.main_window,
+                    "No Selection",
+                    "Please select items to duplicate."
+                )
+                return
+
+            # Get file paths from selected items
+            file_paths = []
+            for item in selected_items:
+                paths = self._collect_instance_filepaths(item)
+                file_paths.extend(paths)
+
+            if not file_paths:
+                FocusAwareMessageBox.warning(
+                    self.main_window,
+                    "No Files",
+                    "Selected items don't contain any files to duplicate."
+                )
+                return
+
+            # Show UID configuration dialog
+            uid_config = UIDConfigurationDialog.get_uid_configuration(
+                self.main_window, duplication_level
+            )
+
+            if uid_config is None:
+                return  # User cancelled
+
+            # Perform duplication
+            duplicated_items = self.duplication_manager.duplicate_instances(
+                file_paths, uid_config
+            )
+
+            if duplicated_items:
+                FocusAwareMessageBox.information(
+                    self.main_window,
+                    "Duplication Complete",
+                    f"Successfully duplicated {len(duplicated_items)} items.\n\n"
+                    f"Use 'View Duplicated Items' from the context menu to see them, "
+                    f"or 'Save Duplicated Items' to write them to disk."
+                )
+
+        except Exception as e:
+            logging.error(f"Failed to duplicate selected items: {e}", exc_info=True)
+            FocusAwareMessageBox.critical(
+                self.main_window,
+                "Duplication Error",
+                f"Failed to duplicate items:\n\n{e}"
+            )
+
+    def _quick_duplicate_instances(self):
+        """Quick duplicate with new instance UIDs only"""
+        try:
+            selected_items = self.tree.selectedItems()
+            if not selected_items:
+                return
+
+            file_paths = []
+            for item in selected_items:
+                paths = self._collect_instance_filepaths(item)
+                file_paths.extend(paths)
+
+            if not file_paths:
+                return
+
+            # Create quick configuration for instance UID only
+            uid_config = UIDConfiguration()
+            uid_config.regenerate_instance_uid = True
+            uid_config.regenerate_patient_id = False
+            uid_config.regenerate_study_uid = False
+            uid_config.regenerate_series_uid = False
+
+            # Perform duplication
+            duplicated_items = self.duplication_manager.duplicate_instances(
+                file_paths, uid_config
+            )
+
+            if duplicated_items:
+                FocusAwareMessageBox.information(
+                    self.main_window,
+                    "Quick Duplication Complete",
+                    f"Duplicated {len(duplicated_items)} items with new Instance UIDs."
+                )
+
+        except Exception as e:
+            logging.error(f"Quick duplicate instances failed: {e}", exc_info=True)
+
+    def _quick_duplicate_all_new(self):
+        """Quick duplicate with all new UIDs"""
+        try:
+            selected_items = self.tree.selectedItems()
+            if not selected_items:
+                return
+
+            file_paths = []
+            for item in selected_items:
+                paths = self._collect_instance_filepaths(item)
+                file_paths.extend(paths)
+
+            if not file_paths:
+                return
+
+            # Create configuration for all new UIDs
+            uid_config = UIDConfiguration()
+            uid_config.regenerate_instance_uid = True
+            uid_config.regenerate_patient_id = True
+            uid_config.regenerate_study_uid = True
+            uid_config.regenerate_series_uid = True
+            uid_config.add_derived_suffix = True
+
+            # Perform duplication
+            duplicated_items = self.duplication_manager.duplicate_instances(
+                file_paths, uid_config
+            )
+
+            if duplicated_items:
+                FocusAwareMessageBox.information(
+                    self.main_window,
+                    "Quick Duplication Complete",
+                    f"Duplicated {len(duplicated_items)} items with all new UIDs."
+                )
+
+        except Exception as e:
+            logging.error(f"Quick duplicate all new failed: {e}", exc_info=True)
+
+    def _view_duplicated_items(self):
+        """Show a list of duplicated items"""
+        duplicated_items = self.duplication_manager.get_duplicated_items()
+        if not duplicated_items:
+            FocusAwareMessageBox.information(
+                self.main_window,
+                "No Duplicated Items",
+                "There are currently no duplicated items in memory."
+            )
+            return
+
+        # Create a summary message
+        summary = f"Duplicated Items in Memory: {len(duplicated_items)}\n\n"
+
+        for idx, item in enumerate(duplicated_items[:10]):  # Show first 10
+            summary += f"{idx + 1}. {os.path.basename(item.original_path)}\n"
+            summary += f"   Level: {item.duplication_level}\n"
+            summary += f"   Modified: {'Yes' if item.is_modified else 'No'}\n\n"
+
+        if len(duplicated_items) > 10:
+            summary += f"... and {len(duplicated_items) - 10} more items.\n"
+
+        summary += "\nUse 'Save Duplicated Items' to write them to disk."
+
+        FocusAwareMessageBox.information(
+            self.main_window,
+            "Duplicated Items",
+            summary
+        )
+
+    def _save_duplicated_items(self):
+        """Save duplicated items to disk"""
+        from PyQt6.QtWidgets import QFileDialog
+
+        duplicated_items = self.duplication_manager.get_duplicated_items()
+        if not duplicated_items:
+            return
+
+        # Ask user for output directory
+        output_dir = QFileDialog.getExistingDirectory(
+            self.main_window,
+            "Select Directory to Save Duplicated Items",
+            os.path.expanduser("~/DICOM_Duplicates")
+        )
+
+        if not output_dir:
+            return
+
+        try:
+            saved_paths = self.duplication_manager.save_duplicated_items(
+                duplicated_items, output_dir
+            )
+
+            FocusAwareMessageBox.information(
+                self.main_window,
+                "Save Complete",
+                f"Successfully saved {len(saved_paths)} duplicated items to:\n{output_dir}"
+            )
+
+        except Exception as e:
+            logging.error(f"Failed to save duplicated items: {e}", exc_info=True)
+            FocusAwareMessageBox.critical(
+                self.main_window,
+                "Save Error",
+                f"Failed to save duplicated items:\n\n{e}"
+            )
+
+    def _clear_duplicated_items(self):
+        """Clear all duplicated items from memory"""
+        duplicated_count = len(self.duplication_manager.get_duplicated_items())
+        if duplicated_count == 0:
+            return
+
+        reply = FocusAwareMessageBox.question(
+            self.main_window,
+            "Clear Duplicated Items",
+            f"This will remove {duplicated_count} duplicated items from memory.\n\n"
+            f"Any unsaved changes will be lost. Continue?",
+            FocusAwareMessageBox.StandardButton.Yes | FocusAwareMessageBox.StandardButton.No,
+            FocusAwareMessageBox.StandardButton.No
+        )
+
+        if reply == FocusAwareMessageBox.StandardButton.Yes:
+            self.duplication_manager.clear_duplicated_items()
+            FocusAwareMessageBox.information(
+                self.main_window,
+                "Items Cleared",
+                "All duplicated items have been cleared from memory."
+            )

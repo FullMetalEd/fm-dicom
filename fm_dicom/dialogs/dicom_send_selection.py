@@ -867,8 +867,38 @@ class DicomSendSelectionDialog(QDialog):
     
     def _filter_tree(self, text):
         """Filter tree based on search text"""
-        # TODO: Implement filtering logic
-        pass
+        text = text.lower()
+
+        def match_item(item):
+            # Check if any column text matches
+            for col in range(item.columnCount()):
+                if text in item.text(col).lower():
+                    return True
+
+            # Check children recursively
+            has_matching_child = False
+            for i in range(item.childCount()):
+                if match_item(item.child(i)):
+                    has_matching_child = True
+
+            # Expand item if it has matching children
+            if has_matching_child:
+                item.setExpanded(True)
+
+            return has_matching_child
+
+        def filter_recursive(item):
+            is_visible = match_item(item) if text else True
+            item.setHidden(not is_visible)
+
+            # Apply filter to children
+            if is_visible or not text:
+                for i in range(item.childCount()):
+                    filter_recursive(item.child(i))
+
+        # Apply filter to all top-level items
+        for i in range(self.tree.topLevelItemCount()):
+            filter_recursive(self.tree.topLevelItem(i))
     
     def _expand_all(self):
         """Expand all tree items"""

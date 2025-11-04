@@ -30,7 +30,13 @@
 
           propagatedBuildInputs = with pkgs.python3Packages; [
             numpy
-            pydicom
+            (pydicom.overridePythonAttrs (oldAttrs: {
+              # Patch the PIL features import bug in pydicom 3.0.1
+              postPatch = (oldAttrs.postPatch or "") + ''
+                # Fix missing PIL.features import in pillow.py decoder
+                sed -i 's/^def is_available/from PIL import features\ndef is_available/' src/pydicom/pixels/decoders/pillow.py
+              '';
+            }))
             pyqt6
             pynetdicom
             pyyaml
@@ -98,26 +104,69 @@
         };
 
         # Development shell
-        devShells.default = pkgs.mkShell {
+        devShells.default =
+        let
+          # Create a Python environment with all our dependencies including patched pydicom
+          pythonWithPackages = pkgs.python3.withPackages (ps: [
+            ps.numpy
+            (ps.pydicom.overridePythonAttrs (oldAttrs: {
+              # Fix missing PIL.features import in pillow.py decoder
+              postPatch = (oldAttrs.postPatch or "") + ''
+                sed -i 's/^def is_available/from PIL import features\ndef is_available/' src/pydicom/pixels/decoders/pillow.py
+              '';
+            }))
+            ps.pyqt6
+            ps.pynetdicom
+            ps.gdcm
+            ps.pillow
+            ps.pyyaml
+            ps.typer
+          ]);
+        in
+        pkgs.mkShell {
           buildInputs = with pkgs; [
-            python314
+            pythonWithPackages
             uv
             gcc
-            python3Packages.numpy
-            python3Packages.pydicom
-            python3Packages.pyqt6
-            python3Packages.pynetdicom
-            python3Packages.gdcm
-            python3Packages.pillow
+            ninja
+            meson
+            pkg-config
+            libyaml
+            cmake
+            # Qt6 system dependencies
+            qt6.qtbase
+            qt6.qtwayland
+            kdePackages.qtwayland
+            qt6ct
+            zenity
+            xdg-desktop-portal
+            xdg-desktop-portal-gtk
           ];
 
           shellHook = ''
-            rm -rf .venv
-            uv venv .venv
-            source .venv/bin/activate
-            export PIP_REQUIRE_VIRTUALENV=true
-            export PIP_USE_UV=1
-            uv pip install -e .[dev]
+            # Force uv to use the Nix-provided Python environment
+            export UV_PYTHON=${pythonWithPackages}/bin/python
+
+            # Add the current directory to Python path so it can find fm_dicom
+            export PYTHONPATH="$PWD:$PYTHONPATH"
+
+            # Qt6 environment variables for better Wayland/Hyprland support
+            export QT_QPA_PLATFORM_PLUGIN_PATH="${pkgs.qt6.qtbase}/lib/qt-6/plugins:${pkgs.qt6.qtwayland}/lib/qt-6/plugins"
+            export QT_PLUGIN_PATH="${pkgs.qt6.qtbase}/lib/qt-6/plugins:${pkgs.qt6.qtwayland}/lib/qt-6/plugins"
+
+            echo "✅ UV_PYTHON set to: $UV_PYTHON"
+            echo "✅ Python version: $(python --version)"
+            echo "✅ PYTHONPATH includes current directory"
+            echo "✅ Qt6 plugins configured for Wayland/Hyprland"
+            echo ""
+            echo "Python development environment ready!"
+            echo "Python: $(python --version)"
+            echo ""
+            echo "To run FM-Dicom, use:"
+            echo "  python -m fm_dicom gui"
+            echo ""
+            echo "Available Python packages:"
+            python -c "import sys; print('PyQt6:', end=' '); import PyQt6; print('✅'); print('pydicom:', end=' '); import pydicom; print('✅', pydicom.__version__); print('gdcm:', end=' '); import gdcm; print('✅')" 2>/dev/null || echo "Some packages may need to be imported after starting"
           '';
         };
 

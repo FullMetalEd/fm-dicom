@@ -11,12 +11,79 @@ def _is_running_from_executable():
     return getattr(sys, 'frozen', False) or sys.executable.endswith('.exe') and not sys.executable.endswith('python.exe')
 
 
+def _get_windows_version():
+    """Get detailed Windows version information"""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion") as key:
+            major_version = winreg.QueryValueEx(key, "CurrentMajorVersionNumber")[0]
+            build_number = winreg.QueryValueEx(key, "CurrentBuildNumber")[0]
+            display_version = None
+            try:
+                display_version = winreg.QueryValueEx(key, "DisplayVersion")[0]
+            except FileNotFoundError:
+                pass
+
+            return {
+                'major_version': major_version,
+                'build_number': int(build_number),
+                'display_version': display_version,
+                'is_windows_11': major_version >= 10 and int(build_number) >= 22000
+            }
+    except (ImportError, OSError):
+        # Fallback to platform module
+        version_info = platform.version().split('.')
+        return {
+            'major_version': int(version_info[0]) if version_info else None,
+            'build_number': None,
+            'display_version': platform.version(),
+            'is_windows_11': False  # Can't determine, assume not
+        }
+
+
+def _enable_windows_long_paths():
+    """Enable long path support on Windows if available"""
+    if platform.system() != "Windows":
+        return False
+
+    try:
+        import winreg
+        # Check if long paths are enabled in registry
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                           r"SYSTEM\CurrentControlSet\Control\FileSystem") as key:
+            try:
+                long_paths_enabled = winreg.QueryValueEx(key, "LongPathsEnabled")[0]
+                return bool(long_paths_enabled)
+            except FileNotFoundError:
+                return False
+    except (ImportError, OSError):
+        return False
+
+
 def _get_windows_config_path(app_name):
-    """Get Windows-specific config path with improved fallback logic"""
-    # Try standard Windows app data directory first
+    """Get Windows-specific config path with improved fallback logic and Windows 11 support"""
+    # Check if we're on Windows 11 for any specific handling
+    try:
+        win_version = _get_windows_version()
+        is_windows_11 = win_version.get('is_windows_11', False)
+    except:
+        is_windows_11 = False
+
+    # Windows 11 prefers LOCALAPPDATA for app-specific data
+    if is_windows_11:
+        localappdata = os.environ.get("LOCALAPPDATA")
+        if localappdata and _is_path_accessible(localappdata):
+            config_path = os.path.join(localappdata, app_name, "config.yml")
+            if _is_path_writable(os.path.dirname(config_path)):
+                return config_path
+
+    # Try standard Windows app data directory
     appdata = os.environ.get("APPDATA")
     if appdata and _is_path_accessible(appdata):
         config_path = os.path.join(appdata, app_name, "config.yml")
+        # Handle long paths on Windows by using UNC notation if needed
+        if len(config_path) > 260 and _enable_windows_long_paths():
+            config_path = "\\\\?\\" + os.path.abspath(config_path)
         if _is_path_writable(os.path.dirname(config_path)):
             return config_path
 
@@ -24,12 +91,18 @@ def _get_windows_config_path(app_name):
     if _is_running_from_executable():
         exe_dir = os.path.dirname(sys.executable)
         if _is_path_writable(exe_dir):
-            return os.path.join(exe_dir, app_name, "config.yml")
+            config_path = os.path.join(exe_dir, app_name, "config.yml")
+            # Handle long paths for portable installations too
+            if len(config_path) > 260 and _enable_windows_long_paths():
+                config_path = "\\\\?\\" + os.path.abspath(config_path)
+            return config_path
 
     # Fallback to user profile directory
     user_profile = os.environ.get("USERPROFILE")
     if user_profile and _is_path_accessible(user_profile):
         config_path = os.path.join(user_profile, f".{app_name}", "config.yml")
+        if len(config_path) > 260 and _enable_windows_long_paths():
+            config_path = "\\\\?\\" + os.path.abspath(config_path)
         if _is_path_writable(os.path.dirname(config_path)):
             return config_path
 
@@ -132,6 +205,14 @@ def get_config_diagnostics():
     }
 
     if system == "Windows":
+        # Add Windows version information
+        try:
+            win_version = _get_windows_version()
+            diagnostics['windows_version'] = win_version
+            diagnostics['long_paths_enabled'] = _enable_windows_long_paths()
+        except Exception as e:
+            diagnostics['errors'].append(f"Failed to get Windows version info: {e}")
+
         # Check environment variables
         for var_name in ['APPDATA', 'LOCALAPPDATA', 'USERPROFILE']:
             var_value = os.environ.get(var_name)

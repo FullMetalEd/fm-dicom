@@ -61,18 +61,14 @@ class DicomdirReader:
                     if hasattr(file_id, '__iter__') and not isinstance(file_id, str):
                         # Join the path components (works for lists, tuples, and MultiValue)
                         relative_path = os.path.join(*file_id)
-                        logging.debug(f"DEBUG: Joined path components {list(file_id)} -> {relative_path}")
                     else:
                         relative_path = str(file_id)
-                        logging.debug(f"DEBUG: Used string conversion: {relative_path}")
-                    
+
                     # Convert to absolute path
                     full_path = os.path.join(self.base_directory, relative_path)
-                    
+
                     # Normalize path separators for current OS
                     full_path = os.path.normpath(full_path)
-                    
-                    logging.debug(f"DEBUG: Final path: {full_path}")
                     
                     # Check if file exists
                     if os.path.exists(full_path):
