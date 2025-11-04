@@ -46,7 +46,7 @@
             qt6.qtbase
             qt6.qtwayland
             kdePackages.qtwayland  # Newer Qt6 Wayland implementation
-            qt6ct
+            qt6Packages.qt6ct
             zenity
             xdg-desktop-portal
             xdg-desktop-portal-gtk
