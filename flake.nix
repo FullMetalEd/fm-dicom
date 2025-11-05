@@ -93,8 +93,19 @@
         };
 
         # Create nixGL-wrapped version for proper OpenGL support
-        fm_dicom_wrapped = pkgs.writeShellScriptBin "fm-dicom" ''
-          exec ${nixglPkg}/bin/nixGLIntel ${fm_dicom}/bin/fm-dicom "$@"
+        fm_dicom_wrapped = pkgs.runCommand "fm-dicom-wrapped" {
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+        } ''
+          # Create output directory structure
+          mkdir -p $out/bin
+          mkdir -p $out/share
+
+          # Copy all share files (desktop entries, icons) from the unwrapped package
+          cp -r ${fm_dicom}/share/* $out/share/
+
+          # Create the wrapped executable
+          makeWrapper ${nixglPkg}/bin/nixGLIntel $out/bin/fm-dicom \
+            --add-flags "${fm_dicom}/bin/fm-dicom"
         '';
       in
       {
