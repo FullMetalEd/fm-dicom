@@ -92,8 +92,8 @@ class DuplicationManager(QObject):
                     # Determine duplication level from tree path
                     level = self._determine_duplication_level(tree_path)
 
-                    # Load and duplicate the DICOM file
-                    original_dataset = pydicom.dcmread(file_path, force=True)
+                    # Load and duplicate the DICOM file (check memory items first)
+                    original_dataset = self._load_dataset(file_path)
                     duplicated_dataset = self._duplicate_dataset(
                         original_dataset, level, uid_config
                     )
@@ -159,8 +159,8 @@ class DuplicationManager(QObject):
                 self.duplication_progress.emit(idx + 1, len(file_paths))
 
                 try:
-                    # Load original dataset
-                    original_dataset = pydicom.dcmread(file_path, force=True)
+                    # Load original dataset (check memory items first)
+                    original_dataset = self._load_dataset(file_path)
 
                     # Create deep copy
                     duplicated_dataset = copy.deepcopy(original_dataset)
@@ -200,6 +200,40 @@ class DuplicationManager(QObject):
             self.duplication_error.emit(error_msg)
             return []
 
+    def _load_dataset(self, file_path: str) -> pydicom.Dataset:
+        """Load dataset from file path, checking memory items first
+
+        Args:
+            file_path: Path to DICOM file (may be virtual for memory items)
+
+        Returns:
+            pydicom.Dataset: Loaded dataset
+
+        Raises:
+            Exception: If dataset cannot be loaded from either memory or disk
+        """
+        try:
+            # Check if this is a memory item (duplicated item) first
+            if (self.main_window and
+                hasattr(self.main_window, 'tree_manager') and
+                hasattr(self.main_window.tree_manager, 'memory_items') and
+                file_path in self.main_window.tree_manager.memory_items):
+
+                logging.debug(f"Loading dataset from memory: {file_path}")
+                return self.main_window.tree_manager.memory_items[file_path]
+
+            # Otherwise, try to read from disk
+            elif os.path.exists(file_path):
+                logging.debug(f"Loading dataset from disk: {file_path}")
+                return pydicom.dcmread(file_path, force=True)
+
+            else:
+                raise FileNotFoundError(f"Dataset not found in memory or on disk: {file_path}")
+
+        except Exception as e:
+            logging.error(f"Failed to load dataset from {file_path}: {e}")
+            raise
+
     def _duplicate_dataset(self,
                           original_dataset: pydicom.Dataset,
                           level: str,
@@ -235,18 +269,30 @@ class DuplicationManager(QObject):
         """Generate new UIDs for the specified level"""
         level_uids = {}
 
+        # Debug logging to trace UID generation
+        logging.info(f"[UID DEBUG] Generating UIDs for level: {level}")
+        logging.info(f"[UID DEBUG] UID Configuration: regenerate_patient_id={uid_config.regenerate_patient_id}, "
+                    f"regenerate_study_uid={uid_config.regenerate_study_uid}, "
+                    f"regenerate_series_uid={uid_config.regenerate_series_uid}, "
+                    f"regenerate_instance_uid={uid_config.regenerate_instance_uid}")
+
         if level == "patient" and uid_config.regenerate_patient_id:
             level_uids['PatientID'] = f"PAT_{uuid.uuid4().hex[:8].upper()}"
+            logging.info(f"[UID DEBUG] Generated new PatientID: {level_uids['PatientID']}")
 
         if level in ["patient", "study"] and uid_config.regenerate_study_uid:
             level_uids['StudyInstanceUID'] = pydicom.uid.generate_uid()
+            logging.info(f"[UID DEBUG] Generated new StudyInstanceUID: {level_uids['StudyInstanceUID']}")
 
         if level in ["patient", "study", "series"] and uid_config.regenerate_series_uid:
             level_uids['SeriesInstanceUID'] = pydicom.uid.generate_uid()
+            logging.info(f"[UID DEBUG] Generated new SeriesInstanceUID: {level_uids['SeriesInstanceUID']}")
 
         if uid_config.regenerate_instance_uid:
             level_uids['SOPInstanceUID'] = pydicom.uid.generate_uid()
+            logging.info(f"[UID DEBUG] Generated new SOPInstanceUID: {level_uids['SOPInstanceUID']}")
 
+        logging.info(f"[UID DEBUG] Final level_uids: {level_uids}")
         return level_uids
 
     def _apply_uid_modifications(self,
@@ -256,12 +302,18 @@ class DuplicationManager(QObject):
                                 level_uids: Dict[str, str]):
         """Apply UID modifications to a dataset"""
 
+        logging.info(f"[UID DEBUG] Applying UID modifications for level: {level}")
+        logging.info(f"[UID DEBUG] level_uids to apply: {level_uids}")
+
         # Apply Patient ID changes
         if 'PatientID' in level_uids:
             if hasattr(dataset, 'PatientID'):
                 old_id = str(dataset.PatientID)
                 dataset.PatientID = level_uids['PatientID']
                 self.uid_mappings[old_id] = level_uids['PatientID']
+                logging.info(f"[UID DEBUG] Applied PatientID: {old_id} -> {level_uids['PatientID']}")
+            else:
+                logging.warning(f"[UID DEBUG] Dataset does not have PatientID attribute")
 
         # Apply Study UID changes
         if 'StudyInstanceUID' in level_uids:
@@ -269,6 +321,9 @@ class DuplicationManager(QObject):
                 old_uid = str(dataset.StudyInstanceUID)
                 dataset.StudyInstanceUID = level_uids['StudyInstanceUID']
                 self.uid_mappings[old_uid] = level_uids['StudyInstanceUID']
+                logging.info(f"[UID DEBUG] Applied StudyInstanceUID: {old_uid} -> {level_uids['StudyInstanceUID']}")
+            else:
+                logging.warning(f"[UID DEBUG] Dataset does not have StudyInstanceUID attribute")
 
         # Apply Series UID changes
         if 'SeriesInstanceUID' in level_uids:
@@ -276,6 +331,9 @@ class DuplicationManager(QObject):
                 old_uid = str(dataset.SeriesInstanceUID)
                 dataset.SeriesInstanceUID = level_uids['SeriesInstanceUID']
                 self.uid_mappings[old_uid] = level_uids['SeriesInstanceUID']
+                logging.info(f"[UID DEBUG] Applied SeriesInstanceUID: {old_uid} -> {level_uids['SeriesInstanceUID']}")
+            else:
+                logging.warning(f"[UID DEBUG] Dataset does not have SeriesInstanceUID attribute")
 
         # Apply Instance UID changes
         if 'SOPInstanceUID' in level_uids:
@@ -283,11 +341,19 @@ class DuplicationManager(QObject):
                 old_uid = str(dataset.SOPInstanceUID)
                 dataset.SOPInstanceUID = level_uids['SOPInstanceUID']
                 self.uid_mappings[old_uid] = level_uids['SOPInstanceUID']
+                logging.info(f"[UID DEBUG] Applied SOPInstanceUID: {old_uid} -> {level_uids['SOPInstanceUID']}")
+            else:
+                logging.warning(f"[UID DEBUG] Dataset does not have SOPInstanceUID attribute")
 
         # Update MediaStorageSOPInstanceUID if present (for files)
         if 'SOPInstanceUID' in level_uids and hasattr(dataset, 'file_meta'):
             if hasattr(dataset.file_meta, 'MediaStorageSOPInstanceUID'):
                 dataset.file_meta.MediaStorageSOPInstanceUID = level_uids['SOPInstanceUID']
+                logging.info(f"[UID DEBUG] Applied MediaStorageSOPInstanceUID: {level_uids['SOPInstanceUID']}")
+
+        logging.info(f"[UID DEBUG] Final dataset Study UID: {getattr(dataset, 'StudyInstanceUID', 'NONE')}")
+        logging.info(f"[UID DEBUG] Final dataset Series UID: {getattr(dataset, 'SeriesInstanceUID', 'NONE')}")
+        logging.info(f"[UID DEBUG] Final dataset Instance UID: {getattr(dataset, 'SOPInstanceUID', 'NONE')}")
 
     def _apply_other_modifications(self, dataset: pydicom.Dataset, uid_config: UIDConfiguration):
         """Apply non-UID modifications like adding suffixes to descriptions"""

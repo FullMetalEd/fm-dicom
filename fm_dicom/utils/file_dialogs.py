@@ -96,12 +96,12 @@ class FileDialogManager:
                 if start_dir and os.path.exists(start_dir):
                     cmd.append(f'--filename={start_dir}/')
 
-                # Add file filters
+                # Add file filters - All Files first (default)
+                cmd.extend(['--file-filter=All Files | *'])
                 if 'DICOM' in filter_str:
                     cmd.extend(['--file-filter=DICOM Files | *.dcm *.dicom'])
                 if 'ZIP' in filter_str:
                     cmd.extend(['--file-filter=ZIP Archives | *.zip'])
-                cmd.extend(['--file-filter=All Files | *'])
 
             elif dialog_type == 'directory':
                 cmd = ['zenity', '--file-selection', '--directory', f'--title={title}']
@@ -135,12 +135,12 @@ class FileDialogManager:
             if start_dir:
                 cmd.append(f'--filename={start_dir}/')
             
-            # Convert Qt filter to zenity format
+            # Convert Qt filter to zenity format - All Files first (default)
+            cmd.extend(['--file-filter=All Files | *'])
             if 'DICOM' in filter_str:
                 cmd.extend(['--file-filter=DICOM Files | *.dcm *.dicom'])
             if 'ZIP' in filter_str:
                 cmd.extend(['--file-filter=ZIP Archives | *.zip'])
-            cmd.extend(['--file-filter=All Files | *'])
             
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             
@@ -184,14 +184,14 @@ class FileDialogManager:
             if default_path:
                 cmd.append(f'--filename={default_path}')
             
-            # Convert filter for save dialogs
+            # Convert filter for save dialogs - All Files first (default)
+            cmd.extend(['--file-filter=All Files | *'])
             if 'CSV' in filter_str:
                 cmd.extend(['--file-filter=CSV Files | *.csv'])
             elif 'HTML' in filter_str:
                 cmd.extend(['--file-filter=HTML Files | *.html'])
             elif 'Text' in filter_str:
                 cmd.extend(['--file-filter=Text Files | *.txt'])
-            cmd.extend(['--file-filter=All Files | *'])
             
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             
@@ -238,6 +238,11 @@ class FileDialogManager:
         # Configure native dialog preference
         if not native_enabled:
             dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+
+        # Set "All Files" as default filter if it exists in the filter string
+        if "All Files" in filter_str:
+            all_files_filter = "All Files (*)"
+            dialog.selectNameFilter(all_files_filter)
         
         if dialog.exec():
             files = dialog.selectedFiles()
@@ -292,11 +297,16 @@ class FileDialogManager:
         # Use Qt dialog
         dialog = QFileDialog(parent, title, default_path, filter_str)
         dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
-        
+
         # Configure native dialog preference
         native_enabled = self.config.get('file_picker_native', False)
         if not native_enabled:
             dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+
+        # Set "All Files" as default filter if it exists in the filter string
+        if "All Files" in filter_str:
+            all_files_filter = "All Files (*)"
+            dialog.selectNameFilter(all_files_filter)
         
         if dialog.exec():
             files = dialog.selectedFiles()

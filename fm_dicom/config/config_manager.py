@@ -297,7 +297,21 @@ def load_config(config_path_override=None):
             "progress_update_frequency": 20,    # Update progress every N files
             "enable_file_prefiltering": True,   # Pre-filter files before DICOM reading
             "lazy_loading": False               # Future: Enable lazy loading (not implemented yet)
-        }
+        },
+
+        # Favorite DICOM tags - shown at top of tag list for easy access
+        "favorite_tags": [
+            "(0010,0010)",  # Patient Name
+            "(0010,0020)",  # Patient ID
+            "(0010,0030)",  # Patient's Birth Date
+            "(0008,0020)",  # Study Date
+            "(0008,0030)",  # Study Time
+            "(0008,1030)",  # Study Description
+            "(0008,0060)",  # Modality
+            "(0020,000D)",  # Study Instance UID
+            "(0020,000E)",  # Series Instance UID
+            "(0008,103E)"   # Series Description
+        ]
     }
 
     paths_to_check = []
@@ -421,3 +435,63 @@ def setup_logging(log_path_from_config, log_level_str_from_config):  # Renamed p
     except Exception as e:
         # If FileHandler fails, logging will still go to StreamHandler
         logging.error(f"Could not set up file logger at {log_path_from_config}: {e}. Logging to stderr only.")
+
+
+def get_favorite_tags(config):
+    """Get favorite tags from config, supporting both tag codes and keywords
+
+    Args:
+        config (dict): Configuration dictionary
+
+    Returns:
+        list: List of normalized tag codes (hex format)
+    """
+    favorite_tags = config.get('favorite_tags', [])
+    if not isinstance(favorite_tags, list):
+        logging.warning("favorite_tags config should be a list, using empty list")
+        return []
+
+    normalized_tags = []
+
+    try:
+        import pydicom
+
+        for tag_entry in favorite_tags:
+            if not isinstance(tag_entry, str):
+                logging.warning(f"Favorite tag entry should be string, got {type(tag_entry)}: {tag_entry}")
+                continue
+
+            tag_entry = tag_entry.strip()
+            if not tag_entry:
+                continue
+
+            # Check if it's already a hex tag code like "(0010,0010)"
+            if tag_entry.startswith('(') and tag_entry.endswith(')') and ',' in tag_entry:
+                normalized_tags.append(tag_entry)
+            else:
+                # Treat as keyword, try to resolve to tag code
+                try:
+                    # Remove any quotes from the keyword
+                    keyword = tag_entry.strip('"\'')
+                    tag = pydicom.datadict.tag_for_keyword(keyword)
+                    if tag:
+                        # tag_for_keyword returns an integer, convert to hex format
+                        group = (tag >> 16) & 0xFFFF
+                        element = tag & 0xFFFF
+                        tag_code = f"({group:04X},{element:04X})"
+                        normalized_tags.append(tag_code)
+                        logging.debug(f"Resolved favorite tag keyword '{keyword}' to {tag_code}")
+                    else:
+                        logging.warning(f"Could not resolve favorite tag keyword: {keyword}")
+                except Exception as e:
+                    logging.warning(f"Error resolving favorite tag keyword '{tag_entry}': {e}")
+
+    except ImportError:
+        logging.error("pydicom not available for favorite tag resolution")
+        # Return only properly formatted hex codes
+        for tag_entry in favorite_tags:
+            if isinstance(tag_entry, str) and tag_entry.startswith('(') and tag_entry.endswith(')'):
+                normalized_tags.append(tag_entry)
+
+    logging.debug(f"Resolved {len(normalized_tags)} favorite tags from config")
+    return normalized_tags

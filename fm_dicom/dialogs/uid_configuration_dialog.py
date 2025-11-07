@@ -32,12 +32,16 @@ class UIDConfigurationDialog(QDialog):
 
         self.setWindowTitle("Configure UID Handling for Duplication")
         self.setModal(True)
-        self.setMinimumWidth(500)
-        self.setMinimumHeight(600)
+        self.setMinimumWidth(700)
+        self.setMinimumHeight(800)
+        self.resize(700, 800)  # Force initial size
 
         self._setup_ui()
         self._connect_signals()
         self._update_ui_from_config()
+
+        # Set smart copy as default after UI initialization
+        self._set_default_preset()
 
     def _setup_ui(self):
         """Setup the user interface"""
@@ -94,11 +98,13 @@ class UIDConfigurationDialog(QDialog):
              "Generate new instance UIDs, keep series relationships when appropriate")
         ]
 
+        smart_copy_button = None
         for idx, (preset_id, title, description) in enumerate(presets):
             radio = QRadioButton(title)
             radio.setProperty("preset_id", preset_id)
-            if idx == 0:  # Default to first option
+            if preset_id == "smart_copy":  # Default to smart copy (recommended)
                 radio.setChecked(True)
+                smart_copy_button = radio
             self.preset_group.addButton(radio, idx)
             presets_layout.addWidget(radio)
 
@@ -108,6 +114,9 @@ class UIDConfigurationDialog(QDialog):
             presets_layout.addWidget(desc_label)
 
         layout.addWidget(presets_group)
+
+        # Store the smart copy button for later use
+        self._smart_copy_button = smart_copy_button
 
     def _setup_custom_config_section(self, layout):
         """Setup the custom configuration section"""
@@ -288,6 +297,15 @@ class UIDConfigurationDialog(QDialog):
 
         self.preserve_relationships_cb.setChecked(self.uid_config.preserve_relationships)
         self.add_suffix_cb.setChecked(self.uid_config.add_derived_suffix)
+
+    def _set_default_preset(self):
+        """Set smart copy as the default preset after UI initialization"""
+        if hasattr(self, '_smart_copy_button') and self._smart_copy_button:
+            # Ensure it's checked
+            self._smart_copy_button.setChecked(True)
+            # Apply the preset configuration explicitly
+            self._on_preset_changed(self._smart_copy_button)
+            logging.debug("Applied smart copy as default preset")
 
     def get_configuration(self) -> UIDConfiguration:
         """Get the current UID configuration"""

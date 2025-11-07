@@ -10,7 +10,7 @@ import logging
 import pydicom
 from PyQt6.QtWidgets import QTableWidgetItem, QApplication
 from PyQt6.QtCore import QObject, pyqtSignal, Qt
-from PyQt6.QtGui import QPixmap, QImage
+from PyQt6.QtGui import QPixmap, QImage, QFont
 
 from fm_dicom.widgets.focus_aware import FocusAwareMessageBox, FocusAwareProgressDialog
 from fm_dicom.validation.validation_ui import run_validation
@@ -18,6 +18,7 @@ from fm_dicom.anonymization.anonymization_ui import run_anonymization
 from fm_dicom.tag_browser.tag_browser import TagSearchDialog, ValueEntryDialog
 from fm_dicom.dialogs.dicom_send_selection import DicomSendSelectionDialog
 from fm_dicom.dialogs.selection_dialogs import DicomSendDialog
+from fm_dicom.config.config_manager import get_favorite_tags
 
 
 class DicomManager(QObject):
@@ -42,7 +43,11 @@ class DicomManager(QObject):
         self._all_tag_rows = []  # For filtering
         self._has_unsaved_changes = False
         self._current_filter_text = ""  # Store current search filter
-        
+        self._favorite_tags = []  # Cache favorite tags from config
+
+        # Load favorite tags from config
+        self._load_favorite_tags()
+
         # Connect signals
         self.tag_table.itemChanged.connect(self._on_tag_changed)
     
@@ -148,8 +153,12 @@ class DicomManager(QObject):
                 logging.warning(f"Error processing tag {elem.tag}: {e}")
                 continue
         
-        # Sort by tag ID
-        self._all_tag_rows.sort(key=lambda x: x['display_row'][0])
+        # Sort by favorite status first, then by tag ID
+        # Favorites appear at top, then regular tags sorted by tag ID
+        self._all_tag_rows.sort(key=lambda x: (
+            not self._is_favorite_tag(x['display_row'][0]),  # False sorts before True, so favorites first
+            x['display_row'][0]  # Then sort by tag ID within each group
+        ))
         
         # Populate table
         self._refresh_tag_table()
@@ -177,22 +186,46 @@ class DicomManager(QObject):
             # Add matching row to table
             row_idx = self.tag_table.rowCount()
             self.tag_table.insertRow(row_idx)
-            
+
+            # Check if this is a favorite tag
+            is_favorite = self._is_favorite_tag(tag_id)
+
+            # Create table items with visual indicators for favorites
+            tag_id_item = QTableWidgetItem(f"★ {tag_id}" if is_favorite else tag_id)
+            desc_item = QTableWidgetItem(desc)
+            value_item = QTableWidgetItem(value)
+
+            # Apply bold font for favorite tags
+            if is_favorite:
+                bold_font = QFont()
+                bold_font.setBold(True)
+                tag_id_item.setFont(bold_font)
+                desc_item.setFont(bold_font)
+                value_item.setFont(bold_font)
+
+                # Set tooltip to indicate it's a favorite
+                tag_id_item.setToolTip("Favorite tag")
+                desc_item.setToolTip("Favorite tag")
+
             # Set table items
-            self.tag_table.setItem(row_idx, 0, QTableWidgetItem(tag_id))
-            self.tag_table.setItem(row_idx, 1, QTableWidgetItem(desc))
-            self.tag_table.setItem(row_idx, 2, QTableWidgetItem(value))
+            self.tag_table.setItem(row_idx, 0, tag_id_item)
+            self.tag_table.setItem(row_idx, 1, desc_item)
+            self.tag_table.setItem(row_idx, 2, value_item)
             
             # New value column
             new_value_item = QTableWidgetItem("")
             new_value_item.setData(Qt.ItemDataRole.UserRole, elem_obj)
-            
+
+            # Apply bold font for favorite tags
+            if is_favorite:
+                new_value_item.setFont(bold_font)
+
             # Make certain tags non-editable
-            if (elem_obj.tag == (0x7fe0, 0x0010) or 
+            if (elem_obj.tag == (0x7fe0, 0x0010) or
                 elem_obj.VR in ("OB", "OW", "UN", "SQ")):
                 new_value_item.setFlags(new_value_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 new_value_item.setToolTip("This tag cannot be edited")
-            
+
             self.tag_table.setItem(row_idx, 3, new_value_item)
         
         # Set column widths
@@ -214,6 +247,26 @@ class DicomManager(QObject):
             if hasattr(self.main_window, 'save_btn'):
                 self.main_window.save_btn.setEnabled(True)
             self.tag_data_changed.emit()
+
+    def _load_favorite_tags(self):
+        """Load favorite tags from configuration"""
+        try:
+            self._favorite_tags = get_favorite_tags(self.config)
+            logging.debug(f"Loaded {len(self._favorite_tags)} favorite tags from config")
+        except Exception as e:
+            logging.warning(f"Could not load favorite tags from config: {e}")
+            self._favorite_tags = []
+
+    def _is_favorite_tag(self, tag_id):
+        """Check if a tag ID is in the favorites list
+
+        Args:
+            tag_id (str): Tag ID in format like "(0010,0010)"
+
+        Returns:
+            bool: True if tag is a favorite
+        """
+        return tag_id in self._favorite_tags
     
     def save_tag_changes(self):
         """Save tag changes to DICOM files based on selected level"""

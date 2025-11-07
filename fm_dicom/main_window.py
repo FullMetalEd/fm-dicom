@@ -332,11 +332,13 @@ class MainWindow(QMainWindow, LayoutMixin):
             menu.addAction(duplicate_action)
 
             # Quick duplication presets
-            quick_instance_action = QAction("⚡ Quick Duplicate (New Instance UIDs)", self)
+            quick_instance_action = QAction("⚡ Quick Duplicate (Keep in same study/series)", self)
+            quick_instance_action.setToolTip("Creates duplicate instances within the same study and series - only generates new Instance UIDs")
             quick_instance_action.triggered.connect(lambda: self.tree_manager._quick_duplicate_instances())
             menu.addAction(quick_instance_action)
 
-            quick_all_action = QAction("🆕 Quick Duplicate (All New UIDs)", self)
+            quick_all_action = QAction("🆕 Quick Duplicate (Create new patient/study)", self)
+            quick_all_action.setToolTip("Creates completely independent copies with new Patient ID, Study UID, and Series UID")
             quick_all_action.triggered.connect(lambda: self.tree_manager._quick_duplicate_all_new())
             menu.addAction(quick_all_action)
 
@@ -1192,9 +1194,9 @@ class MainWindow(QMainWindow, LayoutMixin):
             )
         else:  # ZIP or ZIP with DICOMDIR
             output_path, _ = QFileDialog.getSaveFileName(
-                self, "Save Export As", 
+                self, "Save Export As",
                 os.path.join(self.config.get("default_export_dir", os.path.expanduser("~/Desktop")), "dicom_export.zip"),
-                "ZIP files (*.zip)"
+                "All Files (*);;ZIP files (*.zip)"
             )
         
         if not output_path:

@@ -288,13 +288,16 @@ class PerformanceResultsDialog(QDialog):
     def export_csv(self):
         """Export performance results to CSV"""
         # Create dialog and configure based on user preference
-        dialog = QFileDialog(self, "Export Performance Results", "performance_results.csv", "CSV Files (*.csv)")
+        dialog = QFileDialog(self, "Export Performance Results", "performance_results.csv", "All Files (*);;CSV Files (*.csv)")
         dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
         dialog.setDefaultSuffix("csv")
-        
+
         # Configure native dialog preference (check if parent has config)
         if hasattr(self.parent(), 'config') and not self.parent().config.get("file_picker_native", False):
             dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+
+        # Set "All Files" as default filter
+        dialog.selectNameFilter("All Files (*)")
         
         if dialog.exec():
             filenames = dialog.selectedFiles()
@@ -330,13 +333,16 @@ class PerformanceResultsDialog(QDialog):
     def export_report(self):
         """Export detailed performance report"""
         # Create dialog and configure based on user preference
-        dialog = QFileDialog(self, "Export Performance Report", "performance_report.txt", "Text Files (*.txt)")
+        dialog = QFileDialog(self, "Export Performance Report", "performance_report.txt", "All Files (*);;Text Files (*.txt)")
         dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
         dialog.setDefaultSuffix("txt")
-        
+
         # Configure native dialog preference (check if parent has config)
         if hasattr(self.parent(), 'config') and not self.parent().config.get("file_picker_native", False):
             dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+
+        # Set "All Files" as default filter
+        dialog.selectNameFilter("All Files (*)")
         
         if dialog.exec():
             filenames = dialog.selectedFiles()

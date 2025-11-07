@@ -459,7 +459,12 @@ class TreeManager(QObject):
                     file_path, ds = file_info
                 else:
                     file_path = file_info
-                    ds = pydicom.dcmread(file_path, stop_before_pixels=True)
+                    # Check memory items first (duplicated items) before reading from disk
+                    if file_path in self.memory_items:
+                        ds = self.memory_items[file_path]
+                        logging.debug(f"Loading duplicated item from memory: {file_path}")
+                    else:
+                        ds = pydicom.dcmread(file_path, stop_before_pixels=True)
                 
                 # Extract hierarchy information
                 patient_id = getattr(ds, "PatientID", "Unknown ID")
@@ -474,9 +479,14 @@ class TreeManager(QObject):
                 series_desc = getattr(ds, "SeriesDescription", "No Series Description")
                 series_label = f"{series_desc} [{series_uid}]"
                 
-                # Debug logging for first few files
-                if idx < 3:
-                    logging.debug(f"File {idx}: Patient={patient_label}, Study={study_label}, Series={series_label}")
+                # Debug logging for first few files and memory items
+                if idx < 3 or file_path in self.memory_items:
+                    item_type = "MEMORY" if file_path in self.memory_items else "DISK"
+                    logging.debug(f"File {idx} ({item_type}): Patient={patient_label}, Study={study_label}, Series={series_label}")
+                    if file_path in self.memory_items:
+                        logging.debug(f"  Memory item path: {file_path}")
+                        logging.debug(f"  Study UID: {study_uid}")
+                        logging.debug(f"  Series UID: {series_uid}")
                 
                 instance_number = getattr(ds, "InstanceNumber", None)
                 sop_uid = getattr(ds, "SOPInstanceUID", os.path.basename(file_path))
@@ -632,10 +642,13 @@ class TreeManager(QObject):
                         instance_item.setData(0, Qt.ItemDataRole.UserRole, instance_data['filepath'])
                         series_item.addChild(instance_item)
                         
-                        # Calculate file size
+                        # Calculate file size (skip for virtual/memory items)
                         try:
-                            file_size = os.path.getsize(instance_data['filepath'])
-                            total_size_bytes += file_size
+                            filepath = instance_data['filepath']
+                            # Only calculate size for files that exist on disk (not memory items)
+                            if filepath not in self.memory_items:
+                                file_size = os.path.getsize(filepath)
+                                total_size_bytes += file_size
                         except (OSError, KeyError):
                             pass  # Skip if file not accessible
         
@@ -862,14 +875,20 @@ class TreeManager(QObject):
             level = self._get_item_level(item)
             if level:
                 levels.add(level)
+                logging.info(f"[CONTEXT DEBUG] Item '{item.text(0)}' detected as level: {level}")
+
+        logging.info(f"[CONTEXT DEBUG] All detected levels: {levels}")
 
         # If mixed selection, return "mixed"
         if len(levels) > 1:
-            return "mixed"
+            result = "mixed"
         elif len(levels) == 1:
-            return list(levels)[0]
+            result = list(levels)[0]
         else:
-            return "instance"  # Default
+            result = "instance"  # Default
+
+        logging.info(f"[CONTEXT DEBUG] Final duplication level determined: {result}")
+        return result
 
     def _get_item_level(self, item):
         """Determine the hierarchy level of a tree item"""
@@ -881,13 +900,16 @@ class TreeManager(QObject):
             parent = parent.parent()
 
         if depth == 0:
-            return "patient"
+            result = "patient"
         elif depth == 1:
-            return "study"
+            result = "study"
         elif depth == 2:
-            return "series"
+            result = "series"
         else:
-            return "instance"
+            result = "instance"
+
+        logging.info(f"[DEPTH DEBUG] Item '{item.text(0)}' has depth {depth}, classified as: {result}")
+        return result
 
     def _duplicate_selected_items(self, duplication_level):
         """Duplicate selected items with user configuration"""
@@ -923,10 +945,22 @@ class TreeManager(QObject):
             if uid_config is None:
                 return  # User cancelled
 
-            # Perform duplication
-            duplicated_items = self.duplication_manager.duplicate_instances(
-                file_paths, uid_config
-            )
+            # Perform duplication using the appropriate method for the level
+            logging.info(f"[DUPLICATE DEBUG] Starting duplication at {duplication_level} level with {len(file_paths)} files")
+            logging.info(f"[DUPLICATE DEBUG] UID config passed to duplication: regenerate_study_uid={uid_config.regenerate_study_uid}")
+
+            if duplication_level == "patient":
+                logging.info(f"[DUPLICATE DEBUG] Calling duplicate_patient method")
+                duplicated_items = self.duplication_manager.duplicate_patient(file_paths, uid_config)
+            elif duplication_level == "study":
+                logging.info(f"[DUPLICATE DEBUG] Calling duplicate_study method")
+                duplicated_items = self.duplication_manager.duplicate_study(file_paths, uid_config)
+            elif duplication_level == "series":
+                logging.info(f"[DUPLICATE DEBUG] Calling duplicate_series method")
+                duplicated_items = self.duplication_manager.duplicate_series(file_paths, uid_config)
+            else:  # instance level or mixed
+                logging.info(f"[DUPLICATE DEBUG] Calling duplicate_instances method (level={duplication_level})")
+                duplicated_items = self.duplication_manager.duplicate_instances(file_paths, uid_config)
 
             # Success message will be handled by duplication_completed signal
             # Integration and tree refresh will be handled by signal handlers
