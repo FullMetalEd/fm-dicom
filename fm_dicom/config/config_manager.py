@@ -287,6 +287,7 @@ def load_config(config_path_override=None):
         "theme": "dark",
         "language": "en",
         "file_picker_native": False,  # False = use Python/Qt picker by default
+        "default_edit_level": "Series",  # Default editing level: "Instance", "Series", "Study", "Patient"
 
         # Performance optimization settings
         "performance": {
@@ -365,6 +366,14 @@ def load_config(config_path_override=None):
         elif final_config[key] is None and key in default_config_data:  # Key present but explicitly null
             final_config[key] = default_config_data[key]  # Revert to default
             print(f"Info (load_config): Path key '{key}' was null, reverted to default: {final_config[key]}", file=sys.stderr)
+
+    # Validate default_edit_level setting
+    valid_edit_levels = ["Instance", "Series", "Study", "Patient"]
+    if "default_edit_level" in final_config:
+        if final_config["default_edit_level"] not in valid_edit_levels:
+            print(f"Warning (load_config): Invalid default_edit_level '{final_config['default_edit_level']}'. "
+                  f"Valid options: {valid_edit_levels}. Using default: 'Series'", file=sys.stderr)
+            final_config["default_edit_level"] = "Series"
 
     if loaded_user_config is None:  # No config file found or loaded successfully
         print(f"INFO (load_config): No existing config found. Creating default at: {preferred_config_path}", file=sys.stderr)

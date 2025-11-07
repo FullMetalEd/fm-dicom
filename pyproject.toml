@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fm-dicom"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A basic wrapper for pydicom commands. Lets you edit DICOM tags, merge patients and then export/send the changes"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -34,3 +34,7 @@ test = [
 
 [project.scripts]
 fm-dicom = "fm_dicom.main:main"
+
+# Dynamic version configuration
+[tool.hatch.version]
+path = "fm_dicom/__version__.py"

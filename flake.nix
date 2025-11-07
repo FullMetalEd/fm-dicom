@@ -13,10 +13,14 @@
         pkgs = nixpkgs.legacyPackages.${system};
         nixglPkg = nixgl.packages.${system}.nixGLIntel;
 
+        # Read version from the Python version file to maintain single source of truth
+        versionFile = builtins.readFile ./fm_dicom/__version__.py;
+        version = builtins.head (builtins.match ".*__version__ = \"([^\"]+)\".*" versionFile);
+
         # Define the installable package using Python 3.12 consistently
         fm_dicom = pkgs.python312Packages.buildPythonApplication {
           pname = "fm-dicom";
-          version = "0.1.0";
+          version = version;
 
           src = ./.;
 

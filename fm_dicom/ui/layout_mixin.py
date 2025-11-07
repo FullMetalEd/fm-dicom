@@ -15,6 +15,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QPixmap, QImage, QIcon, QAction, QKeySequence
 from PyQt6.QtCore import Qt, QPoint, QSize
 
+from fm_dicom import __version__
+
 
 class LayoutMixin:
     """Mixin for setting up MainWindow layout and widgets - EXACT match to original"""
@@ -236,7 +238,7 @@ class LayoutMixin:
         
         self.edit_level_combo = QComboBox()
         self.edit_level_combo.addItems(["Instance", "Series", "Study", "Patient"])
-        self.edit_level_combo.setCurrentText("Series")
+        self.edit_level_combo.setCurrentText(self.config.get("default_edit_level", "Series"))
         self.edit_level_combo.setToolTip("Select the level at which tag changes will be applied")
         self.edit_level_combo.setStyleSheet("""
             QComboBox {
@@ -637,13 +639,13 @@ class LayoutMixin:
         export_selection_action.triggered.connect(self.save_as)
         export_menu.addAction(export_selection_action)
         
-        # Help Menu
-        help_menu = menubar.addMenu("&Help")
-        
+        # Version Menu (replaces Help menu)
+        version_menu = menubar.addMenu(f"&Version: {__version__}")
+
         about_action = QAction("&About", self)
         about_action.setStatusTip("About this application")
         about_action.triggered.connect(self._show_about)
-        help_menu.addAction(about_action)
+        version_menu.addAction(about_action)
         
         # Store references for enabling/disabling
         self.save_action = save_action  # Menu save action
@@ -681,10 +683,39 @@ class LayoutMixin:
         self.save_as()
     
     def _show_about(self):
-        """Show about dialog"""
+        """Show enhanced about dialog with comprehensive information"""
         from PyQt6.QtWidgets import QMessageBox
-        QMessageBox.about(self, "About FM DICOM Tag Editor", 
-                         "FM DICOM Tag Editor\n\nA modern DICOM file management and editing tool.")
+
+        about_text = f"""<h2>FM DICOM Tag Editor</h2>
+        <p><b>Version: {__version__}</b></p>
+
+        <p>A comprehensive DICOM file management and editing application built with PyQt6.</p>
+
+        <h3>Key Features:</h3>
+        <ul>
+            <li>🔍 <b>DICOM File Viewing:</b> Browse and examine DICOM files and directories</li>
+            <li>✏️ <b>Tag Editing:</b> Edit DICOM tags with real-time validation</li>
+            <li>🔒 <b>Anonymization:</b> Remove or modify patient information for privacy</li>
+            <li>✅ <b>Validation:</b> Comprehensive DICOM compliance checking</li>
+            <li>🌐 <b>Network Operations:</b> Send DICOM files via DICOM C-STORE protocol</li>
+            <li>📁 <b>Archive Support:</b> Direct ZIP archive browsing and editing</li>
+            <li>🎨 <b>Modern Interface:</b> Dark/light themes with intuitive layout</li>
+            <li>📊 <b>Hierarchical View:</b> Patient → Study → Series → Instance organization</li>
+            <li>🔄 <b>Duplication System:</b> Advanced DICOM data duplication with UID management</li>
+        </ul>
+
+        <h3>Technical Information:</h3>
+        <ul>
+            <li><b>Framework:</b> PyQt6 with Qt6 integration</li>
+            <li><b>DICOM Library:</b> pydicom + pynetdicom</li>
+            <li><b>Image Processing:</b> Pillow + GDCM for JPEG2000 support</li>
+            <li><b>Platform:</b> Cross-platform (Linux, Windows, macOS)</li>
+        </ul>
+
+        <p><i>Designed for medical professionals, researchers, and DICOM developers.</i></p>
+        """
+
+        QMessageBox.about(self, f"About FM DICOM Tag Editor v{__version__}", about_text)
     
     def enable_save_actions(self, enabled=True):
         """Enable or disable both menu and toolbar save actions"""

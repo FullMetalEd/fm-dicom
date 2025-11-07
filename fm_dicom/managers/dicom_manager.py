@@ -304,7 +304,9 @@ class DicomManager(QObject):
                 original_elem = new_value_item.data(Qt.ItemDataRole.UserRole)
 
                 try:
-                    group_hex, elem_hex = tag_id_str[1:-1].split(",")
+                    # Strip favorite tag star symbol and whitespace before parsing
+                    clean_tag_id = tag_id_str.replace("★", "").strip()
+                    group_hex, elem_hex = clean_tag_id[1:-1].split(",")
                     tag_tuple = (int(group_hex, 16), int(elem_hex, 16))
                     
                     edits.append({
