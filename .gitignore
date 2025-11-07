@@ -177,3 +177,7 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+/msi
+msi/fm-dicom.aip
+msi/fm-dicom-SetupFiles/fm-dicom.msi
+msi/fm-dicom-cache/cacheIndex.txt
