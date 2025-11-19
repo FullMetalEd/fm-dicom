@@ -26,6 +26,7 @@ If there is something you think I should add  or maybe something you think needs
 - Save changes back to DICOM files/zip/dicomdir & zip file.
 - Basic Image viewer
 - Support for JPEG2000, and if dicom sending to a pacs that doesn't support that format then it will be converted automatically and resent.
+- Modern Aurora UI theme with refreshed typography, rounded panels, and dark/light/Catppuccin Macchiato modes.
 - Cross-platform support (Linux, Windows)
 - Nix/NixOS support for reproducible development and deployment
 

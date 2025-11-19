@@ -16,6 +16,7 @@ from PyQt6.QtGui import QPixmap, QImage, QIcon, QAction, QKeySequence
 from PyQt6.QtCore import Qt, QPoint, QSize
 
 from fm_dicom import __version__
+from fm_dicom.ui.icon_loader import themed_icon
 
 
 class LayoutMixin:
@@ -28,8 +29,11 @@ class LayoutMixin:
         w, h = self.config.get("window_size", [1200, 800])
         self.resize(w, h)
         central = QWidget()
+        central.setObjectName("CentralWidget")
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(12)
 
         # Modern Menu Bar
         self.setup_menu_bar()
@@ -39,15 +43,23 @@ class LayoutMixin:
         toolbar.setIconSize(QSize(24, 24))  # Slightly larger for better visibility
         self.addToolBar(toolbar)
 
+        style = self.style()
+
         # Essential file operations
-        open_icon = self.style().standardIcon(self.style().StandardPixmap.SP_DialogOpenButton)
+        open_icon = themed_icon(
+            "open-file",
+            style.standardIcon(style.StandardPixmap.SP_DialogOpenButton)
+        )
         act_open = QAction(open_icon, "Open File", self)
         act_open.setShortcut(QKeySequence.StandardKey.Open)
         act_open.setToolTip("Open a DICOM file (Ctrl+O)")
         act_open.triggered.connect(self.open_file)
         toolbar.addAction(act_open)
 
-        open_dir_icon = self.style().standardIcon(self.style().StandardPixmap.SP_DirOpenIcon)
+        open_dir_icon = themed_icon(
+            "open-folder",
+            style.standardIcon(style.StandardPixmap.SP_DirOpenIcon)
+        )
         act_open_dir = QAction(open_dir_icon, "Open Directory", self)
         act_open_dir.setShortcut(QKeySequence("Ctrl+Shift+O"))
         act_open_dir.setToolTip("Open a directory (Ctrl+Shift+O)")
@@ -56,24 +68,11 @@ class LayoutMixin:
 
         toolbar.addSeparator()
 
-        # Add File (append to existing files)
-        add_icon = self.style().standardIcon(self.style().StandardPixmap.SP_DialogOpenButton)
-        act_add_file = QAction(add_icon, "Add File", self)
-        act_add_file.setShortcut(QKeySequence("Ctrl+Shift+A"))
-        act_add_file.setToolTip("Add DICOM file to currently loaded files (Ctrl+Shift+A)")
-        act_add_file.triggered.connect(self.append_file)
-        toolbar.addAction(act_add_file)
-
-        # Add Directory (append to existing files)
-        add_dir_icon = self.style().standardIcon(self.style().StandardPixmap.SP_DirOpenIcon)
-        act_add_dir = QAction(add_dir_icon, "Add Directory", self)
-        act_add_dir.setShortcut(QKeySequence("Ctrl+Shift+D"))
-        act_add_dir.setToolTip("Add directory to currently loaded files (Ctrl+Shift+D)")
-        act_add_dir.triggered.connect(self.append_directory)
-        toolbar.addAction(act_add_dir)
-
         # Save changes
-        save_icon = self.style().standardIcon(self.style().StandardPixmap.SP_DialogSaveButton)
+        save_icon = themed_icon(
+            "save",
+            style.standardIcon(style.StandardPixmap.SP_DialogSaveButton)
+        )
         self.toolbar_save_action = QAction(save_icon, "Save Changes", self)
         self.toolbar_save_action.setShortcut(QKeySequence.StandardKey.Save)
         self.toolbar_save_action.setToolTip("Save tag changes (Ctrl+S)")
@@ -84,7 +83,10 @@ class LayoutMixin:
         toolbar.addSeparator()
 
         # Tree refresh
-        refresh_icon = self.style().standardIcon(self.style().StandardPixmap.SP_BrowserReload)
+        refresh_icon = themed_icon(
+            "refresh",
+            style.standardIcon(style.StandardPixmap.SP_BrowserReload)
+        )
         act_refresh = QAction(refresh_icon, "Refresh", self)
         act_refresh.setShortcut(QKeySequence.StandardKey.Refresh)
         act_refresh.setToolTip("Refresh tree from disk (F5)")
@@ -94,14 +96,20 @@ class LayoutMixin:
         toolbar.addSeparator()
 
         # Logs and Settings
-        logs_icon = self.style().standardIcon(self.style().StandardPixmap.SP_FileDialogDetailedView)
+        logs_icon = themed_icon(
+            "logs",
+            style.standardIcon(style.StandardPixmap.SP_MessageBoxInformation)
+        )
         act_show_logs = QAction(logs_icon, "Show Logs", self)
         act_show_logs.setShortcut(QKeySequence("Ctrl+L"))
         act_show_logs.setToolTip("View application logs (Ctrl+L)")
         act_show_logs.triggered.connect(self.show_log_viewer)
         toolbar.addAction(act_show_logs)
 
-        settings_icon = self.style().standardIcon(self.style().StandardPixmap.SP_ComputerIcon)
+        settings_icon = themed_icon(
+            "settings",
+            style.standardIcon(style.StandardPixmap.SP_ComputerIcon)
+        )
         act_settings = QAction(settings_icon, "Settings", self)
         act_settings.setShortcut(QKeySequence.StandardKey.Preferences)
         act_settings.setToolTip("Open preferences")
@@ -110,32 +118,18 @@ class LayoutMixin:
 
         # Main Splitter - EXACT match to original
         main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        main_splitter.setHandleWidth(12)
+        main_splitter.setChildrenCollapsible(False)
         left_widget = QWidget()
+        left_widget.setObjectName("SurfacePanel")
         left_layout = QVBoxLayout(left_widget)
-        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setContentsMargins(12, 12, 12, 12)
+        left_layout.setSpacing(12)
 
         tree_search_layout = QHBoxLayout()
         self.tree_search_bar = QLineEdit()
         self.tree_search_bar.setPlaceholderText("Search patients/studies/series/instances...")
         self.tree_search_bar.textChanged.connect(self.filter_tree_items)
-        # Dark theme styling for tree search bar
-        self.tree_search_bar.setStyleSheet("""
-            QLineEdit {
-                background-color: #2c2f33;
-                color: #f5f5f5;
-                border: 1px solid #444;
-                border-radius: 4px;
-                padding: 6px 8px;
-                font-size: 13px;
-            }
-            QLineEdit:focus {
-                border: 1px solid #508cff;
-                background-color: #23272a;
-            }
-            QLineEdit::placeholder {
-                color: #99aab5;
-            }
-        """)
         tree_search_layout.addWidget(self.tree_search_bar)
         left_layout.addLayout(tree_search_layout)
 
@@ -156,38 +150,27 @@ class LayoutMixin:
         left_layout.addWidget(self.preview_toggle)
 
         self.image_label = QLabel()
+        self.image_label.setObjectName("ImagePreview")
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.image_label.setMinimumHeight(256)
         self.image_label.setVisible(show_image_preview)  # Set initial visibility based on config
         self.image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        if show_image_preview:
+            self.image_label.setText("Select an instance to preview")
+        else:
+            self.image_label.setText("Image preview disabled")
         left_layout.addWidget(self.image_label)
         main_splitter.addWidget(left_widget)
 
         right_widget = QWidget()
+        right_widget.setObjectName("SurfacePanel")
         right_layout = QVBoxLayout(right_widget)
-        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setContentsMargins(12, 12, 12, 12)
+        right_layout.setSpacing(12)
 
         self.search_bar = QLineEdit()
         self.search_bar.setPlaceholderText("Search tags by ID or description...")
         self.search_bar.textChanged.connect(self.filter_tag_table)
-        # Dark theme styling for tag search bar
-        self.search_bar.setStyleSheet("""
-            QLineEdit {
-                background-color: #2c2f33;
-                color: #f5f5f5;
-                border: 1px solid #444;
-                border-radius: 4px;
-                padding: 6px 8px;
-                font-size: 13px;
-            }
-            QLineEdit:focus {
-                border: 1px solid #508cff;
-                background-color: #23272a;
-            }
-            QLineEdit::placeholder {
-                color: #99aab5;
-            }
-        """)
         right_layout.addWidget(self.search_bar)
 
         self.tag_table = QTableWidget()
@@ -200,22 +183,6 @@ class LayoutMixin:
         self.tag_table.horizontalHeader().setStretchLastSection(True)
         self.tag_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.tag_table.setAlternatingRowColors(True)
-        # Original stylesheet
-        self.tag_table.setStyleSheet("""
-            QTableWidget {
-                background-color: #23272a;
-                alternate-background-color: #2c2f33;
-                color: #f5f5f5;
-                selection-background-color: #508cff;
-                selection-color: #fff;
-                gridline-color: #444;
-            }
-            QHeaderView::section {
-                background-color: #202225;
-                color: #f5f5f5;
-                font-weight: bold;
-            }
-        """)
         self.tag_table.cellActivated.connect(self._populate_new_value_on_edit)
         self.tag_table.cellClicked.connect(self._populate_new_value_on_edit)
         # Add context menu support
@@ -230,44 +197,27 @@ class LayoutMixin:
 
         # Compact Edit Level Control Bar (replacing button groups)
         edit_control_layout = QHBoxLayout()
+        edit_control_layout.setContentsMargins(12, 4, 12, 4)
+        edit_control_layout.setSpacing(12)
         
         # Edit level selector with label
         edit_level_label = QLabel("Edit Level:")
-        edit_level_label.setStyleSheet("font-weight: bold; color: #f5f5f5;")
+        edit_level_label.setObjectName("FormLabel")
         edit_control_layout.addWidget(edit_level_label)
         
         self.edit_level_combo = QComboBox()
         self.edit_level_combo.addItems(["Instance", "Series", "Study", "Patient"])
         self.edit_level_combo.setCurrentText(self.config.get("default_edit_level", "Series"))
         self.edit_level_combo.setToolTip("Select the level at which tag changes will be applied")
-        self.edit_level_combo.setStyleSheet("""
-            QComboBox {
-                background-color: #2c2f33;
-                color: #f5f5f5;
-                border: 1px solid #444;
-                border-radius: 4px;
-                padding: 4px 8px;
-                min-width: 80px;
-            }
-            QComboBox::drop-down {
-                border: none;
-            }
-            QComboBox::down-arrow {
-                image: none;
-                border-left: 4px solid transparent;
-                border-right: 4px solid transparent;
-                border-top: 4px solid #f5f5f5;
-            }
-        """)
         edit_control_layout.addWidget(self.edit_level_combo)
         
         edit_control_layout.addStretch()  # Push everything to the left
         
         # Create the control bar widget
         edit_control_bar = QWidget()
+        edit_control_bar.setObjectName("ControlBar")
         edit_control_bar.setLayout(edit_control_layout)
         edit_control_bar.setMaximumHeight(40)
-        edit_control_bar.setStyleSheet("background-color: #23272a; border-top: 1px solid #444;")
         layout.addWidget(edit_control_bar)
         
         # Create placeholder buttons for compatibility (hidden/unused)
@@ -293,74 +243,39 @@ class LayoutMixin:
 
         # Enhanced Status Bar
         self.status_bar = QStatusBar()
+        self.status_bar.setObjectName("PrimaryStatusBar")
         self.setStatusBar(self.status_bar)
-        
-        # Style the status bar
-        self.status_bar.setStyleSheet("""
-            QStatusBar {
-                background-color: #2c2f33;
-                color: #f5f5f5;
-                border-top: 1px solid #444;
-                font-size: 12px;
-            }
-            QStatusBar::item {
-                border: none;
-            }
-        """)
         
         # Left: Current operation status
         self.status_bar.showMessage("Ready")
         
         # Center: File count and selection info
         self.file_info_label = QLabel("No files loaded")
-        self.file_info_label.setStyleSheet("color: #b9bbbe; margin: 0 10px;")
         self.status_bar.addPermanentWidget(self.file_info_label)
         
         # Right: Progress indicator (initially hidden)
         self.progress_label = QLabel("")
-        self.progress_label.setStyleSheet("color: #43b581; margin: 0 10px;")
         self.progress_label.setVisible(False)
         self.status_bar.addPermanentWidget(self.progress_label)
 
         # Enhanced Summary Display (replacing simple summary label)
         self.summary_display = QWidget()
+        self.summary_display.setObjectName("SummaryBar")
         self.summary_display.setMaximumHeight(35)
         summary_layout = QHBoxLayout(self.summary_display)
         summary_layout.setContentsMargins(10, 5, 10, 5)
         
         # Summary text
         self.summary_label = QLabel("No DICOM files loaded")
-        self.summary_label.setStyleSheet("""
-            QLabel {
-                background: transparent;
-                color: #f5f5f5;
-                font-weight: bold;
-                font-size: 13px;
-            }
-        """)
+        self.summary_label.setObjectName("SummaryLabel")
         summary_layout.addWidget(self.summary_label)
         
         summary_layout.addStretch()
         
         # Quick stats display
         self.stats_label = QLabel("")
-        self.stats_label.setStyleSheet("""
-            QLabel {
-                background: transparent;
-                color: #b9bbbe;
-                font-size: 11px;
-            }
-        """)
+        self.stats_label.setObjectName("SummaryStats")
         summary_layout.addWidget(self.stats_label)
-        
-        # Style the summary display
-        self.summary_display.setStyleSheet("""
-            QWidget {
-                background-color: #36393f;
-                border-top: 1px solid #444;
-                border-bottom: 1px solid #222;
-            }
-        """)
         
         layout.addWidget(self.summary_display)
 

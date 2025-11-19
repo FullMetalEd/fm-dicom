@@ -208,13 +208,10 @@ class FileDialogManager:
     def open_file_dialog(self, parent: QWidget, title: str, start_dir: str,
                         filter_str: str) -> Optional[str]:
         """Open file dialog with portal integration"""
-        # Check environment and warn if needed
+        # Log environment diagnostics instead of interrupting the user with a dialog
         warnings = self._check_qt_environment()
         if warnings:
-            from fm_dicom.widgets.focus_aware import FocusAwareMessageBox
-            warning_text = "Qt Environment Issues Detected:\n\n" + "\n".join(f"• {w}" for w in warnings)
-            warning_text += "\n\nFile dialogs may not use your system file manager."
-            FocusAwareMessageBox.warning(parent, "Environment Warning", warning_text)
+            logging.debug("Qt environment warnings: %s", "; ".join(warnings))
         
         # If user wants native and we're on Linux, try to use actual system file manager
         native_enabled = self.config.get('file_picker_native', False)

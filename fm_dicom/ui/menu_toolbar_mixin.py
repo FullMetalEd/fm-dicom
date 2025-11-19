@@ -6,8 +6,10 @@ keeping UI setup logic organized and reusable.
 """
 
 from PyQt6.QtWidgets import QToolBar, QMenu
-from PyQt6.QtGui import QAction, QIcon
+from PyQt6.QtGui import QAction, QActionGroup
 from PyQt6.QtCore import QSize
+
+from fm_dicom.ui.icon_loader import themed_icon
 
 
 class MenuToolbarMixin:
@@ -131,18 +133,23 @@ class MenuToolbarMixin:
         
         # Theme submenu
         theme_menu = view_menu.addMenu("&Theme")
+        current_theme = self.config.get("theme", "dark")
+        self.theme_actions = {}
+        theme_group = QActionGroup(self)
+        theme_group.setExclusive(True)
         
-        dark_theme_action = QAction("&Dark", self)
-        dark_theme_action.setCheckable(True)
-        dark_theme_action.setChecked(self.config.get("theme", "dark") == "dark")
-        dark_theme_action.triggered.connect(lambda: self.apply_theme("dark"))
-        theme_menu.addAction(dark_theme_action)
-        
-        light_theme_action = QAction("&Light", self)
-        light_theme_action.setCheckable(True)
-        light_theme_action.setChecked(self.config.get("theme", "dark") == "light")
-        light_theme_action.triggered.connect(lambda: self.apply_theme("light"))
-        theme_menu.addAction(light_theme_action)
+        for theme_key, label in (
+            ("dark", "&Dark"),
+            ("light", "&Light"),
+            ("catppuccin", "&Catppuccin (Macchiato)"),
+        ):
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setChecked(current_theme == theme_key)
+            action.triggered.connect(lambda checked, key=theme_key: checked and self.apply_theme(key))
+            theme_group.addAction(action)
+            theme_menu.addAction(action)
+            self.theme_actions[theme_key] = action
     
     def _setup_tools_menu(self, menubar):
         """Setup Tools menu"""
@@ -215,13 +222,43 @@ class MenuToolbarMixin:
         toolbar.setIconSize(QSize(20, 20))
         self.addToolBar(toolbar)
         
-        # Get standard icons
-        open_icon = self.style().standardIcon(self.style().StandardPixmap.SP_DialogOpenButton)
-        save_icon = self.style().standardIcon(self.style().StandardPixmap.SP_DialogSaveButton)
-        delete_icon = self.style().standardIcon(self.style().StandardPixmap.SP_TrashIcon)
-        merge_icon = self.style().standardIcon(self.style().StandardPixmap.SP_FileDialogNewFolder)
-        expand_icon = self.style().standardIcon(self.style().StandardPixmap.SP_ArrowDown)
-        collapse_icon = self.style().standardIcon(self.style().StandardPixmap.SP_ArrowUp)
+        style = self.style()
+        open_icon = themed_icon(
+            "open-file",
+            style.standardIcon(style.StandardPixmap.SP_DialogOpenButton)
+        )
+        open_dir_icon = themed_icon(
+            "open-folder",
+            style.standardIcon(style.StandardPixmap.SP_DirOpenIcon)
+        )
+        delete_icon = themed_icon(
+            "delete",
+            style.standardIcon(style.StandardPixmap.SP_TrashIcon)
+        )
+        expand_icon = themed_icon(
+            "expand",
+            style.standardIcon(style.StandardPixmap.SP_ArrowDown)
+        )
+        collapse_icon = themed_icon(
+            "collapse",
+            style.standardIcon(style.StandardPixmap.SP_ArrowUp)
+        )
+        export_icon = themed_icon(
+            "export",
+            style.standardIcon(style.StandardPixmap.SP_DialogSaveButton)
+        )
+        send_icon = themed_icon(
+            "send",
+            style.standardIcon(style.StandardPixmap.SP_ArrowForward)
+        )
+        validate_icon = themed_icon(
+            "validate",
+            style.standardIcon(style.StandardPixmap.SP_DialogApplyButton)
+        )
+        anonymize_icon = themed_icon(
+            "anonymize",
+            style.standardIcon(style.StandardPixmap.SP_DialogNoButton)
+        )
         
         # Open File
         act_open = QAction(open_icon, "Open", self)
@@ -230,28 +267,11 @@ class MenuToolbarMixin:
         toolbar.addAction(act_open)
         
         # Open Directory
-        act_open_dir = QAction(QIcon.fromTheme("folder"), "Open Directory", self)
+        act_open_dir = QAction(open_dir_icon, "Open Directory", self)
         act_open_dir.setToolTip("Open directory")
         act_open_dir.triggered.connect(self.open_directory)
         toolbar.addAction(act_open_dir)
 
-        toolbar.addSeparator()
-
-        # Add File (append)
-        add_icon = self.style().standardIcon(self.style().StandardPixmap.SP_DialogOpenButton)
-        act_add_file = QAction(add_icon, "Add File", self)
-        act_add_file.setToolTip("Add DICOM file to currently loaded files")
-        act_add_file.triggered.connect(self.append_file)
-        toolbar.addAction(act_add_file)
-
-        # Add Directory (append)
-        act_add_dir = QAction(QIcon.fromTheme("folder-new"), "Add Directory", self)
-        act_add_dir.setToolTip("Add directory to currently loaded files")
-        act_add_dir.triggered.connect(self.append_directory)
-        toolbar.addAction(act_add_dir)
-
-        toolbar.addSeparator()
-        
         # Delete
         act_delete = QAction(delete_icon, "Delete", self)
         act_delete.setToolTip("Delete selected items")
@@ -275,13 +295,13 @@ class MenuToolbarMixin:
         toolbar.addSeparator()
         
         # Export
-        act_export = QAction(save_icon, "Export", self)
+        act_export = QAction(export_icon, "Export", self)
         act_export.setToolTip("Export selected files")
         act_export.triggered.connect(self.export_files)
         toolbar.addAction(act_export)
         
         # DICOM Send
-        act_send = QAction("Send", self)
+        act_send = QAction(send_icon, "Send", self)
         act_send.setToolTip("Send DICOM files")
         act_send.triggered.connect(self.show_dicom_send_dialog)
         toolbar.addAction(act_send)
@@ -289,13 +309,13 @@ class MenuToolbarMixin:
         toolbar.addSeparator()
         
         # Validation
-        act_validate = QAction("Validate", self)
+        act_validate = QAction(validate_icon, "Validate", self)
         act_validate.setToolTip("Validate selected files")
         act_validate.triggered.connect(self.validate_selected_items)
         toolbar.addAction(act_validate)
         
         # Anonymize
-        act_anonymize = QAction("Anonymize", self)
+        act_anonymize = QAction(anonymize_icon, "Anonymize", self)
         act_anonymize.setToolTip("Anonymize selected files")
         act_anonymize.triggered.connect(self.anonymize_selected_items)
         toolbar.addAction(act_anonymize)
@@ -305,17 +325,26 @@ class MenuToolbarMixin:
     
     def apply_theme(self, theme_name):
         """Apply a theme and update config"""
-        from fm_dicom.themes.theme_manager import set_dark_palette, set_light_palette
+        from fm_dicom.themes.theme_manager import (
+            set_dark_palette,
+            set_light_palette,
+            set_catppuccin_palette,
+        )
         from PyQt6.QtWidgets import QApplication
         
-        if theme_name == "dark":
-            set_dark_palette(QApplication.instance())
-        else:
-            set_light_palette(QApplication.instance())
+        theme_map = {
+            "dark": set_dark_palette,
+            "light": set_light_palette,
+            "catppuccin": set_catppuccin_palette,
+        }
+        setter = theme_map.get(theme_name, set_dark_palette)
+        setter(QApplication.instance())
         
-        # Update config
         self.config["theme"] = theme_name
-        # Note: Would need to implement config saving in a manager class
+        
+        if hasattr(self, "theme_actions"):
+            for key, action in self.theme_actions.items():
+                action.setChecked(key == theme_name)
     
     def show_about_dialog(self):
         """Show about dialog"""

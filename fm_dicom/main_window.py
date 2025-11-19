@@ -19,7 +19,11 @@ from PyQt6.QtCore import Qt, QPoint, QTimer
 # Configuration and setup imports
 from fm_dicom.config.config_manager import load_config, setup_logging, get_default_user_dir, get_config_path
 from fm_dicom.config.dicom_setup import setup_gdcm_integration
-from fm_dicom.themes.theme_manager import set_light_palette, set_dark_palette
+from fm_dicom.themes.theme_manager import (
+    set_light_palette,
+    set_dark_palette,
+    set_catppuccin_palette,
+)
 
 # UI Layout - EXACT match to original
 from fm_dicom.ui.layout_mixin import LayoutMixin
@@ -114,11 +118,24 @@ class MainWindow(QMainWindow, LayoutMixin):
     def _apply_theme(self):
         """Apply theme from configuration"""
         QApplication.setStyle("Fusion")
-        current_theme = self.config.get("theme", "dark").lower()
-        if current_theme == "dark":
-            set_dark_palette(QApplication.instance())
-        else:
-            set_light_palette(QApplication.instance())
+        current_theme = (self.config.get("theme", "dark") or "dark").lower()
+
+        theme_aliases = {
+            "catppuccin": "catppuccin",
+            "catppuccin macchiato": "catppuccin",
+            "catpuccin": "catppuccin",
+            "catpuchin": "catppuccin",
+            "catpuccin macchiato": "catppuccin",
+        }
+        normalized_theme = theme_aliases.get(current_theme, current_theme)
+
+        theme_map = {
+            "dark": set_dark_palette,
+            "light": set_light_palette,
+            "catppuccin": set_catppuccin_palette,
+        }
+        theme_setter = theme_map.get(normalized_theme, set_dark_palette)
+        theme_setter(QApplication.instance())
     
     def _setup_template_manager(self):
         """Setup anonymization template manager"""
