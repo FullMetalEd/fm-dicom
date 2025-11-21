@@ -418,6 +418,8 @@ class DicomManager(QObject):
             
         # Refresh tree to show updated patient names and other hierarchy changes
         if hasattr(self.main_window, 'tree_manager') and self.main_window.tree_manager:
+            if hasattr(self.main_window, "prepare_for_tree_refresh"):
+                self.main_window.prepare_for_tree_refresh()
             self.main_window.tree_manager.refresh_tree()
             logging.info("Tree refreshed after tag save")
     
@@ -604,6 +606,8 @@ class DicomManager(QObject):
             # Refresh tree to show updated patient names and other changes
             if result is not None:  # Anonymization completed successfully
                 if hasattr(self.main_window, 'tree_manager') and self.main_window.tree_manager:
+                    if hasattr(self.main_window, "prepare_for_tree_refresh"):
+                        self.main_window.prepare_for_tree_refresh()
                     self.main_window.tree_manager.refresh_tree()
                     logging.info("Tree refreshed after anonymization")
         except Exception as e:
@@ -1127,6 +1131,8 @@ class DicomManager(QObject):
             
         # Refresh tree to show updated patient names and other hierarchy changes
         if hasattr(self.main_window, 'tree_manager') and self.main_window.tree_manager:
+            if hasattr(self.main_window, "prepare_for_tree_refresh"):
+                self.main_window.prepare_for_tree_refresh()
             self.main_window.tree_manager.refresh_tree()
             logging.info("Tree refreshed after batch edit")
     

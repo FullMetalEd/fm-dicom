@@ -584,6 +584,8 @@ class LayoutMixin:
     def _refresh_tree_view(self):
         """Refresh tree view from menu"""
         if hasattr(self, 'tree_manager') and self.tree_manager:
+            if hasattr(self, "prepare_for_tree_refresh"):
+                self.prepare_for_tree_refresh()
             self.tree_manager.refresh_tree()
     
     def _open_tag_search(self):

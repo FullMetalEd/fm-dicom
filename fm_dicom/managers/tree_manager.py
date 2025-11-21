@@ -17,6 +17,8 @@ from fm_dicom.utils.threaded_processor import ThreadedDicomProcessor, DicomProce
 from fm_dicom.managers.duplication_manager import DuplicationManager, UIDConfiguration
 from fm_dicom.dialogs.uid_configuration_dialog import UIDConfigurationDialog
 
+TREE_PATH_ROLE = Qt.ItemDataRole.UserRole + 1
+
 
 class TreeManager(QObject):
     """Manager class for tree operations"""
@@ -92,6 +94,118 @@ class TreeManager(QObject):
         self.patient_icon = style.standardIcon(style.StandardPixmap.SP_ComputerIcon)
         self.study_icon = style.standardIcon(style.StandardPixmap.SP_DirIcon)
         self.series_icon = style.standardIcon(style.StandardPixmap.SP_FileDialogDetailedView)
+
+    def get_expanded_paths(self):
+        """Return list of tree paths that are currently expanded"""
+        expanded = []
+
+        def visit(item):
+            if item is None:
+                return
+            path = item.data(0, TREE_PATH_ROLE)
+            if path and item.isExpanded():
+                expanded.append(tuple(path))
+            for i in range(item.childCount()):
+                visit(item.child(i))
+
+        for i in range(self.tree.topLevelItemCount()):
+            visit(self.tree.topLevelItem(i))
+        return expanded
+
+    def restore_expanded_paths(self, paths):
+        """Re-expand tree nodes matching the provided paths"""
+        if not paths:
+            return
+
+        targets = {tuple(p) for p in paths if p}
+        if not targets:
+            return
+
+        self.tree.collapseAll()
+
+        def visit(item):
+            if item is None:
+                return
+            path = item.data(0, TREE_PATH_ROLE)
+            if path in targets:
+                item.setExpanded(True)
+                parent = item.parent()
+                while parent:
+                    parent.setExpanded(True)
+                    parent = parent.parent()
+            for i in range(item.childCount()):
+                visit(item.child(i))
+
+        for i in range(self.tree.topLevelItemCount()):
+            visit(self.tree.topLevelItem(i))
+
+    def get_primary_selected_path(self):
+        """Return the path tuple for the first selected tree item"""
+        selected_items = self.tree.selectedItems()
+        for item in selected_items:
+            path = item.data(0, TREE_PATH_ROLE)
+            if path:
+                return tuple(path)
+        return None
+
+    def select_item_by_file(self, file_path):
+        """Select the tree item corresponding to a specific file path"""
+        if not file_path:
+            return False
+
+        target = self._find_item_by(lambda item: item.data(0, Qt.ItemDataRole.UserRole) == file_path)
+        if target:
+            self._focus_on_item(target)
+            return True
+        return False
+
+    def select_item_by_path(self, path_tuple):
+        """Select the tree item matching the provided path tuple"""
+        if not path_tuple:
+            return False
+
+        target = self._find_item_by(lambda item: item.data(0, TREE_PATH_ROLE) == tuple(path_tuple))
+        if target:
+            self._focus_on_item(target)
+            return True
+        return False
+
+    def _find_item_by(self, predicate):
+        """Find the first tree item that satisfies the predicate"""
+        def visit(item):
+            if item is None:
+                return None
+            try:
+                if predicate(item):
+                    return item
+            except Exception:
+                pass
+            for i in range(item.childCount()):
+                found = visit(item.child(i))
+                if found:
+                    return found
+            return None
+
+        for i in range(self.tree.topLevelItemCount()):
+            found_item = visit(self.tree.topLevelItem(i))
+            if found_item:
+                return found_item
+        return None
+
+    def _focus_on_item(self, item):
+        """Ensure the specified tree item is selected and visible"""
+        if item is None:
+            return
+
+        parent = item.parent()
+        while parent:
+            parent.setExpanded(True)
+            parent = parent.parent()
+
+        self.tree.clearSelection()
+        self.tree.setCurrentItem(item)
+        item.setSelected(True)
+        self.tree.scrollToItem(item)
 
     # Context menu integration handled by main_window's show_tree_context_menu
     
@@ -341,6 +455,9 @@ class TreeManager(QObject):
         """Refresh the tree with current loaded files, showing progress"""
         if not self.loaded_files:
             return
+
+        if hasattr(self.main_window, "prepare_for_tree_refresh"):
+            self.main_window.prepare_for_tree_refresh()
             
         # Show progress dialog
         progress = FocusAwareProgressDialog("Refreshing tree...", "Cancel", 0, 100, self.main_window)
@@ -609,6 +726,7 @@ class TreeManager(QObject):
             patient_item = QTreeWidgetItem([patient, "", "", ""])
             patient_item.setIcon(0, self.patient_icon)
             patient_item.setData(0, Qt.ItemDataRole.UserRole, None)  # No file for patient
+            patient_item.setData(0, TREE_PATH_ROLE, (patient,))
             self.tree.addTopLevelItem(patient_item)
             
             total_studies += len(studies)
@@ -618,6 +736,7 @@ class TreeManager(QObject):
                 study_item = QTreeWidgetItem([patient, study, "", ""])
                 study_item.setIcon(0, self.study_icon)
                 study_item.setData(0, Qt.ItemDataRole.UserRole, None)  # No file for study
+                study_item.setData(0, TREE_PATH_ROLE, (patient, study))
                 patient_item.addChild(study_item)
                 
                 total_series += len(series_dict)
@@ -627,6 +746,7 @@ class TreeManager(QObject):
                     series_item = QTreeWidgetItem([patient, study, series, ""])
                     series_item.setIcon(0, self.series_icon)
                     series_item.setData(0, Qt.ItemDataRole.UserRole, None)  # No file for series
+                    series_item.setData(0, TREE_PATH_ROLE, (patient, study, series))
                     study_item.addChild(series_item)
                     
                     total_instances += len(instances)
@@ -640,6 +760,7 @@ class TreeManager(QObject):
                     for instance_label, instance_data in sorted_instances:
                         instance_item = QTreeWidgetItem([patient, study, series, instance_label])
                         instance_item.setData(0, Qt.ItemDataRole.UserRole, instance_data['filepath'])
+                        instance_item.setData(0, TREE_PATH_ROLE, (patient, study, series, instance_label))
                         series_item.addChild(instance_item)
                         
                         # Calculate file size (skip for virtual/memory items)
@@ -652,9 +773,10 @@ class TreeManager(QObject):
                         except (OSError, KeyError):
                             pass  # Skip if file not accessible
         
-        # Expand first level by default
-        for i in range(self.tree.topLevelItemCount()):
-            self.tree.topLevelItem(i).setExpanded(True)
+        # Expand first level on initial load only
+        if not getattr(self.main_window, "_pending_ui_state", None):
+            for i in range(self.tree.topLevelItemCount()):
+                self.tree.topLevelItem(i).setExpanded(True)
         
         # Update statistics display
         total_size_gb = total_size_bytes / (1024**3)  # Convert to GB

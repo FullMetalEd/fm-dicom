@@ -74,6 +74,9 @@ class MainWindow(QMainWindow, LayoutMixin):
         # Setup UI using layout mixin - EXACT original layout
         self.setup_ui_layout()
         
+        # UI state persistence
+        self._pending_ui_state = None
+
         # Initialize managers
         self._setup_managers()
         
@@ -195,6 +198,7 @@ class MainWindow(QMainWindow, LayoutMixin):
         """Handle tree population completion"""
         self.loaded_files = self.tree_manager.get_loaded_files()
         logging.info(f"Loaded {file_count} DICOM files")
+        self._restore_pending_ui_state()
     
     def _on_tag_data_changed(self):
         """Handle DICOM tag data changes"""
@@ -250,6 +254,109 @@ class MainWindow(QMainWindow, LayoutMixin):
     def filter_tag_table(self, text):
         """Filter tag table - delegates to DicomManager"""
         self.dicom_manager.filter_tag_table(text)
+
+    def prepare_for_tree_refresh(self):
+        """Capture UI state before a tree refresh occurs"""
+        self._pending_ui_state = self._capture_ui_state()
+
+    def _capture_ui_state(self):
+        """Snapshot current UI selections and filters"""
+        state = {}
+
+        if hasattr(self, "tree_search_bar"):
+            state["tree_search"] = self.tree_search_bar.text()
+        if hasattr(self, "search_bar"):
+            state["tag_search"] = self.search_bar.text()
+
+        if hasattr(self, "tree_manager"):
+            state["expanded_paths"] = self.tree_manager.get_expanded_paths()
+            state["selected_tree_path"] = self.tree_manager.get_primary_selected_path()
+        if hasattr(self, "tree"):
+            state["tree_scroll"] = self.tree.verticalScrollBar().value()
+
+        state["selected_file"] = getattr(self, "current_file", None)
+
+        if hasattr(self, "tag_table"):
+            current_row = self.tag_table.currentRow()
+            current_col = self.tag_table.currentColumn()
+            state["tag_row"] = current_row
+            state["tag_column"] = current_col
+            state["tag_scroll"] = self.tag_table.verticalScrollBar().value()
+            if current_row is not None and current_row >= 0:
+                item = self.tag_table.item(current_row, 0)
+                state["tag_identifier"] = item.text() if item else None
+        return state
+
+    def _restore_pending_ui_state(self):
+        """Reapply UI state after the tree has been rebuilt"""
+        state = self._pending_ui_state
+        if not state:
+            return
+
+        self._pending_ui_state = None
+
+        expanded_paths = state.get("expanded_paths") or []
+        if expanded_paths and hasattr(self, "tree_manager"):
+            self.tree_manager.restore_expanded_paths(expanded_paths)
+
+        selection_restored = False
+
+        if state.get("selected_tree_path") and hasattr(self, "tree_manager"):
+            selection_restored = self.tree_manager.select_item_by_path(state["selected_tree_path"])
+
+        if not selection_restored:
+            target_file = state.get("selected_file")
+            if target_file and hasattr(self, "tree_manager"):
+                selection_restored = self.tree_manager.select_item_by_file(target_file)
+
+        if hasattr(self, "tree"):
+            tree_scroll = state.get("tree_scroll")
+            if tree_scroll is not None:
+                self.tree.verticalScrollBar().setValue(tree_scroll)
+
+        tree_search = state.get("tree_search")
+        if tree_search is not None and hasattr(self, "tree_search_bar"):
+            self.tree_search_bar.setText(tree_search)
+
+        # Restore tag search/selection shortly after selection triggers tag reload
+        QTimer.singleShot(0, lambda s=state: self._restore_tag_ui_state(s))
+
+    def _restore_tag_ui_state(self, state):
+        """Reapply tag search, selection, and scroll positions"""
+        if not hasattr(self, "tag_table") or not hasattr(self, "dicom_manager"):
+            return
+
+        tag_search = state.get("tag_search")
+        if tag_search is not None and hasattr(self, "search_bar"):
+            if self.search_bar.text() != tag_search:
+                self.search_bar.setText(tag_search)
+            else:
+                # Manual refresh to ensure filter applies to repopulated table
+                self.dicom_manager.filter_tag_table(tag_search)
+
+        target_row = None
+        identifier = state.get("tag_identifier")
+        if identifier:
+            for row in range(self.tag_table.rowCount()):
+                item = self.tag_table.item(row, 0)
+                if item and item.text() == identifier:
+                    target_row = row
+                    break
+
+        if target_row is None:
+            stored_row = state.get("tag_row")
+            if stored_row is not None and 0 <= stored_row < self.tag_table.rowCount():
+                target_row = stored_row
+
+        if target_row is not None:
+            target_col = state.get("tag_column") or 0
+            target_col = max(0, min(target_col, self.tag_table.columnCount() - 1))
+            self.tag_table.setCurrentCell(target_row, target_col)
+            self.tag_table.selectRow(target_row)
+
+        tag_scroll = state.get("tag_scroll")
+        if tag_scroll is not None:
+            self.tag_table.verticalScrollBar().setValue(tag_scroll)
     
     def delete_selected_items(self):
         """Delete selected items - delegates to TreeManager"""
@@ -1127,6 +1234,8 @@ class MainWindow(QMainWindow, LayoutMixin):
     def _refresh_tree_after_merge(self):
         """Refresh tree after patient merge to show updated hierarchy"""
         if hasattr(self, 'tree_manager') and self.tree_manager:
+            if hasattr(self, "prepare_for_tree_refresh"):
+                self.prepare_for_tree_refresh()
             self.tree_manager.refresh_tree()
         else:
             # Fallback to old method if tree manager not available
