@@ -843,6 +843,37 @@ class TreeManager(QObject):
             filepaths.extend(child_paths)
         
         return filepaths
+
+    def _collect_selection_metadata(self, selected_items):
+        """Collect hierarchical metadata and deduplicate instance paths."""
+        instances = []
+        seen = set()
+
+        for item in selected_items:
+            paths = self._collect_instance_filepaths(item)
+            for path in paths:
+                if path in seen:
+                    continue
+                seen.add(path)
+                meta = self.file_metadata.get(path)
+                patient_label = None
+                study_label = None
+                series_label = None
+                instance_label = None
+                if isinstance(meta, tuple):
+                    patient_label, study_label, series_label, instance_label = meta
+                instances.append({
+                    "path": path,
+                    "patient_label": patient_label,
+                    "study_label": study_label,
+                    "series_label": series_label,
+                    "instance_label": instance_label,
+                })
+
+        return {
+            "instances": instances,
+            "seen_paths": seen,
+        }
     
     def filter_tree_items(self, text):
         """Filter tree items based on search text"""
@@ -1045,13 +1076,9 @@ class TreeManager(QObject):
                 )
                 return
 
-            # Get file paths from selected items
-            file_paths = []
-            for item in selected_items:
-                paths = self._collect_instance_filepaths(item)
-                file_paths.extend(paths)
-
-            if not file_paths:
+            # Build structured selection (dedup + hierarchy metadata)
+            selection = self._collect_selection_metadata(selected_items)
+            if not selection["instances"]:
                 FocusAwareMessageBox.warning(
                     self.main_window,
                     "No Files",
@@ -1068,21 +1095,20 @@ class TreeManager(QObject):
                 return  # User cancelled
 
             # Perform duplication using the appropriate method for the level
-            logging.info(f"[DUPLICATE DEBUG] Starting duplication at {duplication_level} level with {len(file_paths)} files")
-            logging.info(f"[DUPLICATE DEBUG] UID config passed to duplication: regenerate_study_uid={uid_config.regenerate_study_uid}")
+            logging.info(
+                f"[DUPLICATE DEBUG] Starting duplication at {duplication_level} level "
+                f"with {len(selection['instances'])} instances"
+            )
+            logging.info(
+                "[DUPLICATE DEBUG] UID config passed to duplication: "
+                f"regenerate_study_uid={uid_config.regenerate_study_uid}"
+            )
 
-            if duplication_level == "patient":
-                logging.info(f"[DUPLICATE DEBUG] Calling duplicate_patient method")
-                duplicated_items = self.duplication_manager.duplicate_patient(file_paths, uid_config)
-            elif duplication_level == "study":
-                logging.info(f"[DUPLICATE DEBUG] Calling duplicate_study method")
-                duplicated_items = self.duplication_manager.duplicate_study(file_paths, uid_config)
-            elif duplication_level == "series":
-                logging.info(f"[DUPLICATE DEBUG] Calling duplicate_series method")
-                duplicated_items = self.duplication_manager.duplicate_series(file_paths, uid_config)
-            else:  # instance level or mixed
-                logging.info(f"[DUPLICATE DEBUG] Calling duplicate_instances method (level={duplication_level})")
-                duplicated_items = self.duplication_manager.duplicate_instances(file_paths, uid_config)
+            duplicated_items = self.duplication_manager.duplicate_by_hierarchy(
+                selection,
+                duplication_level,
+                uid_config,
+            )
 
             # Success message will be handled by duplication_completed signal
             # Integration and tree refresh will be handled by signal handlers
@@ -1100,26 +1126,57 @@ class TreeManager(QObject):
         try:
             selected_items = self.tree.selectedItems()
             if not selected_items:
+                FocusAwareMessageBox.warning(
+                    self.main_window,
+                    "No Selection",
+                    "Please select items to duplicate."
+                )
                 return
 
-            file_paths = []
-            for item in selected_items:
-                paths = self._collect_instance_filepaths(item)
-                file_paths.extend(paths)
-
-            if not file_paths:
+            selection = self._collect_selection_metadata(selected_items)
+            if not selection["instances"]:
+                FocusAwareMessageBox.warning(
+                    self.main_window,
+                    "No Files",
+                    "Selected items don't contain any files to duplicate."
+                )
                 return
 
-            # Create quick configuration for instance UID only
+            context_level = self._determine_context_duplication_level(selected_items) or "instance"
+
             uid_config = UIDConfiguration()
-            uid_config.regenerate_instance_uid = True
-            uid_config.regenerate_patient_id = False
-            uid_config.regenerate_study_uid = False
-            uid_config.regenerate_series_uid = False
+            uid_config.add_derived_suffix = False
+            uid_config.preserve_relationships = False
 
-            # Perform duplication
-            duplicated_items = self.duplication_manager.duplicate_instances(
-                file_paths, uid_config
+            if context_level == "patient":
+                duplication_level = "study"
+                uid_config.regenerate_patient_id = False
+                uid_config.regenerate_study_uid = True
+                uid_config.regenerate_series_uid = True
+                uid_config.regenerate_instance_uid = True
+            elif context_level == "study":
+                duplication_level = "study"
+                uid_config.regenerate_patient_id = False
+                uid_config.regenerate_study_uid = True
+                uid_config.regenerate_series_uid = True
+                uid_config.regenerate_instance_uid = True
+            elif context_level == "series":
+                duplication_level = "series"
+                uid_config.regenerate_patient_id = False
+                uid_config.regenerate_study_uid = False
+                uid_config.regenerate_series_uid = True
+                uid_config.regenerate_instance_uid = True
+            else:
+                duplication_level = "instance"
+                uid_config.regenerate_patient_id = False
+                uid_config.regenerate_study_uid = False
+                uid_config.regenerate_series_uid = False
+                uid_config.regenerate_instance_uid = True
+
+            duplicated_items = self.duplication_manager.duplicate_by_hierarchy(
+                selection,
+                duplication_level,
+                uid_config,
             )
 
             # Success message will be handled by duplication_completed signal
@@ -1133,15 +1190,23 @@ class TreeManager(QObject):
         try:
             selected_items = self.tree.selectedItems()
             if not selected_items:
+                FocusAwareMessageBox.warning(
+                    self.main_window,
+                    "No Selection",
+                    "Please select items to duplicate."
+                )
                 return
 
-            file_paths = []
-            for item in selected_items:
-                paths = self._collect_instance_filepaths(item)
-                file_paths.extend(paths)
-
-            if not file_paths:
+            selection = self._collect_selection_metadata(selected_items)
+            if not selection["instances"]:
+                FocusAwareMessageBox.warning(
+                    self.main_window,
+                    "No Files",
+                    "Selected items don't contain any files to duplicate."
+                )
                 return
+
+            duplication_level = self._determine_context_duplication_level(selected_items) or "patient"
 
             # Create configuration for all new UIDs
             uid_config = UIDConfiguration()
@@ -1152,8 +1217,10 @@ class TreeManager(QObject):
             uid_config.add_derived_suffix = True
 
             # Perform duplication
-            duplicated_items = self.duplication_manager.duplicate_instances(
-                file_paths, uid_config
+            duplicated_items = self.duplication_manager.duplicate_by_hierarchy(
+                selection,
+                duplication_level,
+                uid_config,
             )
 
             # Success message will be handled by duplication_completed signal
@@ -1185,8 +1252,16 @@ class TreeManager(QObject):
                 self.memory_items[virtual_path] = duplicated_item.duplicated_dataset
 
                 # Add to loaded files list
-                if virtual_path not in self.loaded_files:
-                    self.loaded_files.append(virtual_path)
+                exists = False
+                for entry in self.loaded_files:
+                    if isinstance(entry, tuple) and entry[0] == virtual_path:
+                        exists = True
+                        break
+                    if entry == virtual_path:
+                        exists = True
+                        break
+                if not exists:
+                    self.loaded_files.append((virtual_path, duplicated_item.duplicated_dataset))
 
                 logging.info(f"Integrated duplicated item: {virtual_path}")
 

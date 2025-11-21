@@ -66,136 +66,83 @@ class DuplicationManager(QObject):
         self.duplicated_items: List[DuplicatedItem] = []
         self.uid_mappings: Dict[str, str] = {}  # original_uid -> new_uid mapping
 
-    def duplicate_items(self,
-                       selected_items: List[Tuple[str, str]],
-                       uid_config: UIDConfiguration) -> List[DuplicatedItem]:
-        """
-        Duplicate selected items from the tree hierarchy
+    def duplicate_items(
+        self,
+        selected_items: List[Tuple[str, str]],
+        uid_config: UIDConfiguration,
+    ) -> List[DuplicatedItem]:
+        """Compat helper to duplicate arbitrary item list at instance level."""
+        instances = []
+        seen = set()
+        for _, file_path in selected_items:
+            if file_path in seen:
+                continue
+            seen.add(file_path)
+            instances.append({"path": file_path})
 
-        Args:
-            selected_items: List of (tree_path, file_path) tuples
-            uid_config: Configuration for UID handling
+        selection = {"instances": instances}
+        return self.duplicate_by_hierarchy(selection, "instance", uid_config)
 
-        Returns:
-            List of DuplicatedItem objects
-        """
-        try:
-            logging.info(f"Starting duplication of {len(selected_items)} items")
-            self.duplication_started.emit("mixed", len(selected_items))
-
-            duplicated_items = []
-
-            for idx, (tree_path, file_path) in enumerate(selected_items):
-                self.duplication_progress.emit(idx + 1, len(selected_items))
-
-                try:
-                    # Determine duplication level from tree path
-                    level = self._determine_duplication_level(tree_path)
-
-                    # Load and duplicate the DICOM file (check memory items first)
-                    original_dataset = self._load_dataset(file_path)
-                    duplicated_dataset = self._duplicate_dataset(
-                        original_dataset, level, uid_config
-                    )
-
-                    # Create duplication record
-                    duplicated_item = DuplicatedItem(
-                        original_path=file_path,
-                        duplicated_dataset=duplicated_dataset,
-                        duplication_level=level,
-                        original_uids=self._extract_uids(original_dataset),
-                        new_uids=self._extract_uids(duplicated_dataset)
-                    )
-
-                    duplicated_items.append(duplicated_item)
-
-                except Exception as e:
-                    logging.error(f"Failed to duplicate {file_path}: {e}")
-                    continue
-
-            self.duplicated_items.extend(duplicated_items)
-            self.duplication_completed.emit(duplicated_items)
-
-            logging.info(f"Successfully duplicated {len(duplicated_items)} items")
-            return duplicated_items
-
-        except Exception as e:
-            error_msg = f"Duplication failed: {e}"
-            logging.error(error_msg, exc_info=True)
-            self.duplication_error.emit(error_msg)
+    def duplicate_by_hierarchy(
+        self,
+        selection: Dict[str, Any],
+        duplication_level: str,
+        uid_config: UIDConfiguration,
+    ) -> List[DuplicatedItem]:
+        """Duplicate selections using hierarchy-aware logic."""
+        target_level = duplication_level if duplication_level in {"patient", "study", "series", "instance"} else "instance"
+        instances = selection.get("instances") or []
+        if not instances:
             return []
 
-    def duplicate_patient(self, patient_files: List[str], uid_config: UIDConfiguration) -> List[DuplicatedItem]:
-        """Duplicate entire patient with all studies/series/instances"""
-        return self._duplicate_at_level(patient_files, "patient", uid_config)
+        hierarchy = self._build_hierarchy(instances)
+        total_instances = self._count_instances(hierarchy)
 
-    def duplicate_study(self, study_files: List[str], uid_config: UIDConfiguration) -> List[DuplicatedItem]:
-        """Duplicate entire study with all series/instances"""
-        return self._duplicate_at_level(study_files, "study", uid_config)
+        logging.info(
+            "Starting hierarchy duplication at %s level (%d instances)",
+            target_level,
+            total_instances,
+        )
+        self.duplication_started.emit(target_level, total_instances)
 
-    def duplicate_series(self, series_files: List[str], uid_config: UIDConfiguration) -> List[DuplicatedItem]:
-        """Duplicate entire series with all instances"""
-        return self._duplicate_at_level(series_files, "series", uid_config)
+        duplicated_items: List[DuplicatedItem] = []
 
-    def duplicate_instances(self, instance_files: List[str], uid_config: UIDConfiguration) -> List[DuplicatedItem]:
-        """Duplicate individual instances"""
-        return self._duplicate_at_level(instance_files, "instance", uid_config)
-
-    def _duplicate_at_level(self,
-                          file_paths: List[str],
-                          level: str,
-                          uid_config: UIDConfiguration) -> List[DuplicatedItem]:
-        """Duplicate files at a specific hierarchy level"""
         try:
-            logging.info(f"Duplicating {len(file_paths)} files at {level} level")
-            self.duplication_started.emit(level, len(file_paths))
-
-            duplicated_items = []
-
-            # Generate consistent UIDs for the duplication level
-            level_uids = self._generate_level_uids(level, uid_config)
-
-            for idx, file_path in enumerate(file_paths):
-                self.duplication_progress.emit(idx + 1, len(file_paths))
-
-                try:
-                    # Load original dataset (check memory items first)
-                    original_dataset = self._load_dataset(file_path)
-
-                    # Create deep copy
-                    duplicated_dataset = copy.deepcopy(original_dataset)
-
-                    # Apply UID modifications
-                    self._apply_uid_modifications(
-                        duplicated_dataset, level, uid_config, level_uids
-                    )
-
-                    # Apply other modifications (descriptions, etc.)
-                    self._apply_other_modifications(duplicated_dataset, uid_config)
-
-                    # Create duplication record
-                    duplicated_item = DuplicatedItem(
-                        original_path=file_path,
-                        duplicated_dataset=duplicated_dataset,
-                        duplication_level=level,
-                        original_uids=self._extract_uids(original_dataset),
-                        new_uids=self._extract_uids(duplicated_dataset)
-                    )
-
-                    duplicated_items.append(duplicated_item)
-
-                except Exception as e:
-                    logging.error(f"Failed to duplicate {file_path}: {e}")
-                    continue
+            for patient_node in hierarchy.values():
+                if target_level == "patient":
+                    duplicated_items.extend(self._duplicate_patient_node(patient_node, uid_config))
+                else:
+                    for study_node in patient_node["studies"].values():
+                        if target_level == "study":
+                            duplicated_items.extend(
+                                self._duplicate_study_node(patient_node, study_node, uid_config)
+                            )
+                        else:
+                            for series_node in study_node["series"].values():
+                                if target_level == "series":
+                                    duplicated_items.extend(
+                                        self._duplicate_series_node(
+                                            patient_node,
+                                            study_node,
+                                            series_node,
+                                            uid_config,
+                                        )
+                                    )
+                                else:
+                                    duplicated_items.extend(
+                                        self._duplicate_instance_list(
+                                            series_node["instances"],
+                                            uid_config,
+                                        )
+                                    )
 
             self.duplicated_items.extend(duplicated_items)
             self.duplication_completed.emit(duplicated_items)
-
-            logging.info(f"Successfully duplicated {len(duplicated_items)} items at {level} level")
+            logging.info("Successfully duplicated %d items", len(duplicated_items))
             return duplicated_items
 
-        except Exception as e:
-            error_msg = f"Duplication at {level} level failed: {e}"
+        except Exception as exc:
+            error_msg = f"Hierarchy duplication failed: {exc}"
             logging.error(error_msg, exc_info=True)
             self.duplication_error.emit(error_msg)
             return []
@@ -234,22 +181,191 @@ class DuplicationManager(QObject):
             logging.error(f"Failed to load dataset from {file_path}: {e}")
             raise
 
-    def _duplicate_dataset(self,
-                          original_dataset: pydicom.Dataset,
-                          level: str,
-                          uid_config: UIDConfiguration) -> pydicom.Dataset:
-        """Create a duplicate of a DICOM dataset with UID modifications"""
-        # Create deep copy to avoid modifying original
-        duplicated = copy.deepcopy(original_dataset)
+    def _build_hierarchy(self, instance_entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Build hierarchical representation of selected instances."""
+        hierarchy: Dict[str, Any] = {}
 
-        # Apply UID modifications based on level and configuration
-        level_uids = self._generate_level_uids(level, uid_config)
-        self._apply_uid_modifications(duplicated, level, uid_config, level_uids)
+        for entry in instance_entries:
+            path = entry["path"]
+            dataset = self._load_dataset(path)
+            patient_id = getattr(dataset, "PatientID", "UNKNOWN_PATIENT")
+            patient_name = getattr(dataset, "PatientName", "Unknown")
+            study_uid = getattr(dataset, "StudyInstanceUID", f"STUDY_{uuid.uuid4().hex}")
+            series_uid = getattr(dataset, "SeriesInstanceUID", f"SERIES_{uuid.uuid4().hex}")
 
-        # Apply other modifications
-        self._apply_other_modifications(duplicated, uid_config)
+            patient_node = hierarchy.setdefault(
+                patient_id,
+                {
+                    "patient_id": patient_id,
+                    "patient_name": patient_name,
+                    "dataset": dataset,
+                    "studies": {},
+                },
+            )
 
-        return duplicated
+            study_node = patient_node["studies"].setdefault(
+                study_uid,
+                {
+                    "study_uid": study_uid,
+                    "dataset": dataset,
+                    "series": {},
+                },
+            )
+
+            series_node = study_node["series"].setdefault(
+                series_uid,
+                {
+                    "series_uid": series_uid,
+                    "dataset": dataset,
+                    "instances": [],
+                },
+            )
+
+            series_node["instances"].append(
+                {
+                    "path": path,
+                    "dataset": dataset,
+                }
+            )
+
+        return hierarchy
+
+    def _count_instances(self, hierarchy: Dict[str, Any]) -> int:
+        """Count total instances in hierarchy."""
+        total = 0
+        for patient_node in hierarchy.values():
+            for study_node in patient_node["studies"].values():
+                for series_node in study_node["series"].values():
+                    total += len(series_node["instances"])
+        return total
+
+    def _duplicate_patient_node(self, patient_node: Dict[str, Any], uid_config: UIDConfiguration) -> List[DuplicatedItem]:
+        duplicated_items: List[DuplicatedItem] = []
+        new_patient_id = self._new_patient_id(patient_node["dataset"], uid_config)
+
+        for study_node in patient_node["studies"].values():
+            duplicated_items.extend(
+                self._duplicate_study_node(
+                    patient_node,
+                    study_node,
+                    uid_config,
+                    patient_override=new_patient_id,
+                )
+            )
+        return duplicated_items
+
+    def _duplicate_study_node(
+        self,
+        patient_node: Dict[str, Any],
+        study_node: Dict[str, Any],
+        uid_config: UIDConfiguration,
+        patient_override: Optional[str] = None,
+    ) -> List[DuplicatedItem]:
+        duplicated_items: List[DuplicatedItem] = []
+        new_patient_id = patient_override if patient_override is not None else self._new_patient_id(patient_node["dataset"], uid_config)
+        new_study_uid = self._new_study_uid(study_node["dataset"], uid_config)
+
+        for series_node in study_node["series"].values():
+            duplicated_items.extend(
+                self._duplicate_series_node(
+                    patient_node,
+                    study_node,
+                    series_node,
+                    uid_config,
+                    patient_override=new_patient_id,
+                    study_override=new_study_uid,
+                )
+            )
+        return duplicated_items
+
+    def _duplicate_series_node(
+        self,
+        patient_node: Dict[str, Any],
+        study_node: Dict[str, Any],
+        series_node: Dict[str, Any],
+        uid_config: UIDConfiguration,
+        patient_override: Optional[str] = None,
+        study_override: Optional[str] = None,
+    ) -> List[DuplicatedItem]:
+        duplicated_items: List[DuplicatedItem] = []
+        new_patient_id = patient_override if patient_override is not None else self._new_patient_id(patient_node["dataset"], uid_config)
+        new_study_uid = study_override if study_override is not None else self._new_study_uid(study_node["dataset"], uid_config)
+        new_series_uid = self._new_series_uid(series_node["dataset"], uid_config)
+
+        overrides = {
+            "PatientID": new_patient_id,
+            "StudyInstanceUID": new_study_uid,
+            "SeriesInstanceUID": new_series_uid,
+        }
+
+        duplicated_items.extend(
+            self._duplicate_instance_list(
+                series_node["instances"],
+                uid_config,
+                overrides=overrides,
+            )
+        )
+
+        return duplicated_items
+
+    def _duplicate_instance_list(
+        self,
+        instance_list: List[Dict[str, Any]],
+        uid_config: UIDConfiguration,
+        overrides: Optional[Dict[str, Optional[str]]] = None,
+    ) -> List[DuplicatedItem]:
+        duplicated_items: List[DuplicatedItem] = []
+
+        for entry in instance_list:
+            dataset = entry["dataset"]
+            path = entry["path"]
+            duplicated_dataset = copy.deepcopy(dataset)
+
+            applied_uids: Dict[str, str] = {}
+
+            if overrides and overrides.get("PatientID") is not None:
+                patient_id = overrides["PatientID"]
+            else:
+                patient_id = self._new_patient_id(dataset, uid_config)
+            if patient_id and patient_id != getattr(dataset, "PatientID", None):
+                applied_uids["PatientID"] = patient_id
+
+            if overrides and overrides.get("StudyInstanceUID") is not None:
+                study_uid = overrides["StudyInstanceUID"]
+            else:
+                study_uid = self._new_study_uid(dataset, uid_config)
+            if study_uid and study_uid != getattr(dataset, "StudyInstanceUID", None):
+                applied_uids["StudyInstanceUID"] = study_uid
+
+            if overrides and overrides.get("SeriesInstanceUID") is not None:
+                series_uid = overrides["SeriesInstanceUID"]
+            else:
+                series_uid = self._new_series_uid(dataset, uid_config)
+            if series_uid and series_uid != getattr(dataset, "SeriesInstanceUID", None):
+                applied_uids["SeriesInstanceUID"] = series_uid
+
+            if overrides and overrides.get("SOPInstanceUID") is not None:
+                sop_uid = overrides["SOPInstanceUID"]
+            else:
+                sop_uid = self._new_instance_uid(dataset, uid_config)
+            if sop_uid and sop_uid != getattr(dataset, "SOPInstanceUID", None):
+                applied_uids["SOPInstanceUID"] = sop_uid
+
+            if applied_uids:
+                self._apply_uid_modifications(duplicated_dataset, "instance", uid_config, applied_uids)
+
+            self._apply_other_modifications(duplicated_dataset, uid_config)
+
+            duplicated_item = DuplicatedItem(
+                original_path=path,
+                duplicated_dataset=duplicated_dataset,
+                duplication_level="instance",
+                original_uids=self._extract_uids(dataset),
+                new_uids=self._extract_uids(duplicated_dataset),
+            )
+            duplicated_items.append(duplicated_item)
+
+        return duplicated_items
 
     def _determine_duplication_level(self, tree_path: str) -> str:
         """Determine the duplication level from tree hierarchy path"""
@@ -265,35 +381,38 @@ class DuplicationManager(QObject):
         else:
             return "instance"
 
-    def _generate_level_uids(self, level: str, uid_config: UIDConfiguration) -> Dict[str, str]:
-        """Generate new UIDs for the specified level"""
-        level_uids = {}
+    def _should_regenerate(self, uid_config: UIDConfiguration, field: str) -> bool:
+        mapping = {
+            "PatientID": uid_config.regenerate_patient_id,
+            "StudyInstanceUID": uid_config.regenerate_study_uid,
+            "SeriesInstanceUID": uid_config.regenerate_series_uid,
+            "SOPInstanceUID": uid_config.regenerate_instance_uid,
+        }
+        return mapping.get(field, False)
 
-        # Debug logging to trace UID generation
-        logging.info(f"[UID DEBUG] Generating UIDs for level: {level}")
-        logging.info(f"[UID DEBUG] UID Configuration: regenerate_patient_id={uid_config.regenerate_patient_id}, "
-                    f"regenerate_study_uid={uid_config.regenerate_study_uid}, "
-                    f"regenerate_series_uid={uid_config.regenerate_series_uid}, "
-                    f"regenerate_instance_uid={uid_config.regenerate_instance_uid}")
+    def _new_patient_id(self, dataset: pydicom.Dataset, uid_config: UIDConfiguration) -> Optional[str]:
+        if self._should_regenerate(uid_config, "PatientID"):
+            return f"PAT_{uuid.uuid4().hex[:8].upper()}"
+        value = getattr(dataset, "PatientID", None)
+        return str(value) if value is not None else None
 
-        if level == "patient" and uid_config.regenerate_patient_id:
-            level_uids['PatientID'] = f"PAT_{uuid.uuid4().hex[:8].upper()}"
-            logging.info(f"[UID DEBUG] Generated new PatientID: {level_uids['PatientID']}")
+    def _new_study_uid(self, dataset: pydicom.Dataset, uid_config: UIDConfiguration) -> Optional[str]:
+        if self._should_regenerate(uid_config, "StudyInstanceUID"):
+            return pydicom.uid.generate_uid()
+        value = getattr(dataset, "StudyInstanceUID", None)
+        return str(value) if value is not None else None
 
-        if level in ["patient", "study"] and uid_config.regenerate_study_uid:
-            level_uids['StudyInstanceUID'] = pydicom.uid.generate_uid()
-            logging.info(f"[UID DEBUG] Generated new StudyInstanceUID: {level_uids['StudyInstanceUID']}")
+    def _new_series_uid(self, dataset: pydicom.Dataset, uid_config: UIDConfiguration) -> Optional[str]:
+        if self._should_regenerate(uid_config, "SeriesInstanceUID"):
+            return pydicom.uid.generate_uid()
+        value = getattr(dataset, "SeriesInstanceUID", None)
+        return str(value) if value is not None else None
 
-        if level in ["patient", "study", "series"] and uid_config.regenerate_series_uid:
-            level_uids['SeriesInstanceUID'] = pydicom.uid.generate_uid()
-            logging.info(f"[UID DEBUG] Generated new SeriesInstanceUID: {level_uids['SeriesInstanceUID']}")
-
-        if uid_config.regenerate_instance_uid:
-            level_uids['SOPInstanceUID'] = pydicom.uid.generate_uid()
-            logging.info(f"[UID DEBUG] Generated new SOPInstanceUID: {level_uids['SOPInstanceUID']}")
-
-        logging.info(f"[UID DEBUG] Final level_uids: {level_uids}")
-        return level_uids
+    def _new_instance_uid(self, dataset: pydicom.Dataset, uid_config: UIDConfiguration) -> Optional[str]:
+        if self._should_regenerate(uid_config, "SOPInstanceUID"):
+            return pydicom.uid.generate_uid()
+        value = getattr(dataset, "SOPInstanceUID", None)
+        return str(value) if value is not None else None
 
     def _apply_uid_modifications(self,
                                 dataset: pydicom.Dataset,
