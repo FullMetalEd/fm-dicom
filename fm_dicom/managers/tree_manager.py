@@ -8,7 +8,7 @@ selection handling, and hierarchy management.
 import os
 import logging
 import pydicom
-from PyQt6.QtWidgets import QTreeWidgetItem, QProgressDialog, QApplication, QMenu
+from PyQt6.QtWidgets import QTreeWidgetItem, QProgressDialog, QApplication, QMenu, QDialog
 from PyQt6.QtCore import QObject, pyqtSignal, Qt, QPoint
 from PyQt6.QtGui import QIcon, QAction
 
@@ -16,6 +16,7 @@ from fm_dicom.widgets.focus_aware import FocusAwareMessageBox, FocusAwareProgres
 from fm_dicom.utils.threaded_processor import ThreadedDicomProcessor, DicomProcessingResult, FastDicomScanner
 from fm_dicom.managers.duplication_manager import DuplicationManager, UIDConfiguration
 from fm_dicom.dialogs.uid_configuration_dialog import UIDConfigurationDialog
+from fm_dicom.dialogs.move_item_dialog import MoveItemDialog
 
 TREE_PATH_ROLE = Qt.ItemDataRole.UserRole + 1
 
@@ -215,14 +216,21 @@ class TreeManager(QObject):
             logging.info(f"Appending {len(files)} files to existing tree ({len(self.loaded_files)} already loaded)")
         else:
             logging.info(f"Starting tree population with {len(files)} files")
+            self.loaded_files = []
 
-        if not append:
-            self.tree.clear()
-            self.file_metadata = {}
-            self.loaded_files = files
+        self.tree.clear()
+        self.file_metadata = {}
+
+        if append:
+            # Extend without duplicates
+            existing_paths = {f[0] if isinstance(f, tuple) else f for f in self.loaded_files}
+            for entry in files:
+                path = entry[0] if isinstance(entry, tuple) else entry
+                if path not in existing_paths:
+                    self.loaded_files.append(entry)
+                    existing_paths.add(path)
         else:
-            # Append mode - extend existing data instead of replacing
-            self.loaded_files.extend(files)
+            self.loaded_files = files.copy()
 
         # Extract file paths from mixed input formats
         file_paths = self._extract_file_paths(files)
@@ -372,6 +380,7 @@ class TreeManager(QObject):
                 new_path = new_file[0] if isinstance(new_file, tuple) else new_file
                 if new_path not in existing_paths:
                     self.loaded_files.append(new_file)
+                    existing_paths.add(new_path)
         else:
             # Replace mode
             self.loaded_files = new_files
@@ -486,9 +495,20 @@ class TreeManager(QObject):
             file_paths = []
             for file_info in self.loaded_files:
                 if isinstance(file_info, tuple):
-                    file_paths.append(file_info[0])  # Extract path from (path, dataset) tuple
+                    file_paths.append(file_info[0])
                 else:
-                    file_paths.append(file_info)  # Already just a path
+                    file_paths.append(file_info)
+
+            # Deduplicate while preserving order
+            seen_paths = set()
+            unique_paths = []
+            for path in file_paths:
+                if path in seen_paths:
+                    continue
+                seen_paths.add(path)
+                unique_paths.append(path)
+
+            file_paths = unique_paths
             
             logging.info(f"Tree refresh: Re-reading {len(file_paths)} files from disk")
             if file_paths:
@@ -515,14 +535,24 @@ class TreeManager(QObject):
             progress.setLabelText("Updating file cache...")
             QApplication.processEvents()
             
-            fresh_loaded_files = []
+            fresh_loaded = []
             for patient_data in hierarchy.values():
                 for study_data in patient_data.values():
                     for series_data in study_data.values():
                         for instance_data in series_data.values():
                             filepath = instance_data['filepath']
                             dataset = instance_data['dataset']
-                            fresh_loaded_files.append((filepath, dataset))
+                            fresh_loaded.append((filepath, dataset))
+
+            # Keep original order of combined paths, but update datasets
+            refreshed_paths = {path: ds for path, ds in fresh_loaded}
+            ordered_refreshed = []
+            for path in file_paths:
+                ds = refreshed_paths.get(path)
+                if ds is not None:
+                    ordered_refreshed.append((path, ds))
+
+            fresh_loaded_files = ordered_refreshed
             
             self.loaded_files = fresh_loaded_files
                 
@@ -874,6 +904,186 @@ class TreeManager(QObject):
             "instances": instances,
             "seen_paths": seen,
         }
+
+    def _build_move_options(self, source_level: str) -> list:
+        """Return a list of potential destinations for the move dialog."""
+        target_map = {"study": "patient", "series": "study", "instance": "series"}
+        target_level = target_map.get(source_level)
+        if not target_level:
+            return []
+
+        options = []
+
+        def traverse(item):
+            level = self._get_item_level(item)
+            path = item.data(0, TREE_PATH_ROLE)
+            if level == target_level and path:
+                options.append({
+                    "path": list(path),
+                    "label": self._format_target_label(item, level),
+                })
+            for i in range(item.childCount()):
+                traverse(item.child(i))
+
+        for index in range(self.tree.topLevelItemCount()):
+            traverse(self.tree.topLevelItem(index))
+
+        return options
+
+    def _format_target_label(self, item, level: str) -> str:
+        """Create a human-readable label for a destination."""
+        if level == "patient":
+            return item.text(0)
+        elif level == "study":
+            patient = item.parent().text(0) if item.parent() else ""
+            study = item.text(1) or item.text(0)
+            return f"{patient} → {study}"
+        elif level == "series":
+            patient = item.parent().parent().text(0) if item.parent() and item.parent().parent() else ""
+            study = item.parent().text(1) if item.parent() else ""
+            series = item.text(2) or item.text(0)
+            return f"{patient} → {study} → {series}"
+        else:
+            return item.text(0)
+
+    def _get_item_by_path(self, path_tuple):
+        """Return the tree item matching the provided path tuple."""
+        if not path_tuple:
+            return None
+        return self._find_item_by(lambda item: item.data(0, TREE_PATH_ROLE) == tuple(path_tuple))
+
+    def _extract_target_info(self, source_level: str, target_item):
+        """Gather metadata from the destination required to perform the move."""
+        dataset = self._get_sample_dataset(target_item)
+        if dataset is None:
+            return None
+
+        target_level = self._get_item_level(target_item)
+        info = {
+            "level": target_level,
+            "patient_id": getattr(dataset, "PatientID", None),
+            "patient_name": getattr(dataset, "PatientName", None),
+            "study_uid": None,
+            "study_desc": None,
+            "series_uid": None,
+            "series_desc": None,
+        }
+
+        if target_level in {"study", "series"}:
+            info["study_uid"] = getattr(dataset, "StudyInstanceUID", None)
+            info["study_desc"] = getattr(dataset, "StudyDescription", None)
+
+        if target_level == "series":
+            info["series_uid"] = getattr(dataset, "SeriesInstanceUID", None)
+            info["series_desc"] = getattr(dataset, "SeriesDescription", None)
+
+        return info
+
+    def _get_sample_dataset(self, item):
+        """Return a representative dataset from a tree item."""
+        paths = self._collect_instance_filepaths(item)
+        for path in paths:
+            dataset = self._load_dataset_for_move(path)
+            if dataset is not None:
+                return dataset
+        return None
+
+    def _load_dataset_for_move(self, file_path):
+        """Load dataset from memory items or disk."""
+        if file_path in self.memory_items:
+            return self.memory_items[file_path]
+        if os.path.exists(file_path):
+            return pydicom.dcmread(file_path, force=True)
+        return None
+
+    def _save_dataset_after_move(self, file_path, dataset):
+        """Persist dataset changes to memory or disk."""
+        if file_path in self.memory_items:
+            self.memory_items[file_path] = dataset
+        else:
+            dataset.save_as(file_path)
+
+    def _extract_uids(self, dataset):
+        """Extract core UIDs from a dataset."""
+        fields = [
+            "PatientID",
+            "StudyInstanceUID",
+            "SeriesInstanceUID",
+            "SOPInstanceUID",
+        ]
+        return {field: str(getattr(dataset, field)) for field in fields if hasattr(dataset, field)}
+
+    def _apply_move_metadata(self, dataset, source_level: str, target_info: dict):
+        """Update dataset fields to reflect the new parent hierarchy."""
+        target_level = target_info.get("level")
+
+        if source_level == "study":
+            if target_level != "patient":
+                raise ValueError("A study can only be moved under a patient.")
+            if target_info.get("patient_id"):
+                dataset.PatientID = target_info["patient_id"]
+            if target_info.get("patient_name"):
+                dataset.PatientName = target_info["patient_name"]
+
+        elif source_level == "series":
+            if target_level != "study":
+                raise ValueError("A series can only be moved under a study.")
+            if target_info.get("patient_id"):
+                dataset.PatientID = target_info["patient_id"]
+            if target_info.get("patient_name"):
+                dataset.PatientName = target_info["patient_name"]
+            if target_info.get("study_uid"):
+                dataset.StudyInstanceUID = target_info["study_uid"]
+            if target_info.get("study_desc"):
+                dataset.StudyDescription = target_info["study_desc"]
+
+        elif source_level == "instance":
+            if target_level != "series":
+                raise ValueError("An instance can only be moved under a series.")
+            if target_info.get("patient_id"):
+                dataset.PatientID = target_info["patient_id"]
+            if target_info.get("patient_name"):
+                dataset.PatientName = target_info["patient_name"]
+            if target_info.get("study_uid"):
+                dataset.StudyInstanceUID = target_info["study_uid"]
+            if target_info.get("study_desc"):
+                dataset.StudyDescription = target_info["study_desc"]
+            if target_info.get("series_uid"):
+                dataset.SeriesInstanceUID = target_info["series_uid"]
+            if target_info.get("series_desc"):
+                dataset.SeriesDescription = target_info["series_desc"]
+
+        else:
+            raise ValueError(f"Unsupported source level: {source_level}")
+
+    def _perform_move(self, file_paths, source_level: str, target_info: dict):
+        """Execute the move by updating all affected files."""
+        success = 0
+        failures = []
+
+        for path in file_paths:
+            dataset = self._load_dataset_for_move(path)
+            if dataset is None:
+                failures.append((path, "File not found."))
+                continue
+
+            try:
+                self._apply_move_metadata(dataset, source_level, target_info)
+                self._save_dataset_after_move(path, dataset)
+
+                # Update cached metadata so immediate operations use the new parents
+                uids = self._extract_uids(dataset)
+                patient_label = f"{getattr(dataset, 'PatientName', 'Unknown')} ({uids.get('PatientID', 'Unknown ID')})"
+                study_label = f"{getattr(dataset, 'StudyDescription', 'Study')} [{uids.get('StudyInstanceUID', '')}]"
+                series_label = f"{getattr(dataset, 'SeriesDescription', 'Series')} [{uids.get('SeriesInstanceUID', '')}]"
+                instance_label = f"{os.path.basename(path)} [{uids.get('SOPInstanceUID', '')}]"
+                self.file_metadata[path] = (patient_label, study_label, series_label, instance_label)
+                success += 1
+            except Exception as exc:
+                failures.append((path, str(exc)))
+
+        return success, failures
+
     
     def filter_tree_items(self, text):
         """Filter tree items based on search text"""
@@ -1228,6 +1438,105 @@ class TreeManager(QObject):
 
         except Exception as e:
             logging.error(f"Quick duplicate all new failed: {e}", exc_info=True)
+
+    def move_selected_item(self):
+        """Move the currently selected study/series/instance to a new destination."""
+        try:
+            selected_items = self.tree.selectedItems()
+            if len(selected_items) != 1:
+                FocusAwareMessageBox.warning(
+                    self.main_window,
+                    "Move Item",
+                    "Please select exactly one study, series, or instance to move."
+                )
+                return
+
+            source_item = selected_items[0]
+            source_level = self._get_item_level(source_item)
+            if source_level not in {"study", "series", "instance"}:
+                FocusAwareMessageBox.warning(
+                    self.main_window,
+                    "Move Item",
+                    "Only studies, series, or instances can be moved."
+                )
+                return
+
+            options = self._build_move_options(source_level)
+            if not options:
+                FocusAwareMessageBox.information(
+                    self.main_window,
+                    "Move Item",
+                    "There are no valid destinations for this item."
+                )
+                return
+
+            dialog = MoveItemDialog(self.main_window, source_level, options)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+
+            target_path = dialog.get_selected_path()
+            if not target_path:
+                return
+
+            target_item = self._get_item_by_path(target_path)
+            if target_item is None:
+                FocusAwareMessageBox.warning(
+                    self.main_window,
+                    "Move Item",
+                    "The selected destination could not be found."
+                )
+                return
+
+            target_info = self._extract_target_info(source_level, target_item)
+            if not target_info:
+                FocusAwareMessageBox.warning(
+                    self.main_window,
+                    "Move Item",
+                    "Could not gather metadata for the destination."
+                )
+                return
+
+            source_paths = self._collect_instance_filepaths(source_item)
+            if not source_paths:
+                FocusAwareMessageBox.warning(
+                    self.main_window,
+                    "Move Item",
+                    "Selected item does not contain any DICOM files."
+                )
+                return
+
+            success, failures = self._perform_move(source_paths, source_level, target_info)
+
+            # Ensure moved files remain tracked
+            for path in source_paths:
+                exists = any((path == entry if isinstance(entry, str) else entry[0] == path) for entry in self.loaded_files)
+                if not exists:
+                    self.loaded_files.append(path)
+
+            if hasattr(self.main_window, "prepare_for_tree_refresh"):
+                # Avoid restoring old selection for move operations
+                self.main_window._pending_ui_state = None
+
+            self.refresh_tree()
+
+            message = f"Moved {success} file(s) to the new location."
+            if failures:
+                sample = "\n".join(f"{os.path.basename(path)}: {error}" for path, error in failures[:3])
+                message += f"\n\nFailed to move {len(failures)} file(s):\n{sample}"
+
+            FocusAwareMessageBox.information(
+                self.main_window,
+                "Move Item",
+                message
+            )
+
+        except Exception as exc:
+            logging.error(f"Failed to move item: {exc}", exc_info=True)
+            FocusAwareMessageBox.critical(
+                self.main_window,
+                "Move Item",
+                f"Failed to move the selected item:\n\n{exc}"
+            )
 
     def _integrate_duplicated_items(self, duplicated_items):
         """Integrate duplicated DICOM items into the tree manager's data structures"""

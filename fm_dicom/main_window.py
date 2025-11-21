@@ -466,6 +466,11 @@ class MainWindow(QMainWindow, LayoutMixin):
             quick_all_action.triggered.connect(lambda: self.tree_manager._quick_duplicate_all_new())
             menu.addAction(quick_all_action)
 
+            move_action = QAction("📦 Move...", self)
+            move_action.setToolTip("Move the selected study/series/instance to another location")
+            move_action.triggered.connect(self.tree_manager.move_selected_item)
+            menu.addAction(move_action)
+
             menu.addSeparator()
 
         # Show duplicated items management if any exist
