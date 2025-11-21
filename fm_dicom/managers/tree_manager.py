@@ -1001,7 +1001,7 @@ class TreeManager(QObject):
         if file_path in self.memory_items:
             self.memory_items[file_path] = dataset
         else:
-            dataset.save_as(file_path)
+            dataset.save_as(file_path, write_like_original=False)
 
     def _extract_uids(self, dataset):
         """Extract core UIDs from a dataset."""
@@ -1440,20 +1440,20 @@ class TreeManager(QObject):
             logging.error(f"Quick duplicate all new failed: {e}", exc_info=True)
 
     def move_selected_item(self):
-        """Move the currently selected study/series/instance to a new destination."""
+        """Move selected studies/series/instances to a new destination."""
         try:
             selected_items = self.tree.selectedItems()
-            if len(selected_items) != 1:
+            if not selected_items:
                 FocusAwareMessageBox.warning(
                     self.main_window,
                     "Move Item",
-                    "Please select exactly one study, series, or instance to move."
+                    "Please select at least one study, series, or instance to move."
                 )
                 return
 
-            source_item = selected_items[0]
-            source_level = self._get_item_level(source_item)
-            if source_level not in {"study", "series", "instance"}:
+            levels = {self._get_item_level(item) for item in selected_items}
+            levels.discard(None)
+            if not levels or not levels <= {"study", "series", "instance"}:
                 FocusAwareMessageBox.warning(
                     self.main_window,
                     "Move Item",
@@ -1461,16 +1461,26 @@ class TreeManager(QObject):
                 )
                 return
 
+            if len(levels) > 1:
+                FocusAwareMessageBox.warning(
+                    self.main_window,
+                    "Move Item",
+                    "Please select items of the same type (all studies, all series, or all instances)."
+                )
+                return
+
+            source_level = levels.pop()
+
             options = self._build_move_options(source_level)
             if not options:
                 FocusAwareMessageBox.information(
                     self.main_window,
                     "Move Item",
-                    "There are no valid destinations for this item."
+                    "There are no valid destinations for the selected items."
                 )
                 return
 
-            dialog = MoveItemDialog(self.main_window, source_level, options)
+            dialog = MoveItemDialog(self.main_window, source_level, len(selected_items), options)
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
 
@@ -1496,25 +1506,28 @@ class TreeManager(QObject):
                 )
                 return
 
-            source_paths = self._collect_instance_filepaths(source_item)
-            if not source_paths:
+            all_paths = []
+            for item in selected_items:
+                all_paths.extend(self._collect_instance_filepaths(item))
+
+            if not all_paths:
                 FocusAwareMessageBox.warning(
                     self.main_window,
                     "Move Item",
-                    "Selected item does not contain any DICOM files."
+                    "The selected items do not contain any DICOM files."
                 )
                 return
 
-            success, failures = self._perform_move(source_paths, source_level, target_info)
+            success, failures = self._perform_move(all_paths, source_level, target_info)
 
             # Ensure moved files remain tracked
-            for path in source_paths:
-                exists = any((path == entry if isinstance(entry, str) else entry[0] == path) for entry in self.loaded_files)
-                if not exists:
+            seen = {f[0] if isinstance(f, tuple) else f for f in self.loaded_files}
+            for path in all_paths:
+                if path not in seen:
                     self.loaded_files.append(path)
+                    seen.add(path)
 
             if hasattr(self.main_window, "prepare_for_tree_refresh"):
-                # Avoid restoring old selection for move operations
                 self.main_window._pending_ui_state = None
 
             self.refresh_tree()
@@ -1535,7 +1548,7 @@ class TreeManager(QObject):
             FocusAwareMessageBox.critical(
                 self.main_window,
                 "Move Item",
-                f"Failed to move the selected item:\n\n{exc}"
+                f"Failed to move the selected item(s):\n\n{exc}"
             )
 
     def _integrate_duplicated_items(self, duplicated_items):

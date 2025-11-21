@@ -17,9 +17,9 @@ from PyQt6.QtCore import Qt
 class MoveItemDialog(QDialog):
     """Simple dialog that allows the user to pick a destination node."""
 
-    def __init__(self, parent, source_level: str, options: list[dict]):
+    def __init__(self, parent, source_level: str, count: int, options: list[dict]):
         super().__init__(parent)
-        self.setWindowTitle(f"Move {source_level.title()} To...")
+        self.setWindowTitle(f"Move {source_level.title()} (x{count}) To...")
         self._selected_path = None
         self._options = options
 
@@ -27,8 +27,8 @@ class MoveItemDialog(QDialog):
 
         layout.addWidget(
             QLabel(
-                "Select the destination where the item should be placed.\n"
-                "Use the search box to filter the list."
+                f"Moving {count} {source_level}(s).\n"
+                "Select the destination and use the search box to filter."
             )
         )
 

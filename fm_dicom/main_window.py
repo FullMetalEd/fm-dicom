@@ -30,7 +30,7 @@ from fm_dicom.ui.layout_mixin import LayoutMixin
 
 # Manager classes
 from fm_dicom.managers.file_manager import FileManager
-from fm_dicom.managers.tree_manager import TreeManager
+from fm_dicom.managers.tree_manager import TreeManager, TREE_PATH_ROLE
 from fm_dicom.managers.dicom_manager import DicomManager
 
 # Existing modules that will be preserved
@@ -273,6 +273,13 @@ class MainWindow(QMainWindow, LayoutMixin):
             state["selected_tree_path"] = self.tree_manager.get_primary_selected_path()
         if hasattr(self, "tree"):
             state["tree_scroll"] = self.tree.verticalScrollBar().value()
+            selected_paths = []
+            for item in self.tree.selectedItems():
+                path = item.data(0, TREE_PATH_ROLE)
+                if path:
+                    selected_paths.append(tuple(path))
+            if selected_paths:
+                state["selected_tree_paths"] = selected_paths
 
         state["selected_file"] = getattr(self, "current_file", None)
 
@@ -301,7 +308,14 @@ class MainWindow(QMainWindow, LayoutMixin):
 
         selection_restored = False
 
-        if state.get("selected_tree_path") and hasattr(self, "tree_manager"):
+        if hasattr(self, "tree_manager"):
+            selected_paths = state.get("selected_tree_paths") or []
+            for path in selected_paths:
+                if path and self.tree_manager.select_item_by_path(path):
+                    selection_restored = True
+                    break
+
+        if not selection_restored and state.get("selected_tree_path") and hasattr(self, "tree_manager"):
             selection_restored = self.tree_manager.select_item_by_path(state["selected_tree_path"])
 
         if not selection_restored:
