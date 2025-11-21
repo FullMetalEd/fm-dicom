@@ -84,7 +84,15 @@ class FileDialogManager:
         import platform
         return platform.system().lower() == 'linux'
 
-    def _try_system_file_dialog(self, parent: QWidget, title: str, start_dir: str, filter_str: str, dialog_type: str):
+    def _try_system_file_dialog(
+        self,
+        parent: QWidget,
+        title: str,
+        start_dir: str,
+        filter_str: str,
+        dialog_type: str,
+        multiple: bool = False,
+    ):
         """Try to use actual system file manager for file dialogs"""
         try:
             import subprocess
@@ -93,6 +101,9 @@ class FileDialogManager:
             if dialog_type == 'file':
                 # Use zenity for file selection - it integrates with system file manager
                 cmd = ['zenity', '--file-selection', f'--title={title}']
+                if multiple:
+                    cmd.append('--multiple')
+                    cmd.append('--separator=::')
                 if start_dir and os.path.exists(start_dir):
                     cmd.append(f'--filename={start_dir}/')
 
@@ -113,9 +124,16 @@ class FileDialogManager:
             # Run the command
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
             if result.returncode == 0 and result.stdout.strip():
-                selected_path = result.stdout.strip()
-                if os.path.exists(selected_path):
-                    return selected_path
+                output = result.stdout.strip()
+                if multiple:
+                    selections = [
+                        path for path in output.split('::') if path and os.path.exists(path)
+                    ]
+                    if selections:
+                        return selections
+                else:
+                    if os.path.exists(output):
+                        return output
 
         except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
             pass
@@ -125,12 +143,21 @@ class FileDialogManager:
 
         return None
 
-    def _portal_open_file(self, parent: QWidget, title: str, start_dir: str, 
-                         filter_str: str) -> Optional[str]:
+    def _portal_open_file(
+        self,
+        parent: QWidget,
+        title: str,
+        start_dir: str,
+        filter_str: str,
+        multiple: bool = False,
+    ):
         """Open file using XDG Desktop Portal"""
         try:
             # Use zenity as a fallback portal implementation
             cmd = ['zenity', '--file-selection', f'--title={title}']
+            if multiple:
+                cmd.append('--multiple')
+                cmd.append('--separator=::')
             
             if start_dir:
                 cmd.append(f'--filename={start_dir}/')
@@ -145,7 +172,12 @@ class FileDialogManager:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             
             if result.returncode == 0:
-                return result.stdout.strip()
+                output = result.stdout.strip()
+                if not output:
+                    return [] if multiple else None
+                if multiple:
+                    return [path for path in output.split('::') if path]
+                return output
             else:
                 logging.debug(f"Portal dialog cancelled or failed: {result.stderr}")
                 return None
@@ -205,9 +237,15 @@ class FileDialogManager:
             logging.warning(f"Portal save dialog failed: {e}")
             return None
     
-    def open_file_dialog(self, parent: QWidget, title: str, start_dir: str,
-                        filter_str: str) -> Optional[str]:
-        """Open file dialog with portal integration"""
+    def open_file_dialog(
+        self,
+        parent: QWidget,
+        title: str,
+        start_dir: str,
+        filter_str: str,
+        multiple: bool = False,
+    ):
+        """Open file dialog with portal integration. Returns str or list[str] when multiple."""
         # Log environment diagnostics instead of interrupting the user with a dialog
         warnings = self._check_qt_environment()
         if warnings:
@@ -216,21 +254,27 @@ class FileDialogManager:
         # If user wants native and we're on Linux, try to use actual system file manager
         native_enabled = self.config.get('file_picker_native', False)
         if native_enabled and self._is_linux():
-            result = self._try_system_file_dialog(parent, title, start_dir, filter_str, 'file')
+            result = self._try_system_file_dialog(parent, title, start_dir, filter_str, 'file', multiple)
             if result is not None:
+                if multiple and isinstance(result, str):
+                    return [result]
                 return result
 
         # Try portal if configured
         if self._use_portal_dialog():
-            result = self._portal_open_file(parent, title, start_dir, filter_str)
+            result = self._portal_open_file(parent, title, start_dir, filter_str, multiple)
             if result is not None:
+                if multiple and isinstance(result, str):
+                    return [result]
                 return result
             # Fall back to Qt dialog if portal fails
 
         # Use Qt dialog with proper configuration
         dialog = QFileDialog(parent, title, start_dir, filter_str)
         dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptOpen)
-        dialog.setFileMode(QFileDialog.FileMode.ExistingFile)
+        dialog.setFileMode(
+            QFileDialog.FileMode.ExistingFiles if multiple else QFileDialog.FileMode.ExistingFile
+        )
 
         # Configure native dialog preference
         if not native_enabled:
@@ -243,8 +287,10 @@ class FileDialogManager:
         
         if dialog.exec():
             files = dialog.selectedFiles()
+            if multiple:
+                return files
             return files[0] if files else None
-        return None
+        return [] if multiple else None
     
     def open_directory_dialog(self, parent: QWidget, title: str,
                              start_dir: str) -> Optional[str]:

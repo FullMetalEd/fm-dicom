@@ -42,16 +42,28 @@ class FileManager(QObject):
         
         # Use enhanced file dialog manager
         dialog_manager = get_file_dialog_manager(self.config)
-        file_path = dialog_manager.open_file_dialog(
+        file_paths = dialog_manager.open_file_dialog(
             self.main_window,
             "Open DICOM File",
             start_dir,
-            "All Files (*);;DICOM Files (*.dcm *.dicom);;ZIP Archives (*.zip)"
+            "All Files (*);;DICOM Files (*.dcm *.dicom);;ZIP Archives (*.zip)",
+            multiple=True,
         )
         
-        if file_path:
+        if not file_paths:
+            return
+
+        if isinstance(file_paths, str):
+            file_paths = [file_paths]
+
+        if len(file_paths) == 1:
+            file_path = file_paths[0]
             logging.info(f"Selected file: {file_path}")
             self.load_path(file_path)
+            return
+
+        logging.info(f"Selected {len(file_paths)} files for loading")
+        self._load_multiple_paths(file_paths)
     
     def open_directory(self):
         """Open a directory containing DICOM files"""
@@ -142,6 +154,29 @@ class FileManager(QObject):
         finally:
             self.loading_finished.emit()
 
+    def _load_multiple_paths(self, paths):
+        """Load several file selections in one batch."""
+        valid_paths = [p for p in paths if p and os.path.exists(p)]
+        missing_paths = [p for p in paths if not p or not os.path.exists(p)]
+
+        if not valid_paths:
+            if missing_paths:
+                FocusAwareMessageBox.warning(
+                    self.main_window,
+                    "Invalid Selection",
+                    "None of the selected files could be found."
+                )
+            return
+
+        first_path = valid_paths[0]
+        self.load_path(first_path)
+
+        for path in valid_paths[1:]:
+            self.load_path_additive(path)
+
+        if missing_paths:
+            logging.warning("Some selected files were missing: %s", missing_paths)
+
     def load_path(self, path):
         """Load files from a given path (file, directory, or ZIP)"""
         if not path or not os.path.exists(path):
@@ -196,6 +231,7 @@ class FileManager(QObject):
                 "DICOM Load Error",
                 f"Failed to load DICOM file:\\n{file_path}\\n\\nError: {str(e)}"
             )
+    
     
     def _load_directory(self, dir_path):
         """Load all DICOM files from a directory using comprehensive scanning"""
