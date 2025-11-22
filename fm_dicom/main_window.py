@@ -32,13 +32,16 @@ from fm_dicom.ui.layout_mixin import LayoutMixin
 from fm_dicom.managers.file_manager import FileManager
 from fm_dicom.managers.tree_manager import TreeManager, TREE_PATH_ROLE
 from fm_dicom.managers.dicom_manager import DicomManager
+from fm_dicom.managers.audit_manager import AuditLogManager
 
 # Existing modules that will be preserved
 from fm_dicom.anonymization.anonymization import TemplateManager
 from fm_dicom.widgets.focus_aware import FocusAwareMessageBox, FocusAwareProgressDialog
 from fm_dicom.dialogs.utility_dialogs import LogViewerDialog, SettingsEditorDialog, ConfigDiagnosticsDialog
+from fm_dicom.dialogs.audit_log_dialog import AuditLogDialog
 from fm_dicom.dialogs.results_dialogs import FileAnalysisResultsDialog, PerformanceResultsDialog
 from fm_dicom.workers.export_worker import ExportWorker
+from fm_dicom.network.receive_service import DicomReceiveService
 
 # Keep the pynetdicom imports for DICOM operations
 from pynetdicom import AE, AllStoragePresentationContexts
@@ -78,10 +81,14 @@ class MainWindow(QMainWindow, LayoutMixin):
         self._pending_ui_state = None
 
         # Initialize managers
+        self.audit_manager = AuditLogManager()
         self._setup_managers()
         
         # Connect signals between managers and UI
         self._setup_signal_connections()
+
+        self.receive_service = None
+        self._setup_receive_service()
         
         # Initialize state
         self.loaded_files = []
@@ -161,7 +168,7 @@ class MainWindow(QMainWindow, LayoutMixin):
         """Initialize all manager classes"""
         self.file_manager = FileManager(self)
         self.tree_manager = TreeManager(self)
-        self.dicom_manager = DicomManager(self)
+        self.dicom_manager = DicomManager(self, audit_manager=self.audit_manager)
     
     def _setup_signal_connections(self):
         """Setup signal connections between managers and UI"""
@@ -178,6 +185,25 @@ class MainWindow(QMainWindow, LayoutMixin):
         # DICOM manager signals
         self.dicom_manager.tag_data_changed.connect(self._on_tag_data_changed)
         self.dicom_manager.image_loaded.connect(self._on_image_loaded)
+
+    def _setup_receive_service(self):
+        """Start the background DICOM receive service if enabled."""
+        receive_config = self.config.get("receive", {})
+        if not receive_config.get("enabled", True):
+            return
+        try:
+            self.receive_service = DicomReceiveService(receive_config)
+        except Exception as exc:  # pragma: no cover - optional service
+            logging.error("Failed to initialize receive service: %s", exc, exc_info=True)
+            self.receive_service = None
+            return
+
+        self.receive_service.study_progress.connect(self.tree_manager.mark_inbound_progress)
+        self.receive_service.study_completed.connect(self.tree_manager.mark_inbound_complete)
+        self.receive_service.study_failed.connect(
+            lambda info, msg: self.tree_manager.mark_inbound_failed(info, msg)
+        )
+        self.receive_service.start()
     
     # Event handlers and coordination methods
     def _on_tree_selection_changed(self, file_paths):
@@ -209,6 +235,16 @@ class MainWindow(QMainWindow, LayoutMixin):
         """Handle image loading completion"""
         # This is where we could add image processing or analysis
         pass
+
+    def show_audit_log(self):
+        dialog = AuditLogDialog(self, self.audit_manager)
+        dialog.exec()
+
+    def closeEvent(self, event):
+        """Ensure background services are stopped before exiting."""
+        if hasattr(self, "receive_service") and self.receive_service:
+            self.receive_service.stop()
+        super().closeEvent(event)
     
     # Delegate methods to managers (these maintain the existing API)
     def open_file(self):

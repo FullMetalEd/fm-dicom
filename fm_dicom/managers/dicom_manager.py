@@ -28,10 +28,11 @@ class DicomManager(QObject):
     tag_data_changed = pyqtSignal()       # Emitted when tag data changes
     image_loaded = pyqtSignal(QPixmap)    # Emitted when image is loaded
     
-    def __init__(self, main_window):
+    def __init__(self, main_window, audit_manager=None):
         super().__init__()
         self.main_window = main_window
         self.config = main_window.config
+        self.audit_manager = audit_manager
         self.tag_table = main_window.tag_table
         self.search_bar = main_window.search_bar
         self.image_label = main_window.image_label
@@ -312,7 +313,9 @@ class DicomManager(QObject):
                     edits.append({
                         'tag': tag_tuple, 
                         'value_str': new_value_item.text(), 
-                        'original_elem': original_elem
+                        'original_elem': original_elem,
+                        'tag_id_str': clean_tag_id,
+                        'tag_description': self.tag_table.item(i, 1).text()
                     })
                 except Exception as e:
                     FocusAwareMessageBox.warning(self.main_window, "Error", f"Failed to parse tag {tag_id_str}: {e}")
@@ -348,6 +351,7 @@ class DicomManager(QObject):
             try:
                 ds = pydicom.dcmread(fp)
                 file_updated = False
+                labels = self._get_dataset_labels(ds)
                 
                 for edit_info in edits:
                     tag = edit_info['tag']
@@ -356,15 +360,32 @@ class DicomManager(QObject):
 
                     if tag in ds:  # Modify existing tag
                         target_elem = ds[tag]
+                        old_value_fmt = self._format_audit_value(target_elem.value)
                         try:
                             # Convert value based on VR
                             converted_value = self._convert_value_by_vr_advanced(new_val_str, original_elem_ref, target_elem)
                             target_elem.value = converted_value
                             file_updated = True
+                            self._record_audit_entry(
+                                fp,
+                                level,
+                                edit_info,
+                                labels,
+                                old_value_fmt,
+                                self._format_audit_value(converted_value),
+                            )
                         except Exception as e_conv:
                             logging.warning(f"Could not convert value '{new_val_str}' for tag {tag} in {fp}. Error: {e_conv}. Saving as string.")
                             target_elem.value = new_val_str  # Fallback to string
                             file_updated = True
+                            self._record_audit_entry(
+                                fp,
+                                level,
+                                edit_info,
+                                labels,
+                                old_value_fmt,
+                                new_val_str,
+                            )
                     else:  # Add new tag
                         try:
                             # Get VR from original element reference
@@ -375,18 +396,34 @@ class DicomManager(QObject):
                             ds.add_new(tag, vr, converted_value)
                             file_updated = True
                             logging.info(f"Added new tag {tag} with VR {vr} and value '{new_val_str}' to {fp}")
+                            self._record_audit_entry(
+                                fp,
+                                level,
+                                edit_info,
+                                labels,
+                                "",
+                                self._format_audit_value(converted_value),
+                            )
                         except Exception as e_add:
                             logging.warning(f"Could not add new tag {tag} to {fp}. Error: {e_add}. Trying with string value.")
                             try:
                                 # Fallback to string value with LO VR
                                 ds.add_new(tag, 'LO', new_val_str)
                                 file_updated = True
+                                self._record_audit_entry(
+                                    fp,
+                                    level,
+                                    edit_info,
+                                    labels,
+                                    "",
+                                    new_val_str,
+                                )
                             except Exception as e_fallback:
                                 logging.error(f"Failed to add new tag {tag} to {fp}: {e_fallback}")
                                 continue
                 
                 if file_updated:
-                    ds.save_as(fp)
+                    ds.save_as(fp, write_like_original=False)
                     updated_count += 1
                     
             except Exception as e_file:
@@ -445,6 +482,37 @@ class DicomManager(QObject):
         else:
             # Try direct cast to original Python type
             return type(target_elem.value)(new_val_str)
+
+    def _format_audit_value(self, value):
+        if value is None:
+            return ""
+        text = str(value)
+        if len(text) > 512:
+            text = text[:512] + "..."
+        return text
+
+    def _get_dataset_labels(self, ds):
+        patient = f"{getattr(ds, 'PatientName', 'Unknown')} ({getattr(ds, 'PatientID', 'Unknown ID')})"
+        study_desc = getattr(ds, 'StudyDescription', '')
+        series_desc = getattr(ds, 'SeriesDescription', '')
+        return patient, study_desc, series_desc
+
+    def _record_audit_entry(self, file_path, level, edit_info, labels, old_value, new_value):
+        if not self.audit_manager:
+            return
+        patient_label, study_desc, series_desc = labels
+        self.audit_manager.add_entry(
+            action="tag_edit",
+            level=level,
+            file_path=file_path,
+            patient_label=patient_label,
+            study_description=study_desc,
+            series_description=series_desc,
+            tag_id=edit_info.get("tag_id_str", ""),
+            tag_description=edit_info.get("tag_description", ""),
+            old_value=old_value,
+            new_value=new_value,
+        )
     
     def _get_tree_item_depth(self, item):
         """Calculate the depth of a tree item (0 = root level)"""

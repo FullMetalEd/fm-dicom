@@ -10,7 +10,7 @@ import logging
 import pydicom
 from PyQt6.QtWidgets import QTreeWidgetItem, QProgressDialog, QApplication, QMenu, QDialog
 from PyQt6.QtCore import QObject, pyqtSignal, Qt, QPoint
-from PyQt6.QtGui import QIcon, QAction
+from PyQt6.QtGui import QIcon, QAction, QBrush, QColor
 
 from fm_dicom.widgets.focus_aware import FocusAwareMessageBox, FocusAwareProgressDialog
 from fm_dicom.utils.threaded_processor import ThreadedDicomProcessor, DicomProcessingResult, FastDicomScanner
@@ -36,6 +36,9 @@ class TreeManager(QObject):
         self.memory_items = {}   # In-memory duplicated items (survive refresh)
         self.loaded_files = []
         self.hierarchy = {}  # Store hierarchy data for performance
+        self._inbound_root = None
+        self._inbound_nodes = {}
+        self._inbound_brush = QBrush(QColor("#7f8c8d"))
 
         # Performance optimization settings from config
         perf_config = main_window.config.get('performance', {})
@@ -904,6 +907,68 @@ class TreeManager(QObject):
             "instances": instances,
             "seen_paths": seen,
         }
+
+    # ------------------------------------------------------------------
+    # Inbound receive handling
+    def _ensure_inbound_root(self):
+        if self._inbound_root and not self._inbound_root.isHidden():
+            return self._inbound_root
+        self._inbound_root = QTreeWidgetItem(["Inbound", "", "", ""])
+        self._inbound_root.setForeground(0, self._inbound_brush)
+        self._inbound_root.setFirstColumnSpanned(True)
+        self._inbound_root.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        self._inbound_root.setData(0, TREE_PATH_ROLE, ("inbound",))
+        self.tree.addTopLevelItem(self._inbound_root)
+        self._inbound_root.setExpanded(True)
+        return self._inbound_root
+
+    def mark_inbound_progress(self, info: dict):
+        """Update placeholder nodes for studies currently being received."""
+        study_uid = info.get("study_uid")
+        if not study_uid:
+            return
+        parent = self._ensure_inbound_root()
+        node = self._inbound_nodes.get(study_uid)
+        label = info.get("patient_label", "Inbound")
+        study_desc = info.get("study_description", "Study")
+        text = f"{info.get('instance_count', 0)} instance(s) receiving"
+
+        if node is None:
+            node = QTreeWidgetItem(parent, [label, study_desc, "", text])
+            node.setForeground(0, self._inbound_brush)
+            node.setForeground(1, self._inbound_brush)
+            node.setForeground(3, self._inbound_brush)
+            node.setData(0, TREE_PATH_ROLE, ("inbound", study_uid))
+            node.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self._inbound_nodes[study_uid] = node
+        else:
+            node.setText(0, label)
+            node.setText(1, study_desc)
+            node.setText(3, text)
+
+        parent.setExpanded(True)
+
+    def mark_inbound_complete(self, info: dict):
+        """Remove placeholder and append completed study to the tree."""
+        study_uid = info.get("study_uid")
+        if not study_uid:
+            return
+        node = self._inbound_nodes.pop(study_uid, None)
+        if node and node.parent():
+            node.parent().removeChild(node)
+
+        study_dir = info.get("study_dir")
+        if study_dir and os.path.isdir(study_dir):
+            self.main_window.file_manager.load_path_additive(study_dir)
+
+    def mark_inbound_failed(self, info: dict, message: str):
+        """Remove placeholder and show error tooltip for failed transfers."""
+        study_uid = info.get("study_uid")
+        node = self._inbound_nodes.pop(study_uid, None)
+        if node:
+            node.setText(3, f"Failed: {message}")
+            node.setToolTip(0, message)
+            node.setForeground(3, QBrush(QColor("#c0392b")))
 
     def _build_move_options(self, source_level: str) -> list:
         """Return a list of potential destinations for the move dialog."""

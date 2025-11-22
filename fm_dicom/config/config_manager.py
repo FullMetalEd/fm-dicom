@@ -312,7 +312,19 @@ def load_config(config_path_override=None):
             "(0020,000D)",  # Study Instance UID
             "(0020,000E)",  # Series Instance UID
             "(0008,103E)"   # Series Description
-        ]
+        ],
+
+        # DICOM receive (Storage SCP) defaults
+        "receive": {
+            "enabled": True,
+            "ae_title": "FM_DICOM",
+            "bind_address": "0.0.0.0",
+            "port": 11112,
+            "allowed_ae_titles": [],
+            "allowed_hosts": [],
+            "receive_dir": os.path.join(default_user_home_dir, app_name, "ingress"),
+            "log_path": os.path.join(default_user_home_dir, app_name, "logs", "receive.log")
+        }
     }
 
     paths_to_check = []

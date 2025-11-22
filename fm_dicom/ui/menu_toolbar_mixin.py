@@ -191,6 +191,11 @@ class MenuToolbarMixin:
         export_action.setStatusTip("Export selected files")
         export_action.triggered.connect(self.export_files)
         tools_menu.addAction(export_action)
+
+        audit_action = QAction("Audit &Log...", self)
+        audit_action.setStatusTip("View tag change audit log")
+        audit_action.triggered.connect(self.show_audit_log)
+        tools_menu.addAction(audit_action)
     
     def _setup_help_menu(self, menubar):
         """Setup Help menu"""
