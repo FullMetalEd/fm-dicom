@@ -1233,6 +1233,7 @@ class TreeManager(QObject):
         for file_path in files_to_remove:
             self.file_metadata.pop(file_path, None)
             self.memory_items.pop(file_path, None)
+            self._remove_file_from_hierarchy(file_path)
         
         # Remove items from tree
         for item in selected_items:
@@ -1248,6 +1249,30 @@ class TreeManager(QObject):
         self._on_selection_changed()  # Update selection
         
         logging.info(f"Deleted {len(files_to_remove)} files from tree")
+
+    def _remove_file_from_hierarchy(self, file_path):
+        """Remove a file reference from the cached hierarchy."""
+        if not self.hierarchy:
+            return
+
+        for patient_label in list(self.hierarchy.keys()):
+            studies = self.hierarchy.get(patient_label, {})
+            for study_label in list(studies.keys()):
+                series_map = studies.get(study_label, {})
+                for series_label in list(series_map.keys()):
+                    instances = series_map.get(series_label, {})
+                    removed = False
+                    for instance_label in list(instances.keys()):
+                        instance_data = instances.get(instance_label, {})
+                        if instance_data.get("filepath") == file_path:
+                            instances.pop(instance_label, None)
+                            removed = True
+                    if removed and not instances:
+                        series_map.pop(series_label, None)
+                    if not series_map:
+                        studies.pop(study_label, None)
+                if not studies:
+                    self.hierarchy.pop(patient_label, None)
     
     def clear_tree(self):
         """Clear all tree contents"""

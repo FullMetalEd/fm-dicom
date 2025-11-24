@@ -888,9 +888,12 @@ class DicomSendSelectionDialog(QDialog):
                 for i in range(item.childCount()):
                     filter_recursive(item.child(i))
 
-        # Apply filter to all top-level items
-        for i in range(self.tree.topLevelItemCount()):
-            filter_recursive(self.tree.topLevelItem(i))
+        tree = getattr(self, "tree_widget", None)
+        if not tree:
+            return
+
+        for i in range(tree.topLevelItemCount()):
+            filter_recursive(tree.topLevelItem(i))
     
     def _expand_all(self):
         """Expand all tree items"""
