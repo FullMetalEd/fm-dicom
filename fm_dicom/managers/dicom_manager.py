@@ -7,10 +7,16 @@ validation, anonymization, and network operations.
 
 import os
 import logging
+from contextlib import contextmanager
+from dataclasses import dataclass
+from types import SimpleNamespace
+from typing import Dict, List, Optional, Tuple
+
 import pydicom
+from pydicom.datadict import dictionary_VR
 from PyQt6.QtWidgets import QTableWidgetItem, QApplication
 from PyQt6.QtCore import QObject, pyqtSignal, Qt
-from PyQt6.QtGui import QPixmap, QImage, QFont
+from PyQt6.QtGui import QPixmap, QImage, QFont, QColor, QBrush
 
 from fm_dicom.widgets.focus_aware import FocusAwareMessageBox, FocusAwareProgressDialog
 from fm_dicom.validation.validation_ui import run_validation
@@ -19,20 +25,32 @@ from fm_dicom.tag_browser.tag_browser import TagSearchDialog, ValueEntryDialog
 from fm_dicom.dialogs.dicom_send_selection import DicomSendSelectionDialog
 from fm_dicom.dialogs.selection_dialogs import DicomSendDialog
 from fm_dicom.config.config_manager import get_favorite_tags
+from fm_dicom.managers.tree_manager import TREE_PATH_ROLE
+from fm_dicom.managers.staging_manager import StagedChange
+
+
+@dataclass
+class ScopeContext:
+    level: str
+    node_path: Tuple[str, ...]
+    file_paths: List[str]
 
 
 class DicomManager(QObject):
     """Manager class for DICOM operations"""
+
+    LEVEL_TO_DEPTH = {"Patient": 0, "Study": 1, "Series": 2, "Instance": 3}
     
     # Signals
     tag_data_changed = pyqtSignal()       # Emitted when tag data changes
     image_loaded = pyqtSignal(QPixmap)    # Emitted when image is loaded
     
-    def __init__(self, main_window, audit_manager=None):
+    def __init__(self, main_window, audit_manager=None, staging_manager=None):
         super().__init__()
         self.main_window = main_window
         self.config = main_window.config
         self.audit_manager = audit_manager
+        self.staging_manager = staging_manager
         self.tag_table = main_window.tag_table
         self.search_bar = main_window.search_bar
         self.image_label = main_window.image_label
@@ -45,12 +63,20 @@ class DicomManager(QObject):
         self._has_unsaved_changes = False
         self._current_filter_text = ""  # Store current search filter
         self._favorite_tags = []  # Cache favorite tags from config
+        self._current_tree_path: Tuple[str, ...] = ()
+        self._active_staged_overlays: Dict[str, StagedChange] = {}
+        self._suppress_tag_change_handler = False
+        self._baseline_brush = QColor("#fff8e1")
+        self._staged_brush = QColor("#d6ecff")
+        self._staged_text_brush = QBrush(QColor("#0b3d60"))
 
         # Load favorite tags from config
         self._load_favorite_tags()
 
         # Connect signals
         self.tag_table.itemChanged.connect(self._on_tag_changed)
+        self._baseline_values = {}
+        self._update_unsaved_state()
     
     def load_dicom_tags(self, file_path):
         """Load DICOM tags for a file into the tag table"""
@@ -83,6 +109,7 @@ class DicomManager(QObject):
 
             self.current_file = file_path
             self.current_dataset = ds
+            self._current_tree_path = self._derive_tree_path_for_file(file_path)
             
             # Update image frames if applicable
             self._update_frame_selector(ds)
@@ -94,6 +121,9 @@ class DicomManager(QObject):
             if self.config.get("show_image_preview", True):
                 self.display_image()
             
+            self._baseline_values = self._capture_current_values(ds)
+            self._rebuild_active_overlays()
+            self._refresh_tag_table()
             logging.info(f"Loaded DICOM tags for: {file_path}")
             
         except Exception as e:
@@ -161,79 +191,383 @@ class DicomManager(QObject):
             x['display_row'][0]  # Then sort by tag ID within each group
         ))
         
-        # Populate table
+        # Rows will be rendered via _refresh_tag_table once staging overlays are applied
+    
+    def _capture_current_values(self, ds) -> Dict[str, str]:
+        """Snapshot baseline values from the loaded dataset."""
+        baseline: Dict[str, str] = {}
+        if ds is None:
+            return baseline
+        for elem in ds:
+            try:
+                tag_id = f"({elem.tag.group:04X},{elem.tag.element:04X})"
+                value = elem.value
+                if value is None:
+                    baseline[tag_id] = ""
+                else:
+                    baseline[tag_id] = str(value)
+            except Exception:
+                continue
+        return baseline
+
+    def _derive_tree_path_for_file(self, file_path: Optional[str]) -> Tuple[str, ...]:
+        """Return the hierarchy path tuple for the provided file."""
+        if not file_path:
+            return ()
+        tree_manager = getattr(self.main_window, "tree_manager", None)
+        if not tree_manager:
+            return ()
+
+        meta = tree_manager.file_metadata.get(file_path)
+        if isinstance(meta, tuple):
+            path = tuple(value for value in meta if value)
+            if path:
+                return path
+
+        # Fallback: search the tree for the matching file
+        if hasattr(tree_manager, "_find_item_by"):
+            item = tree_manager._find_item_by(
+                lambda tree_item: tree_item.data(0, Qt.ItemDataRole.UserRole) == file_path
+            )
+            if item:
+                path_data = item.data(0, TREE_PATH_ROLE)
+                if path_data:
+                    return tuple(path_data)
+        return ()
+
+    def _rebuild_active_overlays(self):
+        """Recompute staged overlays for the currently viewed file."""
+        if not self.staging_manager or not self._current_tree_path:
+            self._active_staged_overlays = {}
+            self._cleanup_staged_only_rows()
+            return
+
+        overlays: Dict[str, StagedChange] = {}
+        depth_map: Dict[str, int] = {}
+
+        for _, node_path, tag_map in self.staging_manager.get_changes_for_path(self._current_tree_path):
+            depth = len(node_path)
+            for tag_id, change in tag_map.items():
+                prev_depth = depth_map.get(tag_id, -1)
+                if depth >= prev_depth:
+                    overlays[tag_id] = change
+                    depth_map[tag_id] = depth
+                    if change.old_value is not None:
+                        self._baseline_values.setdefault(tag_id, change.old_value)
+
+        self._active_staged_overlays = overlays
+        self._cleanup_staged_only_rows()
+        self._inject_missing_staged_rows()
+
+    def _cleanup_staged_only_rows(self):
+        """Remove placeholder rows for tags that are no longer staged."""
+        if not self._all_tag_rows:
+            return
+        staged_tags = set(self._active_staged_overlays.keys())
+        updated_rows = []
+        changed = False
+        for row in self._all_tag_rows:
+            if row.get("staged_only") and row["display_row"][0] not in staged_tags:
+                changed = True
+                continue
+            updated_rows.append(row)
+        if changed:
+            self._all_tag_rows = updated_rows
+
+    def _inject_missing_staged_rows(self):
+        """Ensure staged-only tags appear in the table."""
+        if not self._active_staged_overlays:
+            return
+
+        existing_tags = {row["display_row"][0] for row in self._all_tag_rows}
+        added = False
+
+        for tag_id, change in self._active_staged_overlays.items():
+            if tag_id in existing_tags:
+                continue
+            elem_obj = self._build_placeholder_element(change)
+            display_row = [
+                tag_id,
+                change.tag_description or "Custom Tag",
+                change.old_value or "",
+                "",
+            ]
+            self._all_tag_rows.append(
+                {"elem_obj": elem_obj, "display_row": display_row, "staged_only": True}
+            )
+            existing_tags.add(tag_id)
+            self._baseline_values.setdefault(tag_id, change.old_value or "")
+            added = True
+
+        if added:
+            self._all_tag_rows.sort(
+                key=lambda x: (
+                    not self._is_favorite_tag(x["display_row"][0]),
+                    x["display_row"][0],
+                )
+            )
+
+    def _build_placeholder_element(self, change: StagedChange):
+        """Create a minimal DataElement for staged-only rows."""
+        vr = change.vr or "LO"
+        value = change.old_value or ""
+        try:
+            return pydicom.DataElement(change.tag_tuple, vr, value)
+        except Exception:
+            return pydicom.DataElement(change.tag_tuple, "LO", value)
+
+    def _resolve_scope_context(self) -> Optional[ScopeContext]:
+        """Determine the active scope (level + node path) based on selection."""
+        tree_manager = getattr(self.main_window, "tree_manager", None)
+        if not tree_manager:
+            return None
+
+        selected_path = tree_manager.get_primary_selected_path()
+        if not selected_path:
+            return None
+
+        level = self.main_window.edit_level_combo.currentText()
+        node_path = self._trim_path_for_level(tuple(selected_path), level)
+        target_item = tree_manager._get_item_by_path(node_path)
+        if target_item is None:
+            return None
+
+        file_paths = tree_manager._collect_instance_filepaths(target_item)
+        return ScopeContext(level=level, node_path=node_path, file_paths=file_paths)
+
+    def _trim_path_for_level(self, path_tuple: Tuple[str, ...], level: str) -> Tuple[str, ...]:
+        """Trim or preserve the selected path to match the desired scope depth."""
+        target_depth = self.LEVEL_TO_DEPTH.get(level, len(path_tuple) - 1)
+        if len(path_tuple) - 1 > target_depth:
+            return tuple(path_tuple[: target_depth + 1])
+        return path_tuple
+
+    def _lookup_vr(self, tag_tuple: Tuple[int, int]) -> str:
+        """Best-effort lookup for a tag's VR."""
+        try:
+            vr = dictionary_VR(tag_tuple)
+            if vr:
+                return vr
+        except Exception:
+            pass
+        return "LO"
+
+    def _update_unsaved_state(self):
+        """Update UI affordances based on staged changes."""
+        has_changes = self.staging_manager.has_changes() if self.staging_manager else False
+        self._has_unsaved_changes = has_changes
+
+        if hasattr(self.main_window, "save_btn"):
+            self.main_window.save_btn.setEnabled(has_changes)
+        toolbar_action = getattr(self.main_window, "toolbar_save_action", None)
+        if toolbar_action:
+            toolbar_action.setEnabled(has_changes)
+
+        if hasattr(self.main_window, "on_staging_changed"):
+            try:
+                self.main_window.on_staging_changed()
+            except Exception:
+                logging.debug("Main window staging callback failed", exc_info=True)
+
+    def commit_staged_changes(
+        self,
+        level: str,
+        node_path: Tuple[str, ...],
+        tag_ids: Optional[List[str]] = None,
+        *,
+        show_feedback: bool = True,
+    ) -> Optional[dict]:
+        """Persist staged changes for the provided scope."""
+        if not self.staging_manager:
+            return None
+
+        scope_changes = self.staging_manager.get_scope_changes(level, node_path)
+        if not scope_changes:
+            return None
+
+        if tag_ids:
+            scope_changes = {tag_id: scope_changes[tag_id] for tag_id in tag_ids if tag_id in scope_changes}
+            if not scope_changes:
+                return None
+
+        filepaths = self._collect_filepaths_for_node(node_path)
+        if not filepaths:
+            FocusAwareMessageBox.warning(
+                self.main_window,
+                "Commit Staged Changes",
+                "No DICOM instances were found for the selected scope."
+            )
+            return None
+
+        edits = [self._build_edit_payload(change) for change in scope_changes.values()]
+        result = self._perform_level_tag_save(
+            filepaths,
+            edits,
+            level,
+            show_summary=show_feedback,
+            summary_title="Changes Saved",
+        )
+
+        for tag_id in scope_changes.keys():
+            self.staging_manager.remove_change(level, node_path, tag_id)
+
+        self._rebuild_active_overlays()
         self._refresh_tag_table()
+        self._update_unsaved_state()
+        return result
+
+    def discard_staged_changes(self, level: str, node_path: Tuple[str, ...], tag_ids: Optional[List[str]] = None) -> bool:
+        """Drop staged changes for the provided scope."""
+        if not self.staging_manager:
+            return False
+
+        if tag_ids:
+            removed = False
+            for tag_id in tag_ids:
+                before = self.staging_manager.get_change(level, node_path, tag_id)
+                self.staging_manager.remove_change(level, node_path, tag_id)
+                removed = removed or before is not None
+        else:
+            removed = bool(self.staging_manager.pop_scope(level, node_path))
+
+        if not removed:
+            return False
+
+        self._rebuild_active_overlays()
+        self._refresh_tag_table()
+        self._update_unsaved_state()
+        return True
+
+    def discard_all_staged_changes(self):
+        """Clear every staged edit."""
+        if not self.staging_manager or not self.staging_manager.has_changes():
+            return
+        self.staging_manager.clear_all()
+        self._rebuild_active_overlays()
+        self._refresh_tag_table()
+        self._update_unsaved_state()
+
+    def has_staged_changes_for_scope(self, level: str, node_path: Tuple[str, ...]) -> bool:
+        if not self.staging_manager:
+            return False
+        return self.staging_manager.has_scope_changes(level, node_path)
+
+    def _collect_filepaths_for_node(self, node_path: Tuple[str, ...]) -> List[str]:
+        tree_manager = getattr(self.main_window, "tree_manager", None)
+        if not tree_manager or not node_path:
+            return []
+        target_item = tree_manager._get_item_by_path(node_path)
+        if not target_item:
+            return []
+        return tree_manager._collect_instance_filepaths(target_item)
+
+    def _build_edit_payload(self, change: StagedChange) -> Dict[str, object]:
+        return {
+            "tag": change.tag_tuple,
+            "value_str": "" if change.new_value is None else str(change.new_value),
+            "original_elem": SimpleNamespace(VR=change.vr or "LO"),
+            "tag_id_str": change.tag_id,
+            "tag_description": change.tag_description,
+        }
+
+    def _clear_new_value_cells(self):
+        """Clear the new-value column without triggering staging."""
+        with self._suspend_tag_change_signals():
+            for row in range(self.tag_table.rowCount()):
+                new_value_item = self.tag_table.item(row, 3)
+                if new_value_item:
+                    new_value_item.setText("")
+
+    @contextmanager
+    def _suspend_tag_change_signals(self):
+        """Temporarily suppress itemChanged handling while we mutate cells."""
+        previous_state = self._suppress_tag_change_handler
+        self._suppress_tag_change_handler = True
+        try:
+            yield
+        finally:
+            self._suppress_tag_change_handler = previous_state
     
     def _refresh_tag_table(self):
         """Refresh the tag table display, applying current filter if any"""
-        self.tag_table.setRowCount(0)
-        
-        # Apply current filter or show all tags
-        filter_text = self._current_filter_text
-        
-        for row_info in self._all_tag_rows:
-            elem_obj = row_info['elem_obj']
-            display_row = row_info['display_row']
-            tag_id, desc, value, _ = display_row
+        with self._suspend_tag_change_signals():
+            self.tag_table.setRowCount(0)
             
-            # Check if row matches current filter (if any)
-            if filter_text and not (
-                filter_text in tag_id.lower() or 
-                filter_text in desc.lower() or
-                filter_text in value.lower()
-            ):
-                continue  # Skip this row if it doesn't match filter
+            filter_text = self._current_filter_text
             
-            # Add matching row to table
-            row_idx = self.tag_table.rowCount()
-            self.tag_table.insertRow(row_idx)
+            for row_info in self._all_tag_rows:
+                elem_obj = row_info['elem_obj']
+                display_row = row_info['display_row']
+                tag_id, desc, value, _ = display_row
+                
+                # Check if row matches current filter (if any)
+                if filter_text and not (
+                    filter_text in tag_id.lower() or 
+                    filter_text in desc.lower() or
+                    filter_text in value.lower()
+                ):
+                    continue
+                
+                row_idx = self.tag_table.rowCount()
+                self.tag_table.insertRow(row_idx)
 
-            # Check if this is a favorite tag
-            is_favorite = self._is_favorite_tag(tag_id)
+                is_favorite = self._is_favorite_tag(tag_id)
 
-            # Create table items with visual indicators for favorites
-            tag_id_item = QTableWidgetItem(f"★ {tag_id}" if is_favorite else tag_id)
-            desc_item = QTableWidgetItem(desc)
-            value_item = QTableWidgetItem(value)
+                tag_display = f"★ {tag_id}" if is_favorite else tag_id
+                tag_id_item = QTableWidgetItem(tag_display)
+                desc_item = QTableWidgetItem(desc)
+                value_item = QTableWidgetItem(value)
 
-            # Apply bold font for favorite tags
-            if is_favorite:
-                bold_font = QFont()
-                bold_font.setBold(True)
-                tag_id_item.setFont(bold_font)
-                desc_item.setFont(bold_font)
-                value_item.setFont(bold_font)
+                if is_favorite:
+                    bold_font = QFont()
+                    bold_font.setBold(True)
+                    tag_id_item.setFont(bold_font)
+                    desc_item.setFont(bold_font)
+                    value_item.setFont(bold_font)
+                    tag_id_item.setToolTip("Favorite tag")
+                    desc_item.setToolTip("Favorite tag")
 
-                # Set tooltip to indicate it's a favorite
-                tag_id_item.setToolTip("Favorite tag")
-                desc_item.setToolTip("Favorite tag")
+                self.tag_table.setItem(row_idx, 0, tag_id_item)
+                self.tag_table.setItem(row_idx, 1, desc_item)
+                self.tag_table.setItem(row_idx, 2, value_item)
+                
+                new_value_item = QTableWidgetItem("")
+                new_value_item.setData(Qt.ItemDataRole.UserRole, elem_obj)
 
-            # Set table items
-            self.tag_table.setItem(row_idx, 0, tag_id_item)
-            self.tag_table.setItem(row_idx, 1, desc_item)
-            self.tag_table.setItem(row_idx, 2, value_item)
+                baseline = self._baseline_values.get(tag_id)
+                if baseline is not None and baseline != value:
+                    for col_item in (tag_id_item, desc_item, value_item):
+                        col_item.setBackground(self._baseline_brush)
+
+                if is_favorite:
+                    new_value_item.setFont(bold_font)
+
+                staged_entry = self._active_staged_overlays.get(tag_id)
+                if staged_entry:
+                    new_value_item.setText(staged_entry.new_value)
+                    new_value_item.setBackground(self._staged_brush)
+                    new_value_item.setToolTip(
+                        f"Pending {staged_entry.level} edit\n"
+                        f"{' → '.join(staged_entry.node_path)}"
+                    )
+                    new_value_item.setForeground(self._staged_text_brush)
+                else:
+                    new_value_item.setToolTip("")
+                    new_value_item.setForeground(QBrush(Qt.GlobalColor.black))
+
+                if (
+                    elem_obj.tag == (0x7fe0, 0x0010)
+                    or elem_obj.VR in ("OB", "OW", "UN", "SQ")
+                ):
+                    new_value_item.setFlags(new_value_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    new_value_item.setToolTip("This tag cannot be edited")
+
+                self.tag_table.setItem(row_idx, 3, new_value_item)
             
-            # New value column
-            new_value_item = QTableWidgetItem("")
-            new_value_item.setData(Qt.ItemDataRole.UserRole, elem_obj)
-
-            # Apply bold font for favorite tags
-            if is_favorite:
-                new_value_item.setFont(bold_font)
-
-            # Make certain tags non-editable
-            if (elem_obj.tag == (0x7fe0, 0x0010) or
-                elem_obj.VR in ("OB", "OW", "UN", "SQ")):
-                new_value_item.setFlags(new_value_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                new_value_item.setToolTip("This tag cannot be edited")
-
-            self.tag_table.setItem(row_idx, 3, new_value_item)
-        
-        # Set column widths
-        self.tag_table.setColumnWidth(0, 110)
-        self.tag_table.setColumnWidth(1, 220) 
-        self.tag_table.setColumnWidth(2, 260)
-        self.tag_table.setColumnWidth(3, 160)
+            self.tag_table.setColumnWidth(0, 110)
+            self.tag_table.setColumnWidth(1, 220) 
+            self.tag_table.setColumnWidth(2, 260)
+            self.tag_table.setColumnWidth(3, 160)
     
     def filter_tag_table(self, text):
         """Filter tag table based on search text"""
@@ -242,12 +576,58 @@ class DicomManager(QObject):
     
     def _on_tag_changed(self, item):
         """Handle tag value changes"""
-        if item.column() == 3:  # New value column
-            self._has_unsaved_changes = True
-            # Enable save button if it exists
-            if hasattr(self.main_window, 'save_btn'):
-                self.main_window.save_btn.setEnabled(True)
-            self.tag_data_changed.emit()
+        if item.column() != 3 or self._suppress_tag_change_handler:
+            return
+        if not self.staging_manager:
+            return
+
+        context = self._resolve_scope_context()
+        if not context:
+            logging.debug("Ignoring tag change because scope context is unavailable.")
+            return
+
+        tag_item = self.tag_table.item(item.row(), 0)
+        desc_item = self.tag_table.item(item.row(), 1)
+        value_item = self.tag_table.item(item.row(), 2)
+        if not tag_item:
+            return
+
+        tag_text = tag_item.text()
+        clean_tag_id = tag_text.replace("★", "").strip()
+
+        try:
+            group_hex, elem_hex = clean_tag_id[1:-1].split(",")
+            tag_tuple = (int(group_hex, 16), int(elem_hex, 16))
+        except Exception as exc:
+            logging.error(f"Failed to parse tag id {tag_text}: {exc}")
+            FocusAwareMessageBox.warning(
+                self.main_window,
+                "Tag Parse Error",
+                f"Could not parse tag identifier {tag_text}."
+            )
+            return
+
+        original_elem = item.data(Qt.ItemDataRole.UserRole)
+        vr = getattr(original_elem, "VR", None) or self._lookup_vr(tag_tuple)
+        old_value = value_item.text() if value_item else ""
+        new_value = item.text() or ""
+
+        self.staging_manager.stage_change(
+            level=context.level,
+            node_path=context.node_path,
+            tag_id=clean_tag_id,
+            tag_tuple=tag_tuple,
+            tag_description=desc_item.text() if desc_item else "",
+            old_value=old_value,
+            new_value=new_value,
+            vr=vr,
+            source_file=self.current_file,
+        )
+
+        self._rebuild_active_overlays()
+        self._refresh_tag_table()
+        self._update_unsaved_state()
+        self.tag_data_changed.emit()
 
     def _load_favorite_tags(self):
         """Load favorite tags from configuration"""
@@ -271,64 +651,26 @@ class DicomManager(QObject):
     
     def save_tag_changes(self):
         """Save tag changes to DICOM files based on selected level"""
-        if not self.current_file or not self.current_dataset:
-            FocusAwareMessageBox.warning(self.main_window, "No File", "No DICOM file selected.")
+        context = self._resolve_scope_context()
+        if not context:
+            FocusAwareMessageBox.warning(
+                self.main_window,
+                "No Selection",
+                "Please select a node in the tree to determine the scope for saving."
+            )
             return
 
-        # Get the selected level from the combo box
-        level = self.main_window.edit_level_combo.currentText()
-        selected = self.main_window.tree.selectedItems()
-        if not selected:
-            FocusAwareMessageBox.warning(self.main_window, "No Selection", "Please select a node in the tree.")
-            return
-        tree_item = selected[0]
-
-        level_map = {"Patient": 0, "Study": 1, "Series": 2, "Instance": 3}
-        target_level = level_map[level]
-        
-        # Find the node corresponding to the selected level relative to the clicked item
-        node_at_target_level = tree_item
-        while self._get_tree_item_depth(node_at_target_level) > target_level and node_at_target_level.parent():
-            node_at_target_level = node_at_target_level.parent()
-
-        filepaths = self.main_window.tree_manager._collect_instance_filepaths(node_at_target_level)
-        if not filepaths:
-            FocusAwareMessageBox.warning(self.main_window, "No Instances", "No DICOM instances found under this node for the selected level.")
+        if not self.has_staged_changes_for_scope(context.level, context.node_path):
+            FocusAwareMessageBox.information(
+                self.main_window,
+                "No Staged Changes",
+                "There are no staged edits for the selected scope."
+            )
             return
 
-        # Collect edits from the tag table
-        edits = []
-        for i in range(self.tag_table.rowCount()):
-            new_value_item = self.tag_table.item(i, 3)
-            if new_value_item and new_value_item.text().strip() != "":
-                tag_id_str = self.tag_table.item(i, 0).text()
-                original_elem = new_value_item.data(Qt.ItemDataRole.UserRole)
-
-                try:
-                    # Strip favorite tag star symbol and whitespace before parsing
-                    clean_tag_id = tag_id_str.replace("★", "").strip()
-                    group_hex, elem_hex = clean_tag_id[1:-1].split(",")
-                    tag_tuple = (int(group_hex, 16), int(elem_hex, 16))
-                    
-                    edits.append({
-                        'tag': tag_tuple, 
-                        'value_str': new_value_item.text(), 
-                        'original_elem': original_elem,
-                        'tag_id_str': clean_tag_id,
-                        'tag_description': self.tag_table.item(i, 1).text()
-                    })
-                except Exception as e:
-                    FocusAwareMessageBox.warning(self.main_window, "Error", f"Failed to parse tag {tag_id_str}: {e}")
-                    logging.error(f"Error parsing tag {tag_id_str}: {e}", exc_info=True)
-
-        if not edits:
-            FocusAwareMessageBox.information(self.main_window, "No Changes", "No tags were changed.")
-            return
-
-        # Perform the batch update
-        self._perform_level_tag_save(filepaths, edits, level)
+        self.commit_staged_changes(context.level, context.node_path)
     
-    def _perform_level_tag_save(self, filepaths, edits, level):
+    def _perform_level_tag_save(self, filepaths, edits, level, *, show_summary=True, summary_title="Changes Saved"):
         """Perform tag saves across multiple files at the specified level"""
         import pydicom
         from PyQt6.QtWidgets import QProgressDialog, QApplication
@@ -432,23 +774,22 @@ class DicomManager(QObject):
                 
         progress.setValue(len(filepaths))
         
-        # Show results
-        msg = f"Tag changes saved to {level}.\nUpdated {updated_count} of {len(filepaths)} files."
-        if failed_files:
-            msg += f"\nFailed: {len(failed_files)} files."
-            
-        FocusAwareMessageBox.information(self.main_window, "Changes Saved", msg)
+        result = {
+            "level": level,
+            "total_files": len(filepaths),
+            "updated": updated_count,
+            "failed_files": failed_files,
+        }
+
+        if show_summary:
+            msg = (
+                f"Tag changes saved to {level}.\n"
+                f"Updated {updated_count} of {len(filepaths)} files."
+            )
+            if failed_files:
+                msg += f"\nFailed: {len(failed_files)} files."
+            FocusAwareMessageBox.information(self.main_window, summary_title, msg)
         
-        # Clear change indicators and reload current file
-        for row in range(self.tag_table.rowCount()):
-            new_value_item = self.tag_table.item(row, 3)
-            if new_value_item:
-                new_value_item.setText("")
-        
-        self._has_unsaved_changes = False
-        if hasattr(self.main_window, 'save_btn'):
-            self.main_window.save_btn.setEnabled(False)
-            
         # Reload current file to show updated values
         if self.current_file in filepaths:
             self.load_dicom_tags(self.current_file)
@@ -459,6 +800,8 @@ class DicomManager(QObject):
                 self.main_window.prepare_for_tree_refresh()
             self.main_window.tree_manager.refresh_tree()
             logging.info("Tree refreshed after tag save")
+        
+        return result
     
     def _convert_value_by_vr_advanced(self, new_val_str, original_elem_ref, target_elem):
         """Advanced value conversion based on VR and original element"""
@@ -525,16 +868,12 @@ class DicomManager(QObject):
     
     def revert_tag_changes(self):
         """Revert unsaved tag changes"""
-        # Clear all new value fields
-        for row in range(self.tag_table.rowCount()):
-            new_value_item = self.tag_table.item(row, 3)
-            if new_value_item:
-                new_value_item.setText("")
-        
-        self._has_unsaved_changes = False
-        # Disable save button if it exists
-        if hasattr(self.main_window, 'save_btn'):
-            self.main_window.save_btn.setEnabled(False)
+        context = self._resolve_scope_context()
+        if context and self.staging_manager and self.has_staged_changes_for_scope(context.level, context.node_path):
+            self.discard_staged_changes(context.level, context.node_path)
+        else:
+            self._clear_new_value_cells()
+            self._update_unsaved_state()
     
     def clear_search_filter(self):
         """Clear the search filter and update UI"""
@@ -548,7 +887,9 @@ class DicomManager(QObject):
         self._all_tag_rows = []
         self.current_file = None
         self.current_dataset = None
-        self._has_unsaved_changes = False
+        self._current_tree_path = ()
+        self._active_staged_overlays = {}
+        self._baseline_values = {}
         self.clear_search_filter()  # Clear search filter and UI
         
         # Clear image
@@ -558,6 +899,8 @@ class DicomManager(QObject):
         # Clear frame selector
         if self.frame_selector:
             self.frame_selector.clear()
+        
+        self._update_unsaved_state()
     
     def _update_frame_selector(self, ds):
         """Update frame selector for multi-frame images"""
@@ -1047,6 +1390,8 @@ class DicomManager(QObject):
     
     def has_unsaved_changes(self):
         """Check if there are unsaved tag changes"""
+        if self.staging_manager:
+            return self.staging_manager.has_changes()
         return self._has_unsaved_changes
     
     def batch_edit_tags(self, file_paths):

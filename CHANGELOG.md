@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.5.4 - 2025-11-22
+- Introduce scope-aware staging so tag edits persist across patient/study/series navigation with clear baseline vs pending highlights.
+- Add Pending Changes dialog with per-entry commit/discard controls, better sizing, wrapping, and toolbar/menu access.
+- Batch commit/discard flows now run unattended and surface a single roll-up summary, plus exit/move safeguards when staging is non-empty.
+- Show staged edit counts in the summary bar and gate moves/quit until edits are committed or discarded.
+
 ## 2.5.3 - 2025-11-21
 - Allow multi-select when adding files through the append workflow.
 - Tree selection restores the exact study/series/instance after saving edits.

@@ -12,7 +12,7 @@ import sys
 import logging
 import platform
 import time
-from PyQt6.QtWidgets import QMainWindow, QApplication, QMenu
+from PyQt6.QtWidgets import QMainWindow, QApplication, QMenu, QMessageBox
 from PyQt6.QtGui import QAction, QIcon, QKeySequence
 from PyQt6.QtCore import Qt, QPoint, QTimer
 
@@ -33,6 +33,7 @@ from fm_dicom.managers.file_manager import FileManager
 from fm_dicom.managers.tree_manager import TreeManager, TREE_PATH_ROLE
 from fm_dicom.managers.dicom_manager import DicomManager
 from fm_dicom.managers.audit_manager import AuditLogManager
+from fm_dicom.managers.staging_manager import StagingManager
 
 # Existing modules that will be preserved
 from fm_dicom.anonymization.anonymization import TemplateManager
@@ -40,6 +41,7 @@ from fm_dicom.widgets.focus_aware import FocusAwareMessageBox, FocusAwareProgres
 from fm_dicom.dialogs.utility_dialogs import LogViewerDialog, SettingsEditorDialog, ConfigDiagnosticsDialog
 from fm_dicom.dialogs.audit_log_dialog import AuditLogDialog
 from fm_dicom.dialogs.results_dialogs import FileAnalysisResultsDialog, PerformanceResultsDialog
+from fm_dicom.dialogs.pending_changes_dialog import PendingChangesDialog
 from fm_dicom.workers.export_worker import ExportWorker
 from fm_dicom.network.receive_service import DicomReceiveService
 
@@ -82,6 +84,8 @@ class MainWindow(QMainWindow, LayoutMixin):
 
         # Initialize managers
         self.audit_manager = AuditLogManager()
+        self.staging_manager = StagingManager()
+        self.on_staging_changed()
         self._setup_managers()
         
         # Connect signals between managers and UI
@@ -168,7 +172,11 @@ class MainWindow(QMainWindow, LayoutMixin):
         """Initialize all manager classes"""
         self.file_manager = FileManager(self)
         self.tree_manager = TreeManager(self)
-        self.dicom_manager = DicomManager(self, audit_manager=self.audit_manager)
+        self.dicom_manager = DicomManager(
+            self,
+            audit_manager=self.audit_manager,
+            staging_manager=self.staging_manager,
+        )
     
     def _setup_signal_connections(self):
         """Setup signal connections between managers and UI"""
@@ -240,8 +248,213 @@ class MainWindow(QMainWindow, LayoutMixin):
         dialog = AuditLogDialog(self, self.audit_manager)
         dialog.exec()
 
+    def on_staging_changed(self):
+        """Update pending-changes UI when staging state flips."""
+        if not hasattr(self, "pending_changes_label"):
+            return
+        if not getattr(self, "staging_manager", None):
+            self.pending_changes_label.setText("No pending changes")
+            if hasattr(self, "pending_changes_action"):
+                self.pending_changes_action.setEnabled(False)
+            return
+
+        count = sum(1 for _ in self.staging_manager.iter_changes())
+        if count:
+            text = f"{count} pending change{'s' if count != 1 else ''}"
+        else:
+            text = "No pending changes"
+        self.pending_changes_label.setText(text)
+
+        if hasattr(self, "pending_changes_action"):
+            self.pending_changes_action.setEnabled(bool(count))
+
+    def show_pending_changes_dialog(self):
+        """Display the staged-changes dialog."""
+        if not self.staging_manager or not self.staging_manager.has_changes():
+            FocusAwareMessageBox.information(
+                self,
+                "Pending Changes",
+                "There are no staged edits to review."
+            )
+            return
+
+        dialog = PendingChangesDialog(
+            self,
+            self.staging_manager,
+            commit_callback=self.commit_all_staged_changes,
+            discard_callback=lambda: self.discard_all_staged_changes(prompt=True),
+            commit_entry_callback=self._commit_pending_entry,
+            discard_entry_callback=self._discard_pending_entry,
+        )
+        dialog.exec()
+
+    def commit_all_staged_changes(self):
+        """Commit every staged scope."""
+        if not self.staging_manager or not self.staging_manager.has_changes():
+            FocusAwareMessageBox.information(
+                self,
+                "Pending Changes",
+                "There are no staged edits to commit.",
+            )
+            return False
+
+        scope_results = []
+        for (level, node_path), tag_map in list(self.staging_manager.iter_scopes()):
+            tag_ids = list(tag_map.keys())
+            if not tag_ids:
+                continue
+            result = self.dicom_manager.commit_staged_changes(
+                level,
+                node_path,
+                tag_ids,
+                show_feedback=False,
+            )
+            if result:
+                result["node_path"] = node_path
+                scope_results.append(result)
+
+        self._show_commit_summary(scope_results)
+        return bool(scope_results)
+
+    def _show_commit_summary(self, scope_results):
+        """Display a single summary message after batch commits."""
+        if not scope_results:
+            return
+
+        total_scopes = len(scope_results)
+        total_updated = sum(res.get("updated", 0) for res in scope_results)
+        total_files = sum(res.get("total_files", 0) for res in scope_results)
+        total_failed = sum(len(res.get("failed_files", [])) for res in scope_results)
+
+        message_lines = [
+            f"Committed staged edits across {total_scopes} scope(s).",
+            f"Updated {total_updated} of {total_files} files.",
+        ]
+
+        if total_failed:
+            message_lines.append(f"{total_failed} file(s) failed.")
+            failed_samples = []
+            for res in scope_results:
+                for failure in res.get("failed_files", []):
+                    failed_samples.append(failure)
+                    if len(failed_samples) >= 5:
+                        break
+                if len(failed_samples) >= 5:
+                    break
+            if failed_samples:
+                message_lines.append("\nSample failures:\n" + "\n".join(failed_samples))
+
+        FocusAwareMessageBox.information(
+            self,
+            "Staged Changes Committed",
+            "\n".join(message_lines),
+        )
+
+    def discard_all_staged_changes(self, prompt=True):
+        """Discard every staged change."""
+        if not self.staging_manager or not self.staging_manager.has_changes():
+            return False
+
+        if prompt:
+            result = FocusAwareMessageBox.question(
+                self,
+                "Discard Pending Changes",
+                "Discard all staged edits? This cannot be undone."
+            )
+            if result != QMessageBox.StandardButton.Yes:
+                return False
+
+        self.dicom_manager.discard_all_staged_changes()
+        return True
+
+    def _commit_pending_entry(self, entry: dict) -> bool:
+        """Commit a single entry from the pending changes dialog."""
+        try:
+            level = entry.get("level")
+            node_path = tuple(entry.get("node_path") or [])
+            tag_id = entry.get("tag_id")
+        except AttributeError:
+            return False
+        if not level or not node_path or not tag_id:
+            return False
+        return bool(self.dicom_manager.commit_staged_changes(level, node_path, [tag_id]))
+
+    def _discard_pending_entry(self, entry: dict) -> bool:
+        """Discard a single staged entry."""
+        try:
+            level = entry.get("level")
+            node_path = tuple(entry.get("node_path") or [])
+            tag_id = entry.get("tag_id")
+        except AttributeError:
+            return False
+        if not level or not node_path or not tag_id:
+            return False
+        return self.dicom_manager.discard_staged_changes(level, node_path, [tag_id])
+
+    def _guard_pending_changes(self, action_description: str) -> bool:
+        """Warn the user when an operation conflicts with staged edits.
+
+        Returns True if the action should be aborted.
+        """
+        if not self.staging_manager or not self.staging_manager.has_changes():
+            return False
+
+        message = (
+            f"You have staged edits waiting to be committed. "
+            f"Please commit or discard them before you {action_description}."
+        )
+        dialog = FocusAwareMessageBox(
+            QMessageBox.Icon.Warning,
+            "Pending Changes",
+            message,
+            parent=self,
+        )
+        review_button = dialog.addButton("View Pending Changes", QMessageBox.ButtonRole.AcceptRole)
+        cancel_button = dialog.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        dialog.setDefaultButton(cancel_button)
+        dialog.exec()
+
+        if dialog.clickedButton() == review_button:
+            self.show_pending_changes_dialog()
+        return True
+
+    def _move_selected_items_with_guard(self):
+        """Ensure staged edits are handled before moving nodes."""
+        if self._guard_pending_changes("move items"):
+            return
+        self.tree_manager.move_selected_item()
+
     def closeEvent(self, event):
         """Ensure background services are stopped before exiting."""
+        if self.staging_manager and self.staging_manager.has_changes():
+            message = (
+                "You still have staged edits that have not been committed.\n\n"
+                "Would you like to commit them before exiting?"
+            )
+            prompt = FocusAwareMessageBox(
+                QMessageBox.Icon.Warning,
+                "Pending Changes",
+                message,
+                parent=self,
+            )
+            commit_btn = prompt.addButton("Commit All", QMessageBox.ButtonRole.AcceptRole)
+            discard_btn = prompt.addButton("Discard All", QMessageBox.ButtonRole.DestructiveRole)
+            cancel_btn = prompt.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+            prompt.setDefaultButton(cancel_btn)
+            prompt.exec()
+
+            clicked = prompt.clickedButton()
+            if clicked == cancel_btn:
+                event.ignore()
+                return
+            if clicked == commit_btn:
+                self.commit_all_staged_changes()
+                if self.staging_manager.has_changes():
+                    event.ignore()
+                    return
+            elif clicked == discard_btn:
+                self.discard_all_staged_changes(prompt=False)
+
         if hasattr(self, "receive_service") and self.receive_service:
             self.receive_service.stop()
         super().closeEvent(event)
@@ -518,7 +731,7 @@ class MainWindow(QMainWindow, LayoutMixin):
 
             move_action = QAction("📦 Move...", self)
             move_action.setToolTip("Move the selected study/series/instance to another location")
-            move_action.triggered.connect(self.tree_manager.move_selected_item)
+            move_action.triggered.connect(self._move_selected_items_with_guard)
             menu.addAction(move_action)
 
             menu.addSeparator()

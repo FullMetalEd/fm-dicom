@@ -80,6 +80,8 @@ class LayoutMixin:
         self.toolbar_save_action.triggered.connect(self.save_tag_changes)
         toolbar.addAction(self.toolbar_save_action)
 
+        toolbar.addAction(self.pending_changes_action)
+
         toolbar.addSeparator()
 
         # Tree refresh
@@ -269,6 +271,10 @@ class LayoutMixin:
         self.summary_label = QLabel("No DICOM files loaded")
         self.summary_label.setObjectName("SummaryLabel")
         summary_layout.addWidget(self.summary_label)
+
+        self.pending_changes_label = QLabel("No pending changes")
+        self.pending_changes_label.setObjectName("PendingChangesLabel")
+        summary_layout.addWidget(self.pending_changes_label)
         
         summary_layout.addStretch()
         
@@ -319,6 +325,7 @@ class LayoutMixin:
     def setup_menu_bar(self):
         """Setup modern menu bar with comprehensive menu structure"""
         menubar = self.menuBar()
+        style = self.style()
         
         # File Menu
         file_menu = menubar.addMenu("&File")
@@ -377,6 +384,16 @@ class LayoutMixin:
         save_as_action.setStatusTip("Save selected files to a new location")
         save_as_action.triggered.connect(self.save_as)
         file_menu.addAction(save_as_action)
+
+        pending_icon = themed_icon(
+            "pending",
+            style.standardIcon(style.StandardPixmap.SP_FileDialogContentsView)
+        )
+        self.pending_changes_action = QAction(pending_icon, "Pending &Changes...", self)
+        self.pending_changes_action.setStatusTip("Review and commit staged edits")
+        self.pending_changes_action.setEnabled(False)
+        self.pending_changes_action.triggered.connect(self.show_pending_changes_dialog)
+        file_menu.addAction(self.pending_changes_action)
         
         file_menu.addSeparator()
         
