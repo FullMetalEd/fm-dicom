@@ -701,6 +701,36 @@ class MainWindow(QMainWindow, LayoutMixin):
         
         menu.addSeparator()
         
+        # Contextual Quick Actions based on level
+        depths = [self._get_tree_item_depth(i) for i in selected]
+        unique_depths = set(depths)
+        
+        if len(unique_depths) == 1:
+            depth = list(unique_depths)[0]
+            
+            # Patient Level (0)
+            if depth == 0:
+                anon_patient_action = QAction("🎭 Anonymize Patient", self)
+                anon_patient_action.triggered.connect(self.anonymise_selected)
+                menu.addAction(anon_patient_action)
+                
+            # Study Level (1)
+            elif depth == 1:
+                send_study_action = QAction("📤 Send Study to PACS", self)
+                send_study_action.triggered.connect(self.dicom_send)
+                menu.addAction(send_study_action)
+                
+                anon_study_action = QAction("🎭 Anonymize Study", self)
+                anon_study_action.triggered.connect(self.anonymise_selected)
+                menu.addAction(anon_study_action)
+
+            # Series Level (2)
+            elif depth == 2:
+                # Duplicate is already handled below, but we can add specific ones if needed
+                pass
+                
+            menu.addSeparator()
+        
         # Patient/Study operations
         if len(selected) > 1:
             merge_action = QAction("🔀 Merge Selected", self)

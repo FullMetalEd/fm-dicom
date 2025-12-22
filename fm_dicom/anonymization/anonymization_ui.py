@@ -275,6 +275,10 @@ class TemplateSelectionDialog(QDialog):
     def delete_template(self):
         """Delete the selected template"""
         if self.selected_template:
+            # Type guard check
+            if not self.selected_template:
+                return
+                
             reply = QMessageBox.question(
                 self, "Delete Template",
                 f"Are you sure you want to delete the template '{self.selected_template.name}'?",
@@ -292,13 +296,13 @@ class TemplateSelectionDialog(QDialog):
 class TemplateEditorDialog(QDialog):
     """Dialog for creating/editing anonymization templates"""
     
-    def __init__(self, template: AnonymizationTemplate, template_manager: TemplateManager, parent=None):
+    def __init__(self, template: Optional[AnonymizationTemplate], template_manager: TemplateManager, parent=None):
         super().__init__(parent)
         self.template = template
         self.template_manager = template_manager
         self.is_editing = template is not None
         
-        if self.is_editing:
+        if self.is_editing and template:
             self.setWindowTitle(f"Edit Template: {template.name}")
             # Create a copy to edit
             self.working_template = AnonymizationTemplate.from_dict(template.to_dict())
@@ -450,8 +454,9 @@ class TemplateEditorDialog(QDialog):
         """Add a new anonymization rule"""
         dialog = RuleEditorDialog(None, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.working_template.add_rule(dialog.rule)
-            self.populate_rules_table()
+            if dialog.rule:
+                self.working_template.add_rule(dialog.rule)
+                self.populate_rules_table()
             
     def edit_rule(self):
         """Edit the selected rule"""
@@ -460,8 +465,9 @@ class TemplateEditorDialog(QDialog):
             rule = self.working_template.rules[current_row]
             dialog = RuleEditorDialog(rule, self)
             if dialog.exec() == QDialog.DialogCode.Accepted:
-                self.working_template.rules[current_row] = dialog.rule
-                self.populate_rules_table()
+                if dialog.rule:
+                    self.working_template.rules[current_row] = dialog.rule
+                    self.populate_rules_table()
                 
     def remove_rule(self):
         """Remove the selected rule"""
@@ -487,7 +493,7 @@ class TemplateEditorDialog(QDialog):
             return
             
         # Check for duplicate names (except when editing same template)
-        if not self.is_editing or name != self.template.name:
+        if not self.is_editing or (self.template and name != self.template.name):
             if name in self.template_manager.get_template_names():
                 QMessageBox.warning(self, "Duplicate Name", 
                                   f"A template named '{name}' already exists.")
@@ -510,7 +516,7 @@ class TemplateEditorDialog(QDialog):
         self.working_template.remove_overlays = self.remove_overlays.isChecked()
         
         # Save to template manager
-        if self.is_editing:
+        if self.is_editing and self.template:
             # Remove old template if name changed
             if name != self.template.name:
                 self.template_manager.remove_template(self.template.name)
@@ -522,7 +528,7 @@ class TemplateEditorDialog(QDialog):
 class RuleEditorDialog(QDialog):
     """Dialog for editing a single anonymization rule"""
     
-    def __init__(self, rule: AnonymizationRule, parent=None):
+    def __init__(self, rule: Optional[AnonymizationRule], parent=None):
         super().__init__(parent)
         self.rule = rule
         self.is_editing = rule is not None
@@ -596,15 +602,16 @@ class RuleEditorDialog(QDialog):
         
     def populate_fields(self):
         """Populate fields with rule data"""
-        self.tag_edit.setText(self.rule.tag)
-        
-        # Set action
-        index = self.action_combo.findText(self.rule.action)
-        if index >= 0:
-            self.action_combo.setCurrentIndex(index)
+        if self.rule:
+            self.tag_edit.setText(self.rule.tag)
             
-        self.replacement_edit.setText(self.rule.replacement_value)
-        self.description_edit.setText(self.rule.description)
+            # Set action
+            index = self.action_combo.findText(self.rule.action)
+            if index >= 0:
+                self.action_combo.setCurrentIndex(index)
+                
+            self.replacement_edit.setText(self.rule.replacement_value)
+            self.description_edit.setText(self.rule.description)
         
     def on_action_changed(self):
         """Update UI based on selected action"""
@@ -860,22 +867,18 @@ class PresetRulesDialog(QDialog):
             
         return rules
 
-class AnonymizationResultsDialog(QDialog):
-    """Dialog showing anonymization results"""
+class AnonymizationResultsWidget(QWidget):
+    """Widget for displaying anonymization results"""
     
     def __init__(self, result: AnonymizationResult, parent=None):
         super().__init__(parent)
         self.result = result
-        
-        self.setWindowTitle("Anonymization Results")
-        self.setModal(True)
-        self.resize(700, 500)
-        
         self.setup_ui()
         self.populate_results()
         
     def setup_ui(self):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
         
         # Summary
         summary = self.result.get_summary()
@@ -915,11 +918,6 @@ class AnonymizationResultsDialog(QDialog):
             
         button_layout.addStretch()
         
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.accept)
-        close_btn.setDefault(True)
-        button_layout.addWidget(close_btn)
-        
         layout.addLayout(button_layout)
         
     def populate_results(self):
@@ -933,6 +931,35 @@ class AnonymizationResultsDialog(QDialog):
                 
             self.failed_table.resizeColumnsToContents()
             
+    def export_errors(self):
+        # Create dialog wrapper to reuse logic or copy paste
+        # For simplicity, instantiate dialog hidden
+        dlg = AnonymizationResultsDialog(self.result, self)
+        dlg.export_errors()
+
+
+class AnonymizationResultsDialog(QDialog):
+    """Dialog showing anonymization results (Wrapper around Widget)"""
+    
+    def __init__(self, result: AnonymizationResult, parent=None):
+        super().__init__(parent)
+        self.result = result
+        
+        self.setWindowTitle("Anonymization Results")
+        self.setModal(True)
+        self.resize(700, 500)
+        
+        layout = QVBoxLayout(self)
+        self.widget = AnonymizationResultsWidget(result, self)
+        layout.addWidget(self.widget)
+        
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        buttons.addWidget(close_btn)
+        layout.addLayout(buttons)
+    
     def export_errors(self):
         """Export error report"""
         # Create dialog and configure based on user preference
@@ -1012,7 +1039,17 @@ def run_anonymization(file_paths, template_manager, parent=None):
     if progress_dialog.exec() == QDialog.DialogCode.Accepted:
         result = progress_dialog.result
         if result:
-            # Show results
+            
+            # Use Action Center if available on parent window
+            if parent and hasattr(parent, 'action_center'):
+                # We need to construct the anonymization widget manually and add it
+                # or have a method on action_center to accept result
+                if hasattr(parent.action_center, 'show_anonymization_results'):
+                    parent.action_center.show_anonymization_results(result)
+                    parent.action_center.show()
+                    return result
+            
+            # Fallback to dialog
             results_dialog = AnonymizationResultsDialog(result, parent)
             results_dialog.exec()
             return result

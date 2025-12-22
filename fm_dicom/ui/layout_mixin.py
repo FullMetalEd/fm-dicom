@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QTreeWidget, QTreeWidgetItem,
     QTableWidget, QTableWidgetItem, QLineEdit, QLabel, QGroupBox, QFrame,
     QStatusBar, QPushButton, QComboBox, QCheckBox, QSizePolicy, QGridLayout,
-    QToolBar, QMenuBar, QMenu
+    QToolBar, QMenuBar, QMenu, QDockWidget
 )
 from PyQt6.QtGui import QPixmap, QImage, QIcon, QAction, QKeySequence
 from PyQt6.QtCore import Qt, QPoint, QSize
@@ -18,6 +18,7 @@ from PyQt6.QtCore import Qt, QPoint, QSize
 from fm_dicom import __version__
 from fm_dicom.ui.icon_loader import themed_icon
 from fm_dicom.widgets.welcome_widget import WelcomeWidget
+from fm_dicom.widgets.action_center import ActionCenterWidget
 
 
 class LayoutMixin:
@@ -134,79 +135,114 @@ class LayoutMixin:
         main_splitter = self.main_splitter 
         
         left_widget = QWidget()
-        left_widget.setObjectName("SurfacePanel")
         left_layout = QVBoxLayout(left_widget)
-        left_layout.setContentsMargins(12, 12, 12, 12)
-        left_layout.setSpacing(12)
-
-        tree_search_layout = QHBoxLayout()
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Tree Controls (Search & Buttons)
+        tree_controls = QHBoxLayout()
+        
+        # Search bar
         self.tree_search_bar = QLineEdit()
-        self.tree_search_bar.setPlaceholderText("Search patients/studies/series/instances...")
+        self.tree_search_bar.setPlaceholderText("Search items...")
+        self.tree_search_bar.setClearButtonEnabled(True)
         self.tree_search_bar.textChanged.connect(self.filter_tree_items)
-        tree_search_layout.addWidget(self.tree_search_bar)
-        left_layout.addLayout(tree_search_layout)
-
+        tree_controls.addWidget(self.tree_search_bar)
+        
+        # Image toggle (Moved to Left Panel)
+        self.preview_toggle = QCheckBox("Show Image")
+        self.preview_toggle.setChecked(self.config.get("show_image_preview", False))
+        self.preview_toggle.stateChanged.connect(self.save_preview_toggle_state_and_refresh_display)
+        tree_controls.addWidget(self.preview_toggle)
+        
+        left_layout.addLayout(tree_controls)
+        
+        # Left Splitter (Tree vs Image)
+        left_splitter = QSplitter(Qt.Orientation.Vertical)
+        left_layout.addWidget(left_splitter)
+        
+        # Tree View Container
+        tree_container = QWidget()
+        tree_layout = QVBoxLayout(tree_container)
+        tree_layout.setContentsMargins(0, 0, 0, 0)
+        
         self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Item", "ID/Description", "Date", "Size"])
         self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
-        self.tree.setHeaderLabels(["Patient", "Study", "Series", "Instance"])
-        self.tree.itemSelectionChanged.connect(self.display_selected_tree_file)
-        self.tree.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.tree.setAlternatingRowColors(True)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self.show_tree_context_menu)
-        left_layout.addWidget(self.tree)
-
-        self.preview_toggle = QCheckBox("Show Image Preview")
-        show_image_preview = bool(self.config.get("show_image_preview", False))
-        self.preview_toggle.setChecked(show_image_preview)
-        self.preview_toggle.stateChanged.connect(self.save_preview_toggle_state_and_refresh_display)
-        left_layout.addWidget(self.preview_toggle)
-
-        self.image_label = QLabel()
-        self.image_label.setObjectName("ImagePreview")
+        tree_layout.addWidget(self.tree)
+        left_splitter.addWidget(tree_container)
+        
+        # Image Preview Panel (Moved to Left Bottom)
+        self.image_frame = QFrame()
+        self.image_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        image_layout = QVBoxLayout(self.image_frame)
+        image_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.image_label = QLabel("No Image Selected")
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image_label.setMinimumHeight(256)
-        self.image_label.setVisible(show_image_preview)  # Set initial visibility based on config
         self.image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        if show_image_preview:
-            self.image_label.setText("Select an instance to preview")
-        else:
-            self.image_label.setText("Image preview disabled")
-        left_layout.addWidget(self.image_label)
+        # Ensure image scales nicely
+        self.image_label.setMinimumHeight(150) 
+        image_layout.addWidget(self.image_label)
+        
+        # Frame selector for multi-frame images
+        self.frame_selector = QComboBox()
+        self.frame_selector.currentIndexChanged.connect(self.display_image)
+        self.frame_selector.setEnabled(False)
+        image_layout.addWidget(self.frame_selector)
+        
+        left_splitter.addWidget(self.image_frame)
+        
+        # Set splitter proportions (70% Tree, 30% Image)
+        left_splitter.setStretchFactor(0, 7)
+        left_splitter.setStretchFactor(1, 3)
+        
+        # Set initial visibility based on config
+        self.image_frame.setVisible(self.config.get("show_image_preview", False))
+        
         main_splitter.addWidget(left_widget)
-
+        
+        # Right Panel (Tag Editor)
         right_widget = QWidget()
-        right_widget.setObjectName("SurfacePanel")
         right_layout = QVBoxLayout(right_widget)
-        right_layout.setContentsMargins(12, 12, 12, 12)
-        right_layout.setSpacing(12)
-
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Tag Controls
+        tag_controls = QHBoxLayout()
+        
+        # Search bar for tags
         self.search_bar = QLineEdit()
-        self.search_bar.setPlaceholderText("Search tags by ID or description...")
+        self.search_bar.setPlaceholderText("Filter tags...")
+        self.search_bar.setClearButtonEnabled(True)
         self.search_bar.textChanged.connect(self.filter_tag_table)
-        right_layout.addWidget(self.search_bar)
-
+        tag_controls.addWidget(self.search_bar)
+        
+        # Private tags toggle
+        self.show_private_tags = QCheckBox("Show Private Tags")
+        self.show_private_tags.stateChanged.connect(lambda: self.dicom_manager.refresh_tags())
+        tag_controls.addWidget(self.show_private_tags)
+        
+        right_layout.addLayout(tag_controls)
+        
+        # Tag Table (Full Right Panel)
         self.tag_table = QTableWidget()
         self.tag_table.setColumnCount(4)
-        self.tag_table.setHorizontalHeaderLabels(["Tag ID", "Description", "Value", "New Value"])
-        self.tag_table.setColumnWidth(0, 110)
-        self.tag_table.setColumnWidth(1, 220)
-        self.tag_table.setColumnWidth(2, 260)
-        self.tag_table.setColumnWidth(3, 160)
+        self.tag_table.setHorizontalHeaderLabels(["Tag", "Description", "Value", "New Value"])
         self.tag_table.horizontalHeader().setStretchLastSection(True)
-        self.tag_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.tag_table.setAlternatingRowColors(True)
-        self.tag_table.cellActivated.connect(self._populate_new_value_on_edit)
-        self.tag_table.cellClicked.connect(self._populate_new_value_on_edit)
-        # Add context menu support
+        self.tag_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.tag_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tag_table.customContextMenuRequested.connect(self.show_tag_table_context_menu)
         right_layout.addWidget(self.tag_table)
+        
         main_splitter.addWidget(right_widget)
         
         main_splitter.setStretchFactor(0, 1)
         main_splitter.setStretchFactor(1, 2)
         layout.addWidget(main_splitter)
+
+        # Action Center Dock
+        self._setup_action_center()
 
         # Helper methods for view switching
         self.show_welcome_screen_if_empty()
@@ -316,7 +352,20 @@ class LayoutMixin:
         """Handle preview toggle - exact match to original"""
         show_preview = state == Qt.CheckState.Checked.value
         self.config["show_image_preview"] = show_preview
-        self.image_label.setVisible(show_preview)
+        
+        # Toggle image frame visibility instead of just label
+        if hasattr(self, 'image_frame'):
+            self.image_frame.setVisible(show_preview)
+        else:
+            self.image_label.setVisible(show_preview)
+        
+        # Sync with menu action if it exists
+        if hasattr(self, 'preview_action') and self.preview_action.isChecked() != show_preview:
+            self.preview_action.setChecked(show_preview)
+            
+        # Sync with checkbox if called from menu
+        if hasattr(self, 'preview_toggle') and self.preview_toggle.isChecked() != show_preview:
+            self.preview_toggle.setChecked(show_preview)
         
         if show_preview and hasattr(self, 'dicom_manager') and self.dicom_manager.current_file:
             # Force UI update before displaying image
@@ -327,14 +376,17 @@ class LayoutMixin:
             # Clear image when hiding
             self.image_label.clear()
             self.image_label.setText("Image preview disabled")
-    
-    def _populate_new_value_on_edit(self, row, column):
-        """Populate new value on edit - exact match to original"""
-        if column == 2:  # Current value column
-            current_item = self.tag_table.item(row, column)
-            new_value_item = self.tag_table.item(row, 3)
-            if current_item and new_value_item and not new_value_item.text():
-                new_value_item.setText(current_item.text())
+            
+    def _toggle_image_preview(self, checked):
+        """Toggle image preview from menu"""
+        # Just update the checkbox, it will trigger the handler above
+        if hasattr(self, 'preview_toggle'):
+            self.preview_toggle.setChecked(checked)
+        else:
+            # Fallback if checkbox doesn't exist yet
+            self.save_preview_toggle_state_and_refresh_display(
+                Qt.CheckState.Checked.value if checked else Qt.CheckState.Unchecked.value
+            )
     
     def setup_menu_bar(self):
         """Setup modern menu bar with comprehensive menu structure"""
@@ -723,6 +775,25 @@ class LayoutMixin:
         else:
             self.progress_label.setVisible(False)
     
+    def _setup_action_center(self):
+        """Setup Action Center dock widget"""
+        self.action_center_dock = QDockWidget("Action Center", self)
+        self.action_center_dock.setObjectName("ActionCenterDock")
+        self.action_center_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.LeftDockWidgetArea)
+        
+        self.action_center = ActionCenterWidget()
+        self.action_center.close_requested.connect(self.action_center_dock.close)
+        self.action_center_dock.setWidget(self.action_center)
+        
+        # Add dock to main window
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.action_center_dock)
+        
+        # Hide by default
+        self.action_center_dock.hide()
+        
+        # Add toggle action to View menu if available
+        # This will be handled in menu setup
+
     def update_operation_status(self, message, timeout=0):
         """Update the main status bar message"""
         if hasattr(self, 'status_bar'):
