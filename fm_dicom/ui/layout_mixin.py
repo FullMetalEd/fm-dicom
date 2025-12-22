@@ -233,6 +233,11 @@ class LayoutMixin:
         self.tag_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.tag_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tag_table.customContextMenuRequested.connect(self.show_tag_table_context_menu)
+        
+        # UX Improvements: Sorting and Click-to-Fill
+        self.tag_table.setSortingEnabled(True)
+        self.tag_table.cellClicked.connect(self._on_tag_table_cell_clicked)
+        
         right_layout.addWidget(self.tag_table)
         
         main_splitter.addWidget(right_widget)
@@ -338,6 +343,31 @@ class LayoutMixin:
         logging.info("MainWindow UI initialized")
     
     # Utility methods that were in original
+    def _on_tag_table_cell_clicked(self, row, column):
+        """Handle click events on tag table cells"""
+        # Auto-fill 'New Value' when clicking 'Value' or empty 'New Value'
+        if column == 3 or column == 2:  # New Value or Value column
+            new_value_item = self.tag_table.item(row, 3)
+            value_item = self.tag_table.item(row, 2)
+            
+            # Check if editable
+            if new_value_item and (new_value_item.flags() & Qt.ItemFlag.ItemIsEditable):
+                # Only populate if currently empty
+                text_updated = False
+                if not new_value_item.text() and value_item:
+                    new_value_item.setText(value_item.text())
+                    text_updated = True
+                    
+                # If clicking the New Value cell directly, ensure it enters edit mode
+                if column == 3:
+                    # If we updated the text, the table might have refreshed (C++ object deleted)
+                    # We must re-acquire the item from the table
+                    if text_updated:
+                        new_value_item = self.tag_table.item(row, 3)
+                    
+                    if new_value_item:
+                        self.tag_table.editItem(new_value_item)
+
     def tree_expand_all(self):
         """Expand all tree items"""
         if hasattr(self, 'tree'):

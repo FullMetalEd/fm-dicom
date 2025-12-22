@@ -702,7 +702,16 @@ class DicomManager(QObject):
             QApplication.processEvents()
             
             try:
-                ds = pydicom.dcmread(fp)
+                # Check memory items first (for duplicated items)
+                is_memory_item = False
+                if hasattr(self.main_window, 'tree_manager') and self.main_window.tree_manager:
+                    if fp in self.main_window.tree_manager.memory_items:
+                        ds = self.main_window.tree_manager.memory_items[fp]
+                        is_memory_item = True
+
+                if not is_memory_item:
+                    ds = pydicom.dcmread(fp)
+
                 file_updated = False
                 labels = self._get_dataset_labels(ds)
                 
@@ -776,8 +785,13 @@ class DicomManager(QObject):
                                 continue
                 
                 if file_updated:
-                    ds.save_as(fp, write_like_original=False)
-                    updated_count += 1
+                    if is_memory_item:
+                        # Memory items are updated in-place, no disk save needed
+                        # The dataset object in memory_items is already modified
+                        updated_count += 1
+                    else:
+                        ds.save_as(fp, write_like_original=False)
+                        updated_count += 1
                     
             except Exception as e_file:
                 logging.error(f"Failed to process file {fp}: {e_file}", exc_info=True)
@@ -1225,11 +1239,16 @@ class DicomManager(QObject):
             loaded_files = [(path, None) for path in file_paths]  # Convert to expected format
             
             from fm_dicom.dialogs.dicom_send_selection import DicomSendSelectionDialog
+            # Pass memory_items for duplicated files
+            memory_items = {}
+            if hasattr(self.main_window, 'tree_manager') and self.main_window.tree_manager:
+                memory_items = self.main_window.tree_manager.memory_items
             selection_dialog = DicomSendSelectionDialog(
-                loaded_files, 
-                selected_items, 
+                loaded_files,
+                selected_items,
                 self.main_window,
-                hierarchy_data=hierarchy_data
+                hierarchy_data=hierarchy_data,
+                memory_items=memory_items
             )
             
             if selection_dialog.exec():
@@ -1265,11 +1284,20 @@ class DicomManager(QObject):
     def _start_dicom_send(self, selected_files, send_params):
         """Start DICOM send worker with selected files and parameters"""
         try:
+            # Get memory_items for duplicated files
+            memory_items = {}
+            if hasattr(self.main_window, 'tree_manager') and self.main_window.tree_manager:
+                memory_items = self.main_window.tree_manager.memory_items
+
             # Analyze files to get unique SOP classes
             unique_sop_classes = set()
             for filepath in selected_files:
                 try:
-                    ds = pydicom.dcmread(filepath, stop_before_pixels=True)
+                    # Check memory items first for duplicated files
+                    if filepath in memory_items:
+                        ds = memory_items[filepath]
+                    else:
+                        ds = pydicom.dcmread(filepath, stop_before_pixels=True)
                     if hasattr(ds, 'SOPClassUID'):
                         unique_sop_classes.add(ds.SOPClassUID)
                 except Exception as e:
@@ -1293,9 +1321,9 @@ class DicomManager(QObject):
             # Store total file count for progress calculation
             self.send_total_files = len(selected_files)
             
-            # Create and start worker
+            # Create and start worker (memory_items already fetched at start of method)
             from fm_dicom.workers.dicom_send_worker import DicomSendWorker
-            self.send_worker = DicomSendWorker(selected_files, send_params, list(unique_sop_classes))
+            self.send_worker = DicomSendWorker(selected_files, send_params, list(unique_sop_classes), memory_items)
             
             # Connect signals
             self.send_worker.progress_updated.connect(self._on_send_progress)

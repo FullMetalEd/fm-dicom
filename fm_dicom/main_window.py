@@ -98,15 +98,65 @@ class MainWindow(QMainWindow, LayoutMixin):
         self.loaded_files = []
         self.selected_files = []
         self.current_file = None
-        self.current_file_path = None  # For image display compatibility
         
-        # Handle start path
+        # Load startup files if provided
         if start_path:
-            self.pending_start_path = start_path
-            QTimer.singleShot(100, self.load_pending_start_path)
-        
-        logging.info("MainWindow initialized successfully")
-    
+            QTimer.singleShot(100, lambda: self.open_file_or_dir(start_path))
+            
+        # Enable drag and drop
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event):
+        """Handle drag enter event for file dropping"""
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            
+    def dropEvent(self, event):
+        """Handle dropping of files"""
+        files = []
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if os.path.exists(path):
+                files.append(path)
+                
+        if files:
+            # Process dropped files - if mostly one dir, treat as dir open
+            # otherwise treat as multi-file open
+            if len(files) == 1 and os.path.isdir(files[0]):
+                self.open_file_or_dir(files[0])
+            else:
+                # Filter for valid files/dirs
+                valid_paths = [p for p in files if os.path.exists(p)]
+                if valid_paths:
+                    # If we already have files loaded, ask to append or replace
+                    if self.loaded_files:
+                        reply = FocusAwareMessageBox.question(
+                            self, 
+                            "Load Files", 
+                            "Do you want to append these files to the current list or replace it?",
+                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+                            QMessageBox.StandardButton.Yes
+                        )
+                        # Yes = Append, No = Replace
+                        if reply == QMessageBox.StandardButton.Yes:
+                            # Use additive loading for multiple files/directories
+                            self.file_manager.load_paths_additive(valid_paths)
+                        elif reply == QMessageBox.StandardButton.No:
+                            # Replace - clear first
+                            self.file_manager.load_paths(valid_paths) # Load handles clearing if not append
+                    else:
+                        # No files loaded, just load
+                        if len(valid_paths) == 1 and os.path.isdir(valid_paths[0]):
+                            self.file_manager.load_path(valid_paths[0])
+                        else:
+                            self.file_manager.load_paths(valid_paths)
+
+    def open_file_or_dir(self, path):
+        """Helper to open a path whether file or directory"""
+        # load_path handles both files and directories
+        if os.path.exists(path):
+            self.file_manager.load_path(path)
+
     def _setup_configuration(self, config_path_override):
         """Setup application configuration"""
         self.config = load_config(config_path_override=config_path_override)
@@ -1653,7 +1703,9 @@ class MainWindow(QMainWindow, LayoutMixin):
         
         # Create and start worker
         from fm_dicom.workers.export_worker import ExportWorker
-        self.export_worker = ExportWorker(filepaths, export_type, output_path, temp_dir)
+        # Pass memory_items for duplicated files
+        memory_items = self.tree_manager.memory_items if hasattr(self, 'tree_manager') else {}
+        self.export_worker = ExportWorker(filepaths, export_type, output_path, temp_dir, memory_items)
         self.export_worker.progress_updated.connect(self._on_export_progress)
         self.export_worker.stage_changed.connect(self._on_export_stage_changed)
         self.export_worker.export_complete.connect(self._on_export_complete)

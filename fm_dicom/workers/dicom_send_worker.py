@@ -32,7 +32,7 @@ class DicomSendWorker(QThread):
     association_status = pyqtSignal(str)  # status messages
     conversion_progress = pyqtSignal(int, int, str)  # current, total, filename
     
-    def __init__(self, filepaths, send_params, unique_sop_classes):
+    def __init__(self, filepaths, send_params, unique_sop_classes, memory_items=None):
         super().__init__()
         self.filepaths = filepaths
         self.calling_ae, self.remote_ae, self.host, self.port = send_params
@@ -41,6 +41,18 @@ class DicomSendWorker(QThread):
         self.temp_files = []  # Track temp files for cleanup
         self.converted_count = 0
         self.timing_info = {}  # Track timing for each step
+        self.memory_items = memory_items or {}  # Memory items for duplicated files
+
+    def _read_dicom(self, filepath, stop_before_pixels=False):
+        """Read DICOM data, checking memory items first for duplicated files"""
+        if filepath in self.memory_items:
+            ds = self.memory_items[filepath]
+            if stop_before_pixels:
+                # Create a shallow copy without triggering pixel data read
+                # The dataset is already in memory, just return it
+                return ds
+            return ds
+        return pydicom.dcmread(filepath, stop_before_pixels=stop_before_pixels)
         
     def run(self):
         try:
@@ -188,8 +200,8 @@ class DicomSendWorker(QThread):
                             continue
                         assoc.dimse_timeout = 120
                     
-                    # Read file
-                    ds_send = pydicom.dcmread(fp_send)
+                    # Read file (check memory items first for duplicated files)
+                    ds_send = self._read_dicom(fp_send)
                     
                     # Check SOP class support
                     if not any(ctx.abstract_syntax == ds_send.SOPClassUID and ctx.result == 0x00 for ctx in assoc.accepted_contexts):
@@ -300,14 +312,14 @@ class DicomSendWorker(QThread):
     def _extract_unique_transfer_syntaxes(self, filepaths):
         """Extract unique transfer syntaxes from the selected files"""
         unique_syntaxes = set()
-        
+
         for filepath in filepaths:
             if self.cancelled:
                 break
-                
+
             try:
-                # Read DICOM file header to get transfer syntax
-                ds = pydicom.dcmread(filepath, stop_before_pixels=True)
+                # Read DICOM file header to get transfer syntax (check memory items first)
+                ds = self._read_dicom(filepath, stop_before_pixels=True)
                 if hasattr(ds, 'file_meta') and hasattr(ds.file_meta, 'TransferSyntaxUID'):
                     transfer_syntax = str(ds.file_meta.TransferSyntaxUID)
                     unique_syntaxes.add(transfer_syntax)
@@ -387,14 +399,14 @@ class DicomSendWorker(QThread):
     def _identify_files_needing_conversion(self, filepaths, incompatible_syntaxes):
         """Identify which files need conversion based on incompatible transfer syntaxes"""
         files_needing_conversion = []
-        
+
         for filepath in filepaths:
             if self.cancelled:
                 break
-                
+
             try:
-                # Read DICOM file header to get transfer syntax
-                ds = pydicom.dcmread(filepath, stop_before_pixels=True)
+                # Read DICOM file header to get transfer syntax (check memory items first)
+                ds = self._read_dicom(filepath, stop_before_pixels=True)
                 if hasattr(ds, 'file_meta') and hasattr(ds.file_meta, 'TransferSyntaxUID'):
                     transfer_syntax = str(ds.file_meta.TransferSyntaxUID)
                 else:
@@ -426,10 +438,10 @@ class DicomSendWorker(QThread):
             self.conversion_progress.emit(idx + 1, total_files, f"Converting {os.path.basename(filepath)} ({idx + 1}/{total_files})")
             
             try:
-                # Read original file
-                ds_original = pydicom.dcmread(filepath)
+                # Read original file (check memory items first)
+                ds_original = self._read_dicom(filepath)
                 original_ts = str(ds_original.file_meta.TransferSyntaxUID)
-                
+
                 # Check if conversion is needed
                 compressed_syntaxes = [
                     '1.2.840.10008.1.2.4.90',  # JPEG 2000 Lossless
@@ -555,9 +567,10 @@ class DicomSendWorker(QThread):
     def _validate_converted_file(self, converted_path, original_path):
         """Validate that the converted file is readable and has correct pixel data"""
         try:
-            # Read the converted file
+            # Read the converted file (temp file on disk)
             ds_converted = pydicom.dcmread(converted_path)
-            ds_original = pydicom.dcmread(original_path)
+            # Read original file (check memory items first)
+            ds_original = self._read_dicom(original_path)
             
             # Check basic DICOM validity
             if not hasattr(ds_converted, 'SOPInstanceUID'):

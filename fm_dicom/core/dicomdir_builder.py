@@ -6,13 +6,20 @@ from pydicom.uid import generate_uid
 
 class DicomdirBuilder:
     """Build valid DICOMDIR files using DICOM standard"""
-    
-    def __init__(self, file_set_id="DICOM_EXPORT"):
+
+    def __init__(self, file_set_id="DICOM_EXPORT", memory_items=None):
         self.file_set_id = file_set_id
         self.patients = {}
         self.studies = {}
         self.series = {}
         self.images = []
+        self.memory_items = memory_items or {}  # Memory items for duplicated files
+
+    def _read_dicom(self, filepath, stop_before_pixels=False):
+        """Read DICOM data, checking memory items first"""
+        if filepath in self.memory_items:
+            return self.memory_items[filepath]
+        return pydicom.dcmread(filepath, stop_before_pixels=stop_before_pixels)
 
     def debug_dicomdir_structure(self, file_mapping):
         """Debug the DICOMDIR structure to see what patients/studies/series we have"""
@@ -24,7 +31,7 @@ class DicomdirBuilder:
         
         for original_path, copied_path in file_mapping.items():
             try:
-                ds = pydicom.dcmread(original_path, stop_before_pixels=True)
+                ds = self._read_dicom(original_path, stop_before_pixels=True)
                 patient_id = str(getattr(ds, 'PatientID', 'UNKNOWN'))
                 patient_name = str(getattr(ds, 'PatientName', 'UNKNOWN'))
                 study_uid = str(getattr(ds, 'StudyInstanceUID', 'UNKNOWN'))
@@ -74,8 +81,8 @@ class DicomdirBuilder:
         
         for original_path, copied_path in file_mapping.items():
             try:
-                ds = pydicom.dcmread(original_path, stop_before_pixels=True)
-                
+                ds = self._read_dicom(original_path, stop_before_pixels=True)
+
                 # Extract metadata with proper defaults
                 patient_id = str(getattr(ds, 'PatientID', 'UNKNOWN'))
                 patient_name = str(getattr(ds, 'PatientName', 'UNKNOWN'))

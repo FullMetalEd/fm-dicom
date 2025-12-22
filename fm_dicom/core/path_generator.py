@@ -4,21 +4,30 @@ import pydicom
 
 class DicomPathGenerator:
     """Generate DICOM standard file paths and structure"""
-    
+
     @staticmethod
-    def generate_paths(filepaths):
+    def generate_paths(filepaths, memory_items=None):
         """
         Generate DICOM standard file paths from input files
         Returns: dict mapping {original_path: "DICOM/PAT00001/STU00001/SER00001/IMG00001"}
+
+        Args:
+            filepaths: List of file paths to process
+            memory_items: Optional dict of memory items for duplicated files
         """
         logging.info(f"Generating DICOM standard paths for {len(filepaths)} files")
-        
+        memory_items = memory_items or {}
+
         # Analyze files to build hierarchy
         hierarchy = {}
-        
+
         for filepath in filepaths:
             try:
-                ds = pydicom.dcmread(filepath, stop_before_pixels=True)
+                # Check memory items first for duplicated files
+                if filepath in memory_items:
+                    ds = memory_items[filepath]
+                else:
+                    ds = pydicom.dcmread(filepath, stop_before_pixels=True)
                 
                 patient_id = str(getattr(ds, 'PatientID', 'UNKNOWN'))
                 patient_name = str(getattr(ds, 'PatientName', 'UNKNOWN'))

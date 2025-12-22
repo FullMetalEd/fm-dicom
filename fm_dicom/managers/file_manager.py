@@ -63,7 +63,7 @@ class FileManager(QObject):
             return
 
         logging.info(f"Selected {len(file_paths)} files for loading")
-        self._load_multiple_paths(file_paths)
+        self.load_paths(file_paths)
     
     def open_directory(self):
         """Open a directory containing DICOM files"""
@@ -112,7 +112,7 @@ class FileManager(QObject):
             return
 
         logging.info(f"Selected {len(file_paths)} files to append")
-        self._load_multiple_paths_additive(file_paths)
+        self.load_paths_additive(file_paths)
 
     def append_directory(self):
         """Append a directory containing DICOM files to currently loaded files"""
@@ -166,7 +166,7 @@ class FileManager(QObject):
         finally:
             self.loading_finished.emit()
 
-    def _load_multiple_paths(self, paths):
+    def load_paths(self, paths):
         """Load several file selections in one batch."""
         valid_paths = [p for p in paths if p and os.path.exists(p)]
         missing_paths = [p for p in paths if not p or not os.path.exists(p)]
@@ -189,7 +189,7 @@ class FileManager(QObject):
         if missing_paths:
             logging.warning("Some selected files were missing: %s", missing_paths)
 
-    def _load_multiple_paths_additive(self, paths):
+    def load_paths_additive(self, paths):
         """Append several selections in one batch without losing current state."""
         valid_paths = [p for p in paths if p and os.path.exists(p)]
         missing_paths = [p for p in paths if not p or not os.path.exists(p)]

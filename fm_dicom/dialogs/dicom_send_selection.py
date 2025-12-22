@@ -23,18 +23,25 @@ from fm_dicom.widgets.selection_summary import LazySelectionSummaryWidget
 
 class AsyncTreePopulator(QThread):
     """Background worker for populating tree structure without blocking UI"""
-    
+
     # Signals for communication with main thread
     tree_data_ready = pyqtSignal(object)  # Processed hierarchy data
     progress_updated = pyqtSignal(int, int, str)  # current, total, status
     population_complete = pyqtSignal()
     population_failed = pyqtSignal(str)  # error message
-    
-    def __init__(self, loaded_files, hierarchy_data):
+
+    def __init__(self, loaded_files, hierarchy_data, memory_items=None):
         super().__init__()
         self.loaded_files = loaded_files
         self.hierarchy_data = hierarchy_data
         self.cancelled = False
+        self.memory_items = memory_items or {}  # Memory items for duplicated files
+
+    def _read_dicom(self, filepath, stop_before_pixels=False):
+        """Read DICOM data, checking memory items first"""
+        if filepath in self.memory_items:
+            return self.memory_items[filepath]
+        return pydicom.dcmread(filepath, stop_before_pixels=stop_before_pixels)
     
     def run(self):
         """Process hierarchy data in background thread"""
@@ -118,51 +125,52 @@ class AsyncTreePopulator(QThread):
                 break
                 
             try:
-                ds = pydicom.dcmread(file_path, stop_before_pixels=True)
-                
+                # Check memory items first for duplicated files
+                ds = self._read_dicom(file_path, stop_before_pixels=True)
+
                 patient_id = getattr(ds, "PatientID", "Unknown ID")
                 patient_name = getattr(ds, "PatientName", "Unknown Name")
                 patient_label = f"{patient_name} ({patient_id})"
-                
+
                 study_uid = getattr(ds, "StudyInstanceUID", "Unknown StudyUID")
                 study_desc = getattr(ds, "StudyDescription", "No Study Description")
                 study_label = f"{study_desc}"
-                
+
                 series_uid = getattr(ds, "SeriesInstanceUID", "Unknown SeriesUID")
                 series_desc = getattr(ds, "SeriesDescription", "No Series Description")
                 series_number = getattr(ds, "SeriesNumber", "")
                 series_label = f"{series_desc}"
                 if series_number:
                     series_label += f" (#{series_number})"
-                
+
                 instance_number = getattr(ds, "InstanceNumber", None)
                 sop_uid = getattr(ds, "SOPInstanceUID", os.path.basename(file_path))
                 if instance_number is not None:
                     instance_label = f"Instance {instance_number}"
                 else:
                     instance_label = f"{os.path.basename(file_path)}"
-                
+
                 # Build hierarchy
                 hierarchy.setdefault(patient_label, {}).setdefault(study_label, {}).setdefault(series_label, {})[instance_label] = file_path
-                
+
                 # Update progress periodically
                 if idx % 100 == 0:
                     progress = int((idx / total_files) * 80)  # Use 80% for file processing
                     self.progress_updated.emit(progress, 100, f"Processing file {idx + 1} of {total_files}")
-                
+
             except Exception as e:
                 logging.warning(f"Could not read DICOM file {file_path}: {e}")
                 continue
-        
+
         return hierarchy
 
 
 class DicomSendSelectionDialog(QDialog):
     """Dialog for selecting files to send via DICOM with hierarchical checkboxes"""
-    
-    def __init__(self, loaded_files, initial_selection_items, parent=None, hierarchy_data=None):
+
+    def __init__(self, loaded_files, initial_selection_items, parent=None, hierarchy_data=None, memory_items=None):
         super().__init__(parent)
-        
+
         # Store references
         self.loaded_files = loaded_files  # Fallback for backward compatibility
         self.initial_selection_items = initial_selection_items
@@ -171,27 +179,34 @@ class DicomSendSelectionDialog(QDialog):
         self.tree_populated = False
         self.tree_populator = None
         self.progress_dialog = None  # Backup progress dialog for large datasets
-        
+        self.memory_items = memory_items or {}  # Memory items for duplicated files
+
         # Add some debug logging
         if hierarchy_data:
             logging.info(f"DicomSendSelectionDialog initialized with pre-built hierarchy")
         else:
             logging.info(f"DicomSendSelectionDialog initialized with {len(self.loaded_files)} loaded files (will build hierarchy)")
-        
+
         self.setWindowTitle("Select Files for DICOM Send")
         self.setModal(True)
         self.resize(600, 500)
-        
+
         # Setup UI immediately so dialog can be shown
         self._setup_ui()
-        
+
         # Defer worker start to allow UI to fully render
         QTimer.singleShot(100, self._start_async_tree_population)  # Increased delay
+
+    def _read_dicom(self, filepath, stop_before_pixels=False):
+        """Read DICOM data, checking memory items first"""
+        if filepath in self.memory_items:
+            return self.memory_items[filepath]
+        return pydicom.dcmread(filepath, stop_before_pixels=stop_before_pixels)
     
     def _start_async_tree_population(self):
         """Start background tree population worker"""
-        # Create and configure worker
-        self.tree_populator = AsyncTreePopulator(self.loaded_files, self.hierarchy_data)
+        # Create and configure worker (pass memory_items for duplicated files)
+        self.tree_populator = AsyncTreePopulator(self.loaded_files, self.hierarchy_data, self.memory_items)
         
         # Connect signals with queued connections for thread safety
         self.tree_populator.tree_data_ready.connect(self._on_tree_data_ready, Qt.ConnectionType.QueuedConnection)
@@ -537,14 +552,15 @@ class DicomSendSelectionDialog(QDialog):
     def _build_hierarchy_from_loaded_files(self):
         """Build hierarchy from loaded files (fallback for backward compatibility)"""
         logging.info("Building hierarchy from loaded files")
-        
+
         hierarchy = {}
         file_paths = [file_info[0] for file_info in self.loaded_files]
-        
+
         for file_path in file_paths:
             try:
-                ds = pydicom.dcmread(file_path, stop_before_pixels=True)
-                
+                # Check memory items first for duplicated files
+                ds = self._read_dicom(file_path, stop_before_pixels=True)
+
                 patient_id = getattr(ds, "PatientID", "Unknown ID")
                 patient_name = getattr(ds, "PatientName", "Unknown Name")
                 patient_label = f"{patient_name} ({patient_id})"
