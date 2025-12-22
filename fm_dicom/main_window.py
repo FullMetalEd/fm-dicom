@@ -232,6 +232,11 @@ class MainWindow(QMainWindow, LayoutMixin):
         """Handle tree population completion"""
         self.loaded_files = self.tree_manager.get_loaded_files()
         logging.info(f"Loaded {file_count} DICOM files")
+        
+        # Update view state (Welcome vs Main)
+        if hasattr(self, 'show_welcome_screen_if_empty'):
+            self.show_welcome_screen_if_empty()
+            
         self._restore_pending_ui_state()
     
     def _on_tag_data_changed(self):

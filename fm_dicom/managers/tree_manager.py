@@ -10,13 +10,14 @@ import logging
 import pydicom
 from PyQt6.QtWidgets import QTreeWidgetItem, QProgressDialog, QApplication, QMenu, QDialog
 from PyQt6.QtCore import QObject, pyqtSignal, Qt, QPoint
-from PyQt6.QtGui import QIcon, QAction, QBrush, QColor
+from PyQt6.QtGui import QIcon, QAction, QBrush, QColor, QFont
 
 from fm_dicom.widgets.focus_aware import FocusAwareMessageBox, FocusAwareProgressDialog
 from fm_dicom.utils.threaded_processor import ThreadedDicomProcessor, DicomProcessingResult, FastDicomScanner
 from fm_dicom.managers.duplication_manager import DuplicationManager, UIDConfiguration
 from fm_dicom.dialogs.uid_configuration_dialog import UIDConfigurationDialog
 from fm_dicom.dialogs.move_item_dialog import MoveItemDialog
+from fm_dicom.themes.design_tokens import get_theme_tokens
 
 TREE_PATH_ROLE = Qt.ItemDataRole.UserRole + 1
 
@@ -38,7 +39,16 @@ class TreeManager(QObject):
         self.hierarchy = {}  # Store hierarchy data for performance
         self._inbound_root = None
         self._inbound_nodes = {}
-        self._inbound_brush = QBrush(QColor("#7f8c8d"))
+        
+        # Load theme-aware colors
+        theme_name = main_window.config.get("theme", "dark")
+        tokens = get_theme_tokens(theme_name).values
+        self._inbound_brush = QBrush(QColor(tokens["tree_inbound"]))
+        
+        # Memory item styling
+        self._memory_item_brush = QBrush(QColor(tokens.get("tree_memory_item", "#3dd2ff")))
+        self._memory_item_font = QFont()
+        self._memory_item_font.setItalic(True)
 
         # Performance optimization settings from config
         perf_config = main_window.config.get('performance', {})
@@ -794,6 +804,17 @@ class TreeManager(QObject):
                         instance_item = QTreeWidgetItem([patient, study, series, instance_label])
                         instance_item.setData(0, Qt.ItemDataRole.UserRole, instance_data['filepath'])
                         instance_item.setData(0, TREE_PATH_ROLE, (patient, study, series, instance_label))
+                        
+                        # Apply styling for memory items
+                        filepath = instance_data['filepath']
+                        if filepath in self.memory_items:
+                            # Set visual indicators for memory item
+                            instance_item.setForeground(3, self._memory_item_brush)
+                            instance_item.setFont(3, self._memory_item_font)
+                            # Add an indicator to the text as well
+                            instance_item.setText(3, f"*{instance_label}")
+                            instance_item.setToolTip(3, "This item exists only in memory (unsaved copy)")
+                            
                         series_item.addChild(instance_item)
                         
                         # Calculate file size (skip for virtual/memory items)

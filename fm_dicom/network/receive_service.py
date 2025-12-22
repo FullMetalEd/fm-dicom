@@ -162,7 +162,12 @@ class DicomReceiveService(QObject):
         series_dir.mkdir(parents=True, exist_ok=True)
         filename = f"{getattr(ds, 'SOPInstanceUID', 'unknown')}.dcm"
         file_path = series_dir / filename
-        ds.save_as(file_path, write_like_original=False)
+        try:
+            ds.save_as(file_path, write_like_original=False)
+        except Exception as exc:
+            self._logger.error(f"Failed to save DICOM file to {file_path}: {exc}")
+            return 0xA700  # Out of Resources
+
 
         assoc_id = id(event.assoc)
         info = self._studies.setdefault(

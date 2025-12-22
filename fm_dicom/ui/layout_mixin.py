@@ -17,6 +17,7 @@ from PyQt6.QtCore import Qt, QPoint, QSize
 
 from fm_dicom import __version__
 from fm_dicom.ui.icon_loader import themed_icon
+from fm_dicom.widgets.welcome_widget import WelcomeWidget
 
 
 class LayoutMixin:
@@ -118,10 +119,20 @@ class LayoutMixin:
         act_settings.triggered.connect(self.open_settings_editor)
         toolbar.addAction(act_settings)
 
+        # Welcome Widget (Empty State)
+        self.welcome_widget = WelcomeWidget()
+        self.welcome_widget.set_callbacks(self.open_file, self.open_directory)
+        layout.addWidget(self.welcome_widget)
+
         # Main Splitter - EXACT match to original
-        main_splitter = QSplitter(Qt.Orientation.Horizontal)
-        main_splitter.setHandleWidth(12)
-        main_splitter.setChildrenCollapsible(False)
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.main_splitter.setHandleWidth(12)
+        self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.setVisible(False)  # Hidden by default until files are loaded
+        
+        # Use self.main_splitter instead of local variable
+        main_splitter = self.main_splitter 
+        
         left_widget = QWidget()
         left_widget.setObjectName("SurfacePanel")
         left_layout = QVBoxLayout(left_widget)
@@ -196,6 +207,9 @@ class LayoutMixin:
         main_splitter.setStretchFactor(0, 1)
         main_splitter.setStretchFactor(1, 2)
         layout.addWidget(main_splitter)
+
+        # Helper methods for view switching
+        self.show_welcome_screen_if_empty()
 
         # Compact Edit Level Control Bar (replacing button groups)
         edit_control_layout = QHBoxLayout()
@@ -713,3 +727,29 @@ class LayoutMixin:
         """Update the main status bar message"""
         if hasattr(self, 'status_bar'):
             self.status_bar.showMessage(message, timeout)
+
+    def show_welcome_screen_if_empty(self):
+        """Show welcome screen if no files loaded, otherwise show main interface"""
+        # Determine if we have files loaded
+        has_files = False
+        if hasattr(self, 'tree_manager'):
+            has_files = len(self.tree_manager.loaded_files) > 0
+        
+        if has_files:
+            self.show_main_interface()
+        else:
+            self.show_welcome_screen()
+            
+    def show_welcome_screen(self):
+        """Show welcome widget and hide main interface"""
+        if hasattr(self, 'welcome_widget'):
+            self.welcome_widget.setVisible(True)
+        if hasattr(self, 'main_splitter'):
+            self.main_splitter.setVisible(False)
+            
+    def show_main_interface(self):
+        """Show main interface and hide welcome widget"""
+        if hasattr(self, 'welcome_widget'):
+            self.welcome_widget.setVisible(False)
+        if hasattr(self, 'main_splitter'):
+            self.main_splitter.setVisible(True)

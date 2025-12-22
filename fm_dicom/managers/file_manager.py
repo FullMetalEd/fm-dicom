@@ -413,6 +413,10 @@ class FileManager(QObject):
                 successful_files += 1
 
             except Exception as e:
+                # Check for permission errors or other I/O issues that aren't just "not a DICOM file"
+                if isinstance(e, (PermissionError, OSError)) and "InvalidDicomError" not in str(type(e)):
+                     logging.warning(f"Error reading file {file_path}: {e}")
+                
                 # Not a valid DICOM file, skip silently
                 if processed < 5:  # Log first few errors for debugging
                     logging.debug(f"Failed to read as DICOM: {file_path} - {e}")

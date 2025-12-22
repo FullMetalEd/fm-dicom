@@ -27,6 +27,7 @@ from fm_dicom.dialogs.selection_dialogs import DicomSendDialog
 from fm_dicom.config.config_manager import get_favorite_tags
 from fm_dicom.managers.tree_manager import TREE_PATH_ROLE
 from fm_dicom.managers.staging_manager import StagedChange
+from fm_dicom.themes.design_tokens import get_theme_tokens
 
 
 @dataclass
@@ -66,9 +67,14 @@ class DicomManager(QObject):
         self._current_tree_path: Tuple[str, ...] = ()
         self._active_staged_overlays: Dict[str, StagedChange] = {}
         self._suppress_tag_change_handler = False
-        self._baseline_brush = QColor("#fff8e1")
-        self._staged_brush = QColor("#d6ecff")
-        self._staged_text_brush = QBrush(QColor("#0b3d60"))
+        
+        # Load theme-aware colors
+        theme_name = self.config.get("theme", "dark")
+        tokens = get_theme_tokens(theme_name).values
+        
+        self._baseline_brush = QColor(tokens["table_row_baseline"])
+        self._staged_brush = QColor(tokens["table_row_staged"])
+        self._staged_text_brush = QBrush(QColor(tokens["text_staged"]))
 
         # Load favorite tags from config
         self._load_favorite_tags()
