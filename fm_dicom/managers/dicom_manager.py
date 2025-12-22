@@ -15,10 +15,11 @@ from typing import Dict, List, Optional, Tuple
 import pydicom
 from pydicom.datadict import dictionary_VR
 from PyQt6.QtWidgets import QTableWidgetItem, QApplication
-from PyQt6.QtCore import QObject, pyqtSignal, Qt
+from PyQt6.QtCore import QObject, pyqtSignal, Qt, QThreadPool
 from PyQt6.QtGui import QPixmap, QImage, QFont, QColor, QBrush
 
 from fm_dicom.widgets.focus_aware import FocusAwareMessageBox, FocusAwareProgressDialog
+from fm_dicom.workers.image_worker import ImageLoaderWorker
 from fm_dicom.validation.validation_ui import run_validation
 from fm_dicom.anonymization.anonymization_ui import run_anonymization
 from fm_dicom.tag_browser.tag_browser import TagSearchDialog, ValueEntryDialog
@@ -67,6 +68,10 @@ class DicomManager(QObject):
         self._current_tree_path: Tuple[str, ...] = ()
         self._active_staged_overlays: Dict[str, StagedChange] = {}
         self._suppress_tag_change_handler = False
+        
+        # Async image loading
+        self.thread_pool = QThreadPool()
+        self._current_image_worker = None
         
         # Load theme-aware colors
         theme_name = self.config.get("theme", "dark")
@@ -930,9 +935,14 @@ class DicomManager(QObject):
             self.frame_selector.setEnabled(False)
     
     def display_image(self):
-        """Display DICOM image in preview"""
+        """Display DICOM image in preview asynchronously"""
         if not self.current_dataset or not self.config.get("show_image_preview", True):
             return
+            
+        # Cancel any ongoing worker
+        if self._current_image_worker:
+            self._current_image_worker.cancel()
+            self._current_image_worker = None
         
         try:
             ds = self.current_dataset
@@ -942,6 +952,9 @@ class DicomManager(QObject):
                 self.image_label.setText("No image data")
                 return
             
+            # Show loading state
+            self.image_label.setText("Loading image...")
+            
             # Get selected frame
             frame_index = 0
             if self.frame_selector:
@@ -949,41 +962,54 @@ class DicomManager(QObject):
                 if frame_index < 0:
                     frame_index = 0
             
-            # Get pixel array
-            pixel_array = ds.pixel_array
+            # Create and start worker
+            worker = ImageLoaderWorker(ds, frame_index)
+            worker.signals.result.connect(self._on_image_loaded)
+            worker.signals.error.connect(self._on_image_error)
             
-            # Handle multi-frame images
-            if len(pixel_array.shape) > 2:
-                if frame_index < pixel_array.shape[0]:
-                    pixel_array = pixel_array[frame_index]
-                else:
-                    pixel_array = pixel_array[0]
+            self._current_image_worker = worker
+            self.thread_pool.start(worker)
             
-            # Normalize pixel data to 0-255 range
-            if pixel_array.dtype != 'uint8':
-                pixel_array = ((pixel_array - pixel_array.min()) * 255.0 / 
-                             (pixel_array.max() - pixel_array.min())).astype('uint8')
+        except Exception as e:
+            logging.warning(f"Could not prepare image display: {e}")
+            self.image_label.setText("Error preparing image")
             
-            # Create QImage
-            height, width = pixel_array.shape
-            q_image = QImage(pixel_array.data, width, height, width, QImage.Format.Format_Grayscale8)
+    def _on_image_loaded(self, q_image):
+        """Handle loaded image from worker"""
+        self._current_image_worker = None
+        
+        if q_image is None:
+            self.image_label.setText("No image data")
+            return
             
+        try:
             # Convert to pixmap and scale to fit
             pixmap = QPixmap.fromImage(q_image)
             label_size = self.image_label.size()
-            scaled_pixmap = pixmap.scaled(
-                label_size, 
-                Qt.AspectRatioMode.KeepAspectRatio, 
-                Qt.TransformationMode.SmoothTransformation
-            )
             
-            self.image_label.setPixmap(scaled_pixmap)
-            self.image_loaded.emit(scaled_pixmap)
+            if label_size.width() > 0 and label_size.height() > 0:
+                scaled_pixmap = pixmap.scaled(
+                    label_size, 
+                    Qt.AspectRatioMode.KeepAspectRatio, 
+                    Qt.TransformationMode.SmoothTransformation
+                )
+                self.image_label.setPixmap(scaled_pixmap)
+            else:
+                self.image_label.setPixmap(pixmap)
+                
+            self.image_loaded.emit(pixmap)
             
         except Exception as e:
-            logging.warning(f"Could not display image: {e}")
-            self.image_label.setText("Could not display image")
-    
+            logging.error(f"Error displaying loaded image: {e}")
+            self.image_label.setText("Display Error")
+
+    def _on_image_error(self, error_info):
+        """Handle image loading error"""
+        self._current_image_worker = None
+        exctype, value, tb = error_info
+        logging.error(f"Image worker error: {value}")
+        self.image_label.setText("Image Load Error")
+
     def validate_selected_items(self, file_paths):
         """Validate selected DICOM files"""
         if not file_paths:
