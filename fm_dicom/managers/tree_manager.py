@@ -766,7 +766,7 @@ class TreeManager(QObject):
         
         for patient, studies in hierarchy.items():
             logging.debug(f"Patient: {patient} has {len(studies)} studies")
-            patient_item = QTreeWidgetItem([patient, "", "", ""])
+            patient_item = QTreeWidgetItem([patient])
             patient_item.setIcon(0, self.patient_icon)
             patient_item.setData(0, Qt.ItemDataRole.UserRole, None)  # No file for patient
             patient_item.setData(0, TREE_PATH_ROLE, (patient,))
@@ -776,7 +776,7 @@ class TreeManager(QObject):
             
             for study, series_dict in studies.items():
                 logging.debug(f"  Study: {study} has {len(series_dict)} series")
-                study_item = QTreeWidgetItem([patient, study, "", ""])
+                study_item = QTreeWidgetItem([study])
                 study_item.setIcon(0, self.study_icon)
                 study_item.setData(0, Qt.ItemDataRole.UserRole, None)  # No file for study
                 study_item.setData(0, TREE_PATH_ROLE, (patient, study))
@@ -786,7 +786,7 @@ class TreeManager(QObject):
                 
                 for series, instances in series_dict.items():
                     logging.debug(f"    Series: {series} has {len(instances)} instances")
-                    series_item = QTreeWidgetItem([patient, study, series, ""])
+                    series_item = QTreeWidgetItem([series])
                     series_item.setIcon(0, self.series_icon)
                     series_item.setData(0, Qt.ItemDataRole.UserRole, None)  # No file for series
                     series_item.setData(0, TREE_PATH_ROLE, (patient, study, series))
@@ -801,7 +801,8 @@ class TreeManager(QObject):
                     )
                     
                     for instance_label, instance_data in sorted_instances:
-                        instance_item = QTreeWidgetItem([patient, study, series, instance_label])
+                        instance_text = instance_label
+                        instance_item = QTreeWidgetItem([instance_text])
                         instance_item.setData(0, Qt.ItemDataRole.UserRole, instance_data['filepath'])
                         instance_item.setData(0, TREE_PATH_ROLE, (patient, study, series, instance_label))
                         
@@ -809,11 +810,11 @@ class TreeManager(QObject):
                         filepath = instance_data['filepath']
                         if filepath in self.memory_items:
                             # Set visual indicators for memory item
-                            instance_item.setForeground(3, self._memory_item_brush)
-                            instance_item.setFont(3, self._memory_item_font)
+                            instance_item.setForeground(0, self._memory_item_brush)
+                            instance_item.setFont(0, self._memory_item_font)
                             # Add an indicator to the text as well
-                            instance_item.setText(3, f"*{instance_label}")
-                            instance_item.setToolTip(3, "This item exists only in memory (unsaved copy)")
+                            instance_item.setText(0, f"*{instance_label}")
+                            instance_item.setToolTip(0, "This item exists only in memory (unsaved copy)")
                             
                         series_item.addChild(instance_item)
                         
@@ -824,6 +825,7 @@ class TreeManager(QObject):
                             if filepath not in self.memory_items:
                                 file_size = os.path.getsize(filepath)
                                 total_size_bytes += file_size
+                                instance_item.setToolTip(0, f"Size: {file_size / 1024:.1f} KB")
                         except (OSError, KeyError):
                             pass  # Skip if file not accessible
         
@@ -1022,12 +1024,12 @@ class TreeManager(QObject):
             return item.text(0)
         elif level == "study":
             patient = item.parent().text(0) if item.parent() else ""
-            study = item.text(1) or item.text(0)
+            study = item.text(0)
             return f"{patient} → {study}"
         elif level == "series":
             patient = item.parent().parent().text(0) if item.parent() and item.parent().parent() else ""
-            study = item.parent().text(1) if item.parent() else ""
-            series = item.text(2) or item.text(0)
+            study = item.parent().text(0) if item.parent() else ""
+            series = item.text(0)
             return f"{patient} → {study} → {series}"
         else:
             return item.text(0)

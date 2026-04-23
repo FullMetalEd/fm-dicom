@@ -224,6 +224,7 @@ class FileManager(QObject):
             logging.warning(f"Path does not exist: {path}")
             return
         
+        self._update_recent_paths(path)
         self.loading_started.emit()
         
         try:
@@ -749,3 +750,26 @@ class FileManager(QObject):
             'name': os.path.basename(file_path),
             'dir': os.path.dirname(file_path)
         }
+    
+    def _update_recent_paths(self, path):
+        """Update recent paths in config"""
+        if not path:
+            return
+            
+        recent = self.config.get("recent_paths", [])
+        
+        # Remove if already exists to move to top
+        if path in recent:
+            recent.remove(path)
+            
+        # Add to top
+        recent.insert(0, path)
+        
+        # Limit to 10 items
+        recent = recent[:10]
+        
+        self.config["recent_paths"] = recent
+        
+        # Save config
+        from fm_dicom.config.config_manager import save_config
+        save_config(self.config)

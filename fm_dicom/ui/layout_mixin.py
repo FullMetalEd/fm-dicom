@@ -121,13 +121,14 @@ class LayoutMixin:
         toolbar.addAction(act_settings)
 
         # Welcome Widget (Empty State)
-        self.welcome_widget = WelcomeWidget()
-        self.welcome_widget.set_callbacks(self.open_file, self.open_directory)
+        recent_paths = self.config.get("recent_paths", [])
+        self.welcome_widget = WelcomeWidget(recent_paths=recent_paths)
+        self.welcome_widget.set_callbacks(self.open_file, self.open_directory, self.load_path)
         layout.addWidget(self.welcome_widget)
 
         # Main Splitter - EXACT match to original
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.main_splitter.setHandleWidth(12)
+        self.main_splitter.setHandleWidth(4)
         self.main_splitter.setChildrenCollapsible(False)
         self.main_splitter.setVisible(False)  # Hidden by default until files are loaded
         
@@ -166,10 +167,31 @@ class LayoutMixin:
         tree_layout.setContentsMargins(0, 0, 0, 0)
         
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Item", "ID/Description", "Date", "Size"])
+        self.tree.setColumnCount(1)
+        self.tree.setHeaderHidden(True)
+        self.tree.setIndentation(20)
         self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self.show_tree_context_menu)
+        
+        # Style the tree for a cleaner look
+        self.tree.setStyleSheet("""
+            QTreeWidget {
+                border: none;
+                background-color: transparent;
+            }
+            QTreeWidget::item {
+                padding: 4px;
+                border-radius: 4px;
+            }
+            QTreeWidget::item:hover {
+                background-color: rgba(255, 255, 255, 0.05);
+            }
+            QTreeWidget::item:selected {
+                background-color: rgba(255, 255, 255, 0.1);
+                color: white;
+            }
+        """)
         tree_layout.addWidget(self.tree)
         left_splitter.addWidget(tree_container)
         

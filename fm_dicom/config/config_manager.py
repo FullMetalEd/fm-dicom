@@ -416,6 +416,25 @@ def load_config(config_path_override=None):
     return final_config
 
 
+def save_config(config):
+    """Save the configuration to the platform-specific configuration file path"""
+    config_path = get_config_path()
+    if not config_path:
+        return False
+
+    # Create a copy without internal state
+    config_to_save = {k: v for k, v in config.items() if not k.startswith('_')}
+
+    try:
+        ensure_dir_exists(config_path)
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(config_to_save, f, sort_keys=False, allow_unicode=True)
+        return True
+    except Exception as e:
+        print(f"ERROR (save_config): Could not save config at {config_path}: {e}", file=sys.stderr)
+        return False
+
+
 def setup_logging(log_path_from_config, log_level_str_from_config):  # Renamed params for clarity
     log_level_str = str(log_level_str_from_config).upper()
     log_level = getattr(logging, log_level_str, logging.INFO)  # Default to INFO if invalid

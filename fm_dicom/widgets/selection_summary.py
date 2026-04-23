@@ -41,17 +41,20 @@ class LazySelectionSummaryWidget(QWidget):
         layout.addWidget(self.size_label)
         layout.addWidget(self.breakdown_label)
         
+        from fm_dicom.themes.design_tokens import get_theme_tokens
+        tokens = get_theme_tokens("dark") # Default to dark, but ideally we'd pass it in
+        
         # Style the widget
-        self.setStyleSheet("""
-            QWidget {
-                background-color: #2c2f33;
+        self.setStyleSheet(f"""
+            LazySelectionSummaryWidget {{
+                background-color: transparent;
                 border: 1px solid #444;
                 border-radius: 5px;
-            }
-            QLabel {
-                color: #f5f5f5;
+            }}
+            QLabel {{
+                color: gray;
                 padding: 2px;
-            }
+            }}
         """)
     
     def update_summary(self, selected_files):

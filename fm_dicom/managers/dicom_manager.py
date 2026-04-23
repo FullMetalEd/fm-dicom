@@ -188,18 +188,19 @@ class DicomManager(QObject):
                 display_row = [tag_id, desc, value_str, ""]
                 self._all_tag_rows.append({
                     'elem_obj': elem,
-                    'display_row': display_row
+                    'display_row': display_row,
+                    'group': self._get_tag_group(elem.tag)
                 })
                 
             except Exception as e:
                 logging.warning(f"Error processing tag {elem.tag}: {e}")
                 continue
         
-        # Sort by favorite status first, then by tag ID
-        # Favorites appear at top, then regular tags sorted by tag ID
+        # Sort by favorite status first, then by group, then by tag ID
+        # Favorites appear at top, then grouped tags sorted by tag ID
         self._all_tag_rows.sort(key=lambda x: (
-            not self._is_favorite_tag(x['display_row'][0]),  # False sorts before True, so favorites first
-            x['display_row'][0]  # Then sort by tag ID within each group
+            self._get_group_priority("FAVORITES" if self._is_favorite_tag(x['display_row'][0]) else x.get('group', 'Metadata')),
+            x['display_row'][0]
         ))
         
         # Rows will be rendered via _refresh_tag_table once staging overlays are applied
@@ -304,7 +305,12 @@ class DicomManager(QObject):
                 "",
             ]
             self._all_tag_rows.append(
-                {"elem_obj": elem_obj, "display_row": display_row, "staged_only": True}
+                {
+                    "elem_obj": elem_obj,
+                    "display_row": display_row,
+                    "staged_only": True,
+                    "group": self._get_tag_group(elem_obj.tag)
+                }
             )
             existing_tags.add(tag_id)
             self._baseline_values.setdefault(tag_id, change.old_value or "")
@@ -314,6 +320,7 @@ class DicomManager(QObject):
             self._all_tag_rows.sort(
                 key=lambda x: (
                     not self._is_favorite_tag(x["display_row"][0]),
+                    x.get("group", "Metadata"),
                     x["display_row"][0],
                 )
             )
@@ -505,6 +512,7 @@ class DicomManager(QObject):
             self.tag_table.setRowCount(0)
             
             filter_text = self._current_filter_text
+            current_group = None
             
             for row_info in self._all_tag_rows:
                 elem_obj = row_info['elem_obj']
@@ -519,10 +527,35 @@ class DicomManager(QObject):
                 ):
                     continue
                 
+                is_favorite = self._is_favorite_tag(tag_id)
+                group = "FAVORITES" if is_favorite else row_info.get('group', 'Metadata')
+
+                # Add group header if group changed (only when not filtering)
+                if not filter_text and group != current_group:
+                    current_group = group
+                    header_row = self.tag_table.rowCount()
+                    self.tag_table.insertRow(header_row)
+                    
+                    header_item = QTableWidgetItem(f"   {group.upper()}   ")
+                    # Special color for FAVORITES header
+                    if group == "FAVORITES":
+                        header_item.setBackground(QColor(60, 50, 20))
+                        header_item.setForeground(QColor(255, 200, 50))
+                    else:
+                        header_item.setBackground(QColor(40, 40, 40))
+                        header_item.setForeground(QColor(160, 160, 160))
+                    
+                    header_item.setFlags(Qt.ItemFlag.NoItemFlags)
+                    header_font = QFont()
+                    header_font.setBold(True)
+                    header_font.setPointSize(9)
+                    header_item.setFont(header_font)
+                    
+                    self.tag_table.setItem(header_row, 0, header_item)
+                    self.tag_table.setSpan(header_row, 0, 1, 4)
+
                 row_idx = self.tag_table.rowCount()
                 self.tag_table.insertRow(row_idx)
-
-                is_favorite = self._is_favorite_tag(tag_id)
 
                 tag_display = f"★ {tag_id}" if is_favorite else tag_id
                 tag_id_item = QTableWidgetItem(tag_display)
@@ -556,15 +589,17 @@ class DicomManager(QObject):
                 staged_entry = self._active_staged_overlays.get(tag_id)
                 if staged_entry:
                     new_value_item.setText(staged_entry.new_value)
-                    new_value_item.setBackground(self._staged_brush)
+                    # Highlight the entire row for staged changes
+                    for col_item in (tag_id_item, desc_item, value_item, new_value_item):
+                        col_item.setBackground(self._staged_brush)
+                        col_item.setForeground(self._staged_text_brush)
+                        
                     new_value_item.setToolTip(
                         f"Pending {staged_entry.level} edit\n"
                         f"{' → '.join(staged_entry.node_path)}"
                     )
-                    new_value_item.setForeground(self._staged_text_brush)
                 else:
                     new_value_item.setToolTip("")
-                    new_value_item.setForeground(QBrush(Qt.GlobalColor.black))
 
                 if (
                     elem_obj.tag == (0x7fe0, 0x0010)
@@ -1630,3 +1665,35 @@ class DicomManager(QObject):
         except (ValueError, TypeError):
             # If conversion fails, return as string
             return str(value)
+
+    def _get_tag_group(self, tag_tuple):
+        """Categorize a tag into a logical group based on its group number"""
+        group_num = tag_tuple.group
+        
+        if group_num == 0x0008: return "Identification"
+        if group_num == 0x0010: return "Patient Info"
+        if group_num == 0x0018: return "Visit/Acquisition Info"
+        if group_num == 0x0020: return "Relationship"
+        if group_num == 0x0028: return "Image/Presentation"
+        if group_num == 0x7FE0: return "Pixel Data"
+        if group_num % 2 != 0: return "Private"
+        
+        return "Metadata"
+    
+    def _get_group_priority(self, group_name):
+        """Return a priority number for group sorting (lower is higher priority)"""
+        order = [
+            "FAVORITES",
+            "Patient Info",
+            "Visit/Acquisition Info",
+            "Identification",
+            "Relationship",
+            "Image/Presentation",
+            "Pixel Data",
+            "Metadata",
+            "Private"
+        ]
+        try:
+            return order.index(group_name)
+        except ValueError:
+            return len(order)
