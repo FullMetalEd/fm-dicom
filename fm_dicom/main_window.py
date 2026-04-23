@@ -787,6 +787,16 @@ class MainWindow(QMainWindow, LayoutMixin):
             merge_action.setShortcut(QKeySequence("Ctrl+M"))
             merge_action.triggered.connect(self.merge_patients)
             menu.addAction(merge_action)
+            
+        # Split option for one or more items of the same level
+        if len(unique_depths) == 1:
+            depth = list(unique_depths)[0]
+            target_map = {1: "Patient", 2: "Study", 3: "Series"}
+            target_label = target_map.get(depth)
+            if target_label:
+                split_action = QAction(f"✂️ Split to New {target_label}", self)
+                split_action.triggered.connect(self.tree_manager.split_selected_items)
+                menu.addAction(split_action)
         
         delete_action = QAction("🗑️ Delete Selected", self)
         delete_action.setShortcut(QKeySequence.StandardKey.Delete)

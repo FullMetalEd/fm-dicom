@@ -113,3 +113,52 @@ class DicomSendDialog(QDialog):
             self.host.text().strip(),
             port_val  # Already int
         )
+
+
+class SplitItemDialog(QDialog):
+    """Dialog to capture metadata for a newly split container."""
+
+    def __init__(self, parent, target_level: str, initial_values: dict = None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Split to New {target_level.title()}")
+        self.target_level = target_level
+        initial_values = initial_values or {}
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.fields = {}
+
+        if target_level == "patient":
+            self.fields["patient_name"] = QLineEdit(initial_values.get("patient_name", ""))
+            self.fields["patient_name"].setPlaceholderText("New Patient Name")
+            self.fields["patient_id"] = QLineEdit(initial_values.get("patient_id", ""))
+            self.fields["patient_id"].setPlaceholderText("New Patient ID")
+            form.addRow("Patient Name:", self.fields["patient_name"])
+            form.addRow("Patient ID:", self.fields["patient_id"])
+
+        elif target_level == "study":
+            self.fields["study_desc"] = QLineEdit(initial_values.get("study_desc", "New Study"))
+            self.fields["accession"] = QLineEdit(initial_values.get("accession", ""))
+            form.addRow("Study Description:", self.fields["study_desc"])
+            form.addRow("Accession Number:", self.fields["accession"])
+
+        elif target_level == "series":
+            self.fields["series_desc"] = QLineEdit(initial_values.get("series_desc", "New Series"))
+            self.fields["modality"] = QLineEdit(initial_values.get("modality", ""))
+            form.addRow("Series Description:", self.fields["series_desc"])
+            form.addRow("Modality:", self.fields["modality"])
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            self,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_values(self) -> dict:
+        """Return the user-provided values."""
+        return {k: v.text().strip() for k, v in self.fields.items()}

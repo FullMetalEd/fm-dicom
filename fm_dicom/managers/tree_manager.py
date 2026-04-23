@@ -17,6 +17,8 @@ from fm_dicom.utils.threaded_processor import ThreadedDicomProcessor, DicomProce
 from fm_dicom.managers.duplication_manager import DuplicationManager, UIDConfiguration
 from fm_dicom.dialogs.uid_configuration_dialog import UIDConfigurationDialog
 from fm_dicom.dialogs.move_item_dialog import MoveItemDialog
+from fm_dicom.dialogs.selection_dialogs import SplitItemDialog
+from pydicom.uid import generate_uid
 from fm_dicom.themes.design_tokens import get_theme_tokens
 
 TREE_PATH_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -1006,9 +1008,26 @@ class TreeManager(QObject):
             level = self._get_item_level(item)
             path = item.data(0, TREE_PATH_ROLE)
             if level == target_level and path:
+                # Extract extra metadata for better user context
+                extra_info = {}
+                dataset = self._get_sample_dataset(item)
+                if dataset:
+                    extra_info = {
+                        "patient_name": str(getattr(dataset, "PatientName", "")),
+                        "patient_id": str(getattr(dataset, "PatientID", "")),
+                        "patient_dob": str(getattr(dataset, "PatientBirthDate", "")),
+                        "study_date": str(getattr(dataset, "StudyDate", "")),
+                        "study_desc": str(getattr(dataset, "StudyDescription", "")),
+                        "series_desc": str(getattr(dataset, "SeriesDescription", "")),
+                        "accession": str(getattr(dataset, "AccessionNumber", "")),
+                        "study_uid": str(getattr(dataset, "StudyInstanceUID", "")),
+                    }
+
                 options.append({
                     "path": list(path),
                     "label": self._format_target_label(item, level),
+                    "level": level,
+                    **extra_info
                 })
             for i in range(item.childCount()):
                 traverse(item.child(i))
@@ -1053,17 +1072,21 @@ class TreeManager(QObject):
             "patient_name": getattr(dataset, "PatientName", None),
             "study_uid": None,
             "study_desc": None,
+            "accession": None,
             "series_uid": None,
             "series_desc": None,
+            "modality": None,
         }
 
         if target_level in {"study", "series"}:
             info["study_uid"] = getattr(dataset, "StudyInstanceUID", None)
             info["study_desc"] = getattr(dataset, "StudyDescription", None)
+            info["accession"] = getattr(dataset, "AccessionNumber", None)
 
         if target_level == "series":
             info["series_uid"] = getattr(dataset, "SeriesInstanceUID", None)
             info["series_desc"] = getattr(dataset, "SeriesDescription", None)
+            info["modality"] = getattr(dataset, "Modality", None)
 
         return info
 
@@ -1124,6 +1147,8 @@ class TreeManager(QObject):
                 dataset.StudyInstanceUID = target_info["study_uid"]
             if target_info.get("study_desc"):
                 dataset.StudyDescription = target_info["study_desc"]
+            if target_info.get("accession"):
+                dataset.AccessionNumber = target_info["accession"]
 
         elif source_level == "instance":
             if target_level != "series":
@@ -1136,10 +1161,14 @@ class TreeManager(QObject):
                 dataset.StudyInstanceUID = target_info["study_uid"]
             if target_info.get("study_desc"):
                 dataset.StudyDescription = target_info["study_desc"]
+            if target_info.get("accession"):
+                dataset.AccessionNumber = target_info["accession"]
             if target_info.get("series_uid"):
                 dataset.SeriesInstanceUID = target_info["series_uid"]
             if target_info.get("series_desc"):
                 dataset.SeriesDescription = target_info["series_desc"]
+            if target_info.get("modality"):
+                dataset.Modality = target_info["modality"]
 
         else:
             raise ValueError(f"Unsupported source level: {source_level}")
@@ -1663,6 +1692,111 @@ class TreeManager(QObject):
                 "Move Item",
                 f"Failed to move the selected item(s):\n\n{exc}"
             )
+
+    def split_selected_items(self):
+        """Split selected items into a newly created container."""
+        try:
+            selected_items = self.tree.selectedItems()
+            if not selected_items:
+                FocusAwareMessageBox.warning(self.main_window, "Split Item", "Please select items to split.")
+                return
+
+            levels = {self._get_item_level(item) for item in selected_items}
+            levels.discard(None)
+            if len(levels) > 1:
+                FocusAwareMessageBox.warning(self.main_window, "Split Item", "Please select items of the same level (e.g., all instances).")
+                return
+            if not levels or not levels <= {"study", "series", "instance"}:
+                FocusAwareMessageBox.warning(self.main_window, "Split Item", "Only studies, series, or instances can be split.")
+                return
+
+            source_level = list(levels)[0]
+            target_map = {"study": "patient", "series": "study", "instance": "series"}
+            target_level = target_map.get(source_level)
+            if not target_level:
+                return
+
+            # Use the first selected item to inherit parent context and default values
+            first_item = selected_items[0]
+            sample_ds = self._get_sample_dataset(first_item)
+            
+            initial_values = {}
+            if sample_ds:
+                if target_level == "patient":
+                    initial_values["patient_name"] = str(getattr(sample_ds, "PatientName", ""))
+                    initial_values["patient_id"] = str(getattr(sample_ds, "PatientID", ""))
+                elif target_level == "study":
+                    initial_values["study_desc"] = str(getattr(sample_ds, "StudyDescription", "New Study"))
+                    initial_values["accession"] = str(getattr(sample_ds, "AccessionNumber", ""))
+                elif target_level == "series":
+                    initial_values["series_desc"] = str(getattr(sample_ds, "SeriesDescription", "New Series"))
+                    initial_values["modality"] = str(getattr(sample_ds, "Modality", ""))
+
+            # Capture new metadata
+            dialog = SplitItemDialog(self.main_window, target_level, initial_values=initial_values)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            
+            user_values = dialog.get_values()
+            
+            # To split instances into a new series, the new series needs the Study/Patient info of the instances' current series
+            parent_item = first_item.parent() or first_item
+            parent_info = self._extract_target_info(source_level, parent_item)
+            if not parent_info:
+                FocusAwareMessageBox.warning(self.main_window, "Split Item", "Could not determine parent context.")
+                return
+            
+            # Build target info for the NEW container
+            target_info = parent_info.copy()
+            target_info["level"] = target_level
+            
+            if target_level == "patient":
+                target_info["patient_name"] = user_values.get("patient_name")
+                target_info["patient_id"] = user_values.get("patient_id")
+            elif target_level == "study":
+                target_info["study_uid"] = generate_uid()
+                target_info["study_desc"] = user_values.get("study_desc")
+                target_info["accession"] = user_values.get("accession")
+            elif target_level == "series":
+                target_info["series_uid"] = generate_uid()
+                target_info["series_desc"] = user_values.get("series_desc")
+                target_info["modality"] = user_values.get("modality")
+
+            # Collect all paths
+            all_paths = []
+            for item in selected_items:
+                all_paths.extend(self._collect_instance_filepaths(item))
+
+            if not all_paths:
+                FocusAwareMessageBox.warning(self.main_window, "Split Item", "No DICOM files found in selection.")
+                return
+
+            # Perform the move (which handles tag updates)
+            success, failures = self._perform_move(all_paths, source_level, target_info)
+            
+            # Cleanup and refresh
+            seen = {f[0] if isinstance(f, tuple) else f for f in self.loaded_files}
+            for path in all_paths:
+                if path not in seen:
+                    self.loaded_files.append(path)
+                    seen.add(path)
+
+            if hasattr(self.main_window, "prepare_for_tree_refresh"):
+                self.main_window._pending_ui_state = None
+
+            self.refresh_tree()
+            
+            message = f"Successfully split {success} files into a new {target_level}."
+            if failures:
+                sample = "\n".join(f"{os.path.basename(path)}: {error}" for path, error in failures[:3])
+                message += f"\n\nFailed for {len(failures)} files:\n{sample}"
+                FocusAwareMessageBox.warning(self.main_window, "Split Results", message)
+            else:
+                FocusAwareMessageBox.information(self.main_window, "Split Results", message)
+
+        except Exception as e:
+            logging.error(f"Split failed: {e}", exc_info=True)
+            FocusAwareMessageBox.critical(self.main_window, "Split Error", f"Split operation failed: {str(e)}")
 
     def _integrate_duplicated_items(self, duplicated_items):
         """Integrate duplicated DICOM items into the tree manager's data structures"""
