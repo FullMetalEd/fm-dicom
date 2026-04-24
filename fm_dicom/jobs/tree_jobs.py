@@ -15,6 +15,7 @@ class TreePopulateJob(BaseJob):
         self.file_paths = file_paths
         self.tree_manager = tree_manager
         self.append = append
+        self.result = None
 
     def run(self):
         self.start_timer()
@@ -71,18 +72,29 @@ class TreePopulateJob(BaseJob):
             self.stop_timer()
             if self.is_cancelled():
                 return
-                
-            self.signals.finished.emit({
+            
+            self.result = {
                 "hierarchy": final_hierarchy,
                 "append": self.append,
                 "file_paths": self.file_paths,
                 "metadata": metadata_map
-            })
+            }
+            self.signals.finished.emit(self.result)
             
         except Exception as e:
             self.stop_timer()
             logging.error(f"TreePopulateJob failed: {e}", exc_info=True)
             self.signals.failed.emit(str(e))
+
+    def view_results(self):
+        """Show hierarchy building summary"""
+        from fm_dicom.widgets.focus_aware import FocusAwareMessageBox
+        if not self.result: return
+        
+        count = len(self.result['file_paths'])
+        patient_count = len(self.result['hierarchy'])
+        msg = f"Tree built successfully.\n\nTotal files: {count}\nUnique patients found: {patient_count}"
+        FocusAwareMessageBox.information(self.tree_manager.main_window, "Tree Ready", msg)
 
 class DuplicationJob(BaseJob):
     """Background job for duplicating DICOM items."""
@@ -93,6 +105,7 @@ class DuplicationJob(BaseJob):
         self.level = level
         self.uid_config = uid_config
         self.duplication_manager = duplication_manager
+        self.result = None
 
     def run(self):
         self.start_timer()
@@ -113,6 +126,7 @@ class DuplicationJob(BaseJob):
                 return
                 
             if results:
+                self.result = results
                 self.signals.finished.emit(results)
             else:
                 self.signals.failed.emit("Duplication failed or produced no items.")
@@ -121,3 +135,11 @@ class DuplicationJob(BaseJob):
             self.stop_timer()
             logging.error(f"DuplicationJob failed: {e}", exc_info=True)
             self.signals.failed.emit(str(e))
+
+    def view_results(self):
+        """Show duplication results summary"""
+        from fm_dicom.widgets.focus_aware import FocusAwareMessageBox
+        if not self.result: return
+        count = len(self.result)
+        msg = f"Successfully duplicated {count} items in memory.\n\nNote: Changes must be saved to disk to be permanent."
+        FocusAwareMessageBox.information(self.duplication_manager.main_window, "Duplication Complete", msg)

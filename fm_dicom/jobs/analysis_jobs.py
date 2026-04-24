@@ -113,10 +113,21 @@ class AnalysisJob(BaseJob):
             self.signals.failed.emit(str(e))
 
     def view_results(self):
-        """Show detailed analysis results dialog"""
-        if self.results:
-            dialog = FileAnalysisResultsDialog(self.results, self.parent_window)
-            dialog.exec()
+        """Show detailed results dialog"""
+        try:
+            if self.results:
+                # Import here to avoid circular imports if any
+                from fm_dicom.dialogs.results_dialogs import FileAnalysisResultsDialog, PerformanceResultsDialog
+                
+                if isinstance(self, AnalysisJob):
+                    dialog = FileAnalysisResultsDialog(self.results, self.parent_window)
+                else:
+                    dialog = PerformanceResultsDialog(self.results, self.parent_window)
+                dialog.exec()
+            else:
+                logging.warning("No results to view for job")
+        except Exception as e:
+            logging.error(f"Error showing results dialog: {e}", exc_info=True)
 
 class PerformanceTestJob(BaseJob):
     """Background job for testing DICOM loading performance."""
@@ -186,6 +197,12 @@ class PerformanceTestJob(BaseJob):
 
     def view_results(self):
         """Show detailed performance results dialog"""
-        if self.results:
-            dialog = PerformanceResultsDialog(self.results, self.parent_window)
-            dialog.exec()
+        try:
+            if self.results:
+                from fm_dicom.dialogs.results_dialogs import PerformanceResultsDialog
+                dialog = PerformanceResultsDialog(self.results, self.parent_window)
+                dialog.exec()
+            else:
+                logging.warning("No performance results to view")
+        except Exception as e:
+            logging.error(f"Error showing performance results: {e}", exc_info=True)

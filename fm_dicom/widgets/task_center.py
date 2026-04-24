@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot, QTimer, QEvent, QSize
 from PyQt6.QtGui import QFont, QColor
+import logging
 
 class JobCardWidget(QFrame):
     """A row representing a single background job."""
@@ -62,7 +63,7 @@ class JobCardWidget(QFrame):
         title_font.setPointSize(10)
         self.title_label.setFont(title_font)
         self.title_label.setWordWrap(True)
-        self.title_label.setMinimumWidth(0) # Allow shrinking
+        self.title_label.setMinimumSize(0, 0) # Allow shrinking
         self.title_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         top_line.addWidget(self.title_label)
         
@@ -72,25 +73,26 @@ class JobCardWidget(QFrame):
         
         self.view_btn = QPushButton("View")
         self.view_btn.setVisible(False)
-        self.view_btn.setFixedSize(50, 24)
+        self.view_btn.setFixedSize(70, 26) # Increased size and height
         self.view_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.view_btn.setStyleSheet("""
             QPushButton {
                 background-color: #3b5bdb;
                 color: white;
-                font-size: 11px;
+                font-size: 12px;
                 font-weight: bold;
                 border-radius: 4px;
-                border: none;
+                border: 1px solid #2b45b0;
+                padding: 2px 5px;
             }
             QPushButton:hover { background-color: #4c6ef5; }
             QPushButton:pressed { background-color: #364fc7; }
         """)
-        self.view_btn.clicked.connect(self.job.view_results)
+        self.view_btn.clicked.connect(self._on_view_clicked)
         btns_layout.addWidget(self.view_btn)
 
         self.action_btn = QPushButton("✕")
-        self.action_btn.setFixedSize(24, 24)
+        self.action_btn.setFixedSize(26, 26) # Match height
         self.action_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.action_btn.setToolTip("Cancel task")
         self.action_btn.setStyleSheet("""
@@ -98,9 +100,9 @@ class JobCardWidget(QFrame):
                 color: #adb5bd; 
                 background-color: rgba(255, 255, 255, 0.08);
                 border: 1px solid #495057;
-                border-radius: 12px;
+                border-radius: 13px;
                 font-weight: bold;
-                font-size: 12px;
+                font-size: 14px;
             }
             QPushButton:hover { 
                 color: #fff; 
@@ -123,7 +125,7 @@ class JobCardWidget(QFrame):
         self.status_label.setObjectName("statusLabel")
         self.status_label.setStyleSheet("color: #868e96; font-size: 11px;")
         self.status_label.setWordWrap(True)
-        self.status_label.setMinimumWidth(0)
+        self.status_label.setMinimumSize(0, 0)
         self.status_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         status_line.addWidget(self.status_label)
         
@@ -177,6 +179,15 @@ class JobCardWidget(QFrame):
         else:
             self.dismissed.emit(self)
 
+    @pyqtSlot()
+    def _on_view_clicked(self):
+        """Handle view button click with error handling"""
+        try:
+            logging.info(f"Viewing results for job: {self.job.title}")
+            self.job.view_results()
+        except Exception as e:
+            logging.error(f"Error viewing results: {e}", exc_info=True)
+
     def _update_duration(self):
         duration = int(self.job.get_duration())
         mins = duration // 60
@@ -210,15 +221,15 @@ class JobCardWidget(QFrame):
         self.percent_label.setText("100%")
         self.percent_label.setStyleSheet("color: #51cf66; font-size: 11px; font-weight: bold;")
         
-        # Crucial: Check if job is capable of viewing results
-        if result is not None:
-            self.view_btn.setVisible(True)
+        # Show view button if the job is finished
+        self.view_btn.setVisible(True)
             
         self.action_btn.setToolTip("Dismiss")
         self.action_btn.setEnabled(True)
         self.setProperty("state", "success")
         self.style().unpolish(self)
         self.style().polish(self)
+        self.updateGeometry()
 
     @pyqtSlot(str)
     def _on_failed(self, error):
@@ -232,6 +243,7 @@ class JobCardWidget(QFrame):
         self.setProperty("state", "error")
         self.style().unpolish(self)
         self.style().polish(self)
+        self.updateGeometry()
 
     @pyqtSlot()
     def _on_cancelled(self):
@@ -240,6 +252,7 @@ class JobCardWidget(QFrame):
         self.status_label.setText("Cancelled")
         self.action_btn.setToolTip("Dismiss")
         self.action_btn.setEnabled(True)
+        self.updateGeometry()
 
 
 class TaskCenterWidget(QWidget):
