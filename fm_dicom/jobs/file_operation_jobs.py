@@ -35,13 +35,19 @@ class FileLoadJob(BaseJob):
         except Exception as e:
             self.stop_timer()
             logging.error(f"FileLoadJob failed: {e}", exc_info=True)
-            self.signals.failed.emit(str(e))
+            self.error = str(e)
+            self.signals.failed.emit(self.error)
 
     def view_results(self):
         """Show loading summary"""
         from fm_dicom.widgets.focus_aware import FocusAwareMessageBox
-        msg = f"Successfully loaded files from:\n{self.path}"
-        FocusAwareMessageBox.information(self.file_manager.main_window, "Load Complete", msg)
+        if self.result:
+            msg = f"Successfully loaded files from:\n{self.path}"
+            FocusAwareMessageBox.information(self.file_manager.main_window, "Load Complete", msg)
+        elif self.error:
+            FocusAwareMessageBox.critical(self.file_manager.main_window, "Load Error", f"Failed to load files:\n\n{self.error}")
+        else:
+            FocusAwareMessageBox.warning(self.file_manager.main_window, "No Results", "No load details are available.")
 
 class FileSaveJob(BaseJob):
     """Background job for saving modified DICOM files."""
@@ -71,11 +77,16 @@ class FileSaveJob(BaseJob):
         except Exception as e:
             self.stop_timer()
             logging.error(f"FileSaveJob failed: {e}", exc_info=True)
-            self.signals.failed.emit(str(e))
+            self.error = str(e)
+            self.signals.failed.emit(self.error)
 
     def view_results(self):
         """Show saving summary"""
         from fm_dicom.widgets.focus_aware import FocusAwareMessageBox
-        if not self.result: return
-        msg = f"Successfully saved {self.result['count']} modified files to disk."
-        FocusAwareMessageBox.information(self.dicom_manager.main_window, "Save Complete", msg)
+        if self.result:
+            msg = f"Successfully saved {self.result['count']} modified files to disk."
+            FocusAwareMessageBox.information(self.dicom_manager.main_window, "Save Complete", msg)
+        elif self.error:
+            FocusAwareMessageBox.critical(self.dicom_manager.main_window, "Save Error", f"Failed to save files:\n\n{self.error}")
+        else:
+            FocusAwareMessageBox.warning(self.dicom_manager.main_window, "No Results", "No save details are available.")

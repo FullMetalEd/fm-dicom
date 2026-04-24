@@ -47,7 +47,8 @@ class ExportJob(BaseJob):
         except Exception as e:
             self.stop_timer()
             logging.error(f"ExportJob failed: {e}", exc_info=True)
-            self.signals.failed.emit(str(e))
+            self.error = str(e)
+            self.signals.failed.emit(self.error)
         finally:
             # Cleanup temp directory if it was created for this job
             if self.temp_dir and os.path.exists(self.temp_dir):
@@ -56,6 +57,16 @@ class ExportJob(BaseJob):
                     logging.info(f"Cleaned up ExportJob temp directory: {self.temp_dir}")
                 except Exception as e:
                     logging.warning(f"Failed to cleanup ExportJob temp dir: {e}")
+
+    def view_results(self):
+        """Show export summary"""
+        from fm_dicom.widgets.focus_aware import FocusAwareMessageBox
+        if hasattr(self, 'results') and self.results:
+            FocusAwareMessageBox.information(None, "Export Complete", f"Successfully exported {self.results['count']} files.")
+        elif self.error:
+            FocusAwareMessageBox.critical(None, "Export Error", f"The export operation failed:\n\n{self.error}")
+        else:
+            FocusAwareMessageBox.warning(None, "No Results", "No export details are available.")
 
     def cancel(self):
         super().cancel()

@@ -110,22 +110,22 @@ class AnalysisJob(BaseJob):
         except Exception as e:
             self.stop_timer()
             logging.error(f"AnalysisJob failed: {e}", exc_info=True)
-            self.signals.failed.emit(str(e))
+            self.error = str(e)
+            self.signals.failed.emit(self.error)
 
     def view_results(self):
         """Show detailed results dialog"""
+        from fm_dicom.widgets.focus_aware import FocusAwareMessageBox
         try:
             if self.results:
                 # Import here to avoid circular imports if any
-                from fm_dicom.dialogs.results_dialogs import FileAnalysisResultsDialog, PerformanceResultsDialog
-                
-                if isinstance(self, AnalysisJob):
-                    dialog = FileAnalysisResultsDialog(self.results, self.parent_window)
-                else:
-                    dialog = PerformanceResultsDialog(self.results, self.parent_window)
+                from fm_dicom.dialogs.results_dialogs import FileAnalysisResultsDialog
+                dialog = FileAnalysisResultsDialog(self.results, self.parent_window)
                 dialog.exec()
+            elif self.error:
+                FocusAwareMessageBox.critical(self.parent_window, "Analysis Error", f"The analysis failed:\n\n{self.error}")
             else:
-                logging.warning("No results to view for job")
+                FocusAwareMessageBox.warning(self.parent_window, "No Results", "No results to view for this job.")
         except Exception as e:
             logging.error(f"Error showing results dialog: {e}", exc_info=True)
 
@@ -193,16 +193,20 @@ class PerformanceTestJob(BaseJob):
         except Exception as e:
             self.stop_timer()
             logging.error(f"PerformanceTestJob failed: {e}", exc_info=True)
-            self.signals.failed.emit(str(e))
+            self.error = str(e)
+            self.signals.failed.emit(self.error)
 
     def view_results(self):
         """Show detailed performance results dialog"""
+        from fm_dicom.widgets.focus_aware import FocusAwareMessageBox
         try:
             if self.results:
                 from fm_dicom.dialogs.results_dialogs import PerformanceResultsDialog
                 dialog = PerformanceResultsDialog(self.results, self.parent_window)
                 dialog.exec()
+            elif self.error:
+                FocusAwareMessageBox.critical(self.parent_window, "Performance Test Error", f"The performance test failed:\n\n{self.error}")
             else:
-                logging.warning("No performance results to view")
+                FocusAwareMessageBox.warning(self.parent_window, "No Results", "No results to view for this job.")
         except Exception as e:
             logging.error(f"Error showing performance results: {e}", exc_info=True)

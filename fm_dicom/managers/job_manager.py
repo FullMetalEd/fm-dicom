@@ -24,6 +24,7 @@ class BaseJob(QRunnable):
         self._is_cancelled = False
         self.start_time = None
         self.end_time = None
+        self.error = None
         self.setAutoDelete(True)
 
     def cancel(self):
@@ -111,4 +112,5 @@ class DummyJob(BaseJob):
             self.signals.finished.emit({"status": "success"})
         except Exception as e:
             self.stop_timer()
-            self.signals.failed.emit(str(e))
+            self.error = str(e)
+            self.signals.failed.emit(self.error)

@@ -238,6 +238,10 @@ class JobCardWidget(QFrame):
         self.status_label.setText(f"Error: {error}")
         self.progress_bar.setStyleSheet("QProgressBar::chunk { background-color: #fa5252; }")
         self.percent_label.setStyleSheet("color: #ff6b6b; font-size: 11px; font-weight: bold;")
+        
+        # Show view button on failure too
+        self.view_btn.setVisible(True)
+        
         self.action_btn.setToolTip("Dismiss")
         self.action_btn.setEnabled(True)
         self.setProperty("state", "error")

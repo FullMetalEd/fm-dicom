@@ -40,7 +40,8 @@ class ValidationJob(BaseJob):
 
         except Exception as e:
             logging.error(f"ValidationJob failed: {e}", exc_info=True)
-            self.signals.failed.emit(str(e))
+            self.error = str(e)
+            self.signals.failed.emit(self.error)
 
     def cancel(self):
         super().cancel()
@@ -54,6 +55,11 @@ class ValidationJob(BaseJob):
 
     def view_results(self):
         """Show the validation results dialog."""
+        from fm_dicom.widgets.focus_aware import FocusAwareMessageBox
         if self.result:
             dialog = ValidationResultsDialog(self.result, self.parent_window)
             dialog.exec()
+        elif self.error:
+            FocusAwareMessageBox.critical(self.parent_window, "Validation Error", f"The validation operation failed:\n\n{self.error}")
+        else:
+            FocusAwareMessageBox.warning(self.parent_window, "No Results", "No validation details are available.")

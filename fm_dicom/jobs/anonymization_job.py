@@ -42,14 +42,13 @@ class AnonymizationJob(BaseJob):
             if results:
                 self.result = results[0]
                 self.signals.finished.emit(self.result)
-                
-                # Refresh tree if needed? The caller should handle this via finished signal
             else:
                  self.signals.failed.emit("Anonymization completed but no result was received.")
 
         except Exception as e:
             logging.error(f"AnonymizationJob failed: {e}", exc_info=True)
-            self.signals.failed.emit(str(e))
+            self.error = str(e)
+            self.signals.failed.emit(self.error)
 
     def cancel(self):
         super().cancel()
@@ -63,6 +62,11 @@ class AnonymizationJob(BaseJob):
 
     def view_results(self):
         """Show the anonymization results dialog."""
+        from fm_dicom.widgets.focus_aware import FocusAwareMessageBox
         if self.result:
             dialog = AnonymizationResultsDialog(self.result, self.parent_window)
             dialog.exec()
+        elif self.error:
+            FocusAwareMessageBox.critical(self.parent_window, "Anonymization Error", f"The anonymization operation failed:\n\n{self.error}")
+        else:
+            FocusAwareMessageBox.warning(self.parent_window, "No Results", "No anonymization details are available.")

@@ -171,75 +171,100 @@ class FileManager(QObject):
         self.loading_started.emit()
         try:
             import pydicom
-            if os.path.isfile(path):
-                if path.lower().endswith('.zip'):
-                    self._load_zip_file_internal(path, progress_callback, job)
+            all_dicom_files = []
+            
+            # Use a robust recursive collector that handles ZIPs
+            self._scan_comprehensive_internal(path, all_dicom_files, progress_callback, job)
+            
+            if job and job.is_cancelled(): return
+            
+            if all_dicom_files:
+                if self._loading_additive:
+                    self.files_to_append.emit(all_dicom_files)
                 else:
-                    # Single DICOM file
-                    ds = pydicom.dcmread(path, stop_before_pixels=True)
-                    files = [(path, ds)]
-                    if self._loading_additive:
-                        self.files_to_append.emit(files)
-                    else:
-                        self.files_loaded.emit(files)
-            elif os.path.isdir(path):
-                self._scan_directory_internal(path, progress_callback, job)
+                    self.files_loaded.emit(all_dicom_files)
+            else:
+                 logging.warning(f"No DICOM files found in {path}")
         finally:
             self.loading_finished.emit()
 
-    def _scan_directory_internal(self, dir_path, progress_callback=None, job=None):
-        """Internal directory scan with progress support."""
+    def _scan_comprehensive_internal(self, path, results_list, progress_callback=None, job=None):
+        """Truly recursive scan that handles directories, ZIPs, and individual files."""
+        if not os.path.exists(path):
+            return
+
         import pydicom
-        all_dicom_files = []
         
-        all_files = []
-        for root, _, filenames in os.walk(dir_path):
-            if job and job.is_cancelled(): return
-            for f in filenames:
-                all_files.append(os.path.join(root, f))
-        
-        total = len(all_files)
-        for i, file_path in enumerate(all_files):
-            if job and job.is_cancelled(): return
-            
-            if progress_callback and (i % 10 == 0 or i == total - 1):
-                progress_callback(i + 1, total, f"Scanning: {os.path.basename(file_path)}")
-            
-            if file_path.upper().endswith('DICOMDIR'):
+        if os.path.isfile(path):
+            if path.lower().endswith('.zip'):
+                # Extract ZIP to temp dir and scan the result
+                temp_dir = self._extract_zip_to_temp(path, progress_callback, job)
+                if temp_dir:
+                    self._scan_comprehensive_internal(temp_dir, results_list, progress_callback, job)
+            elif path.upper().endswith('DICOMDIR'):
                 try:
                     dicomdir_reader = DicomdirReader()
-                    dicom_files = dicomdir_reader.read_dicomdir(file_path)
-                    all_dicom_files.extend(dicom_files)
+                    dicom_files = dicomdir_reader.read_dicomdir(path)
+                    results_list.extend(dicom_files)
                 except Exception: pass
-                continue
-                
-            try:
-                ds = pydicom.dcmread(file_path, stop_before_pixels=True)
-                all_dicom_files.append((file_path, ds))
-            except Exception: pass
-            
-        if all_dicom_files:
-            if self._loading_additive:
-                self.files_to_append.emit(all_dicom_files)
             else:
-                self.files_loaded.emit(all_dicom_files)
-
-    def _load_zip_file_internal(self, zip_path, progress_callback=None, job=None):
-        """Internal ZIP loading logic."""
-        import zipfile
-        temp_dir = tempfile.mkdtemp(prefix="fm_dicom_")
-        self.temp_dirs.append(temp_dir)
+                # Try reading as DICOM
+                try:
+                    ds = pydicom.dcmread(path, stop_before_pixels=True)
+                    results_list.append((path, ds))
+                except Exception: pass
         
-        with zipfile.ZipFile(zip_path, 'r') as zf:
-            filenames = zf.namelist()
-            total = len(filenames)
-            for i, name in enumerate(filenames):
+        elif os.path.isdir(path):
+            # Scan directory content
+            all_entries = []
+            for root, _, filenames in os.walk(path):
                 if job and job.is_cancelled(): return
-                if progress_callback:
-                    progress_callback(i + 1, total, f"Extracting: {name}")
-                zf.extract(name, temp_dir)
-        
-        self._scan_directory_internal(temp_dir, progress_callback, job)
+                for f in filenames:
+                    all_entries.append(os.path.join(root, f))
+            
+            total = len(all_entries)
+            for i, entry_path in enumerate(all_entries):
+                if job and job.is_cancelled(): return
+                
+                # Update progress for directory scan
+                if progress_callback and (i % 20 == 0 or i == total - 1):
+                    progress_callback(i + 1, total, f"Scanning: {os.path.basename(entry_path)}")
+                
+                # Recurse into files (this handles nested ZIPs found in directories)
+                # We skip dirs here because os.walk already gave us all files.
+                if entry_path.lower().endswith('.zip'):
+                    self._scan_comprehensive_internal(entry_path, results_list, progress_callback, job)
+                elif entry_path.upper().endswith('DICOMDIR'):
+                    try:
+                        dicomdir_reader = DicomdirReader()
+                        dicom_files = dicomdir_reader.read_dicomdir(entry_path)
+                        results_list.extend(dicom_files)
+                    except Exception: pass
+                else:
+                    try:
+                        ds = pydicom.dcmread(entry_path, stop_before_pixels=True)
+                        results_list.append((entry_path, ds))
+                    except Exception: pass
+
+    def _extract_zip_to_temp(self, zip_path, progress_callback=None, job=None):
+        """Helper to extract a ZIP file to a managed temporary directory."""
+        import zipfile
+        try:
+            temp_dir = tempfile.mkdtemp(prefix="fm_dicom_zip_")
+            self.temp_dirs.append(temp_dir)
+            
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                filenames = zf.namelist()
+                total = len(filenames)
+                for i, name in enumerate(filenames):
+                    if job and job.is_cancelled(): return
+                    if progress_callback and (i % 10 == 0 or i == total - 1):
+                        progress_callback(i + 1, total, f"Extracting: {os.path.basename(zip_path)} -> {name}")
+                    zf.extract(name, temp_dir)
+            return temp_dir
+        except Exception as e:
+            logging.error(f"Failed to extract ZIP {zip_path}: {e}")
+            return None
 
     def cleanup_temp_dirs(self):
         """Clean up temporary directories"""

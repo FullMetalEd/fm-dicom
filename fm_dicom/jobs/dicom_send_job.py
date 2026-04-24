@@ -77,22 +77,27 @@ class DicomSendJob(BaseJob):
 
         except Exception as e:
             logging.error(f"DicomSendJob failed: {e}", exc_info=True)
-            self.signals.failed.emit(str(e))
+            self.error = str(e)
+            self.signals.failed.emit(self.error)
 
     def view_results(self):
         """Show summary of DICOM send results"""
-        if not hasattr(self, 'results'): return
         from fm_dicom.widgets.focus_aware import FocusAwareMessageBox
-        msg = (
-            f"DICOM Send Results:\n\n"
-            f"• Successfully sent: {self.results['success_count']}\n"
-            f"• Files converted: {self.results['converted_count']}\n"
-            f"• Failed: {self.results['failed_count']}"
-        )
-        if self.results['failed_count'] > 0:
-            msg += f"\n\nFirst error: {self.results['error_details'][0] if self.results['error_details'] else 'Unknown'}"
-            
-        FocusAwareMessageBox.information(None, "Send Results", msg)
+        
+        if hasattr(self, 'results') and self.results:
+            msg = (
+                f"DICOM Send Results:\n\n"
+                f"• Successfully sent: {self.results['success_count']}\n"
+                f"• Files converted: {self.results['converted_count']}\n"
+                f"• Failed: {self.results['failed_count']}"
+            )
+            if self.results['failed_count'] > 0:
+                msg += f"\n\nFirst error: {self.results['error_details'][0] if self.results['error_details'] else 'Unknown'}"
+            FocusAwareMessageBox.information(None, "Send Results", msg)
+        elif self.error:
+            FocusAwareMessageBox.critical(None, "Send Error", f"The DICOM send operation failed:\n\n{self.error}")
+        else:
+            FocusAwareMessageBox.warning(None, "No Results", "No result details are available for this task.")
 
     def cancel(self):
         super().cancel()

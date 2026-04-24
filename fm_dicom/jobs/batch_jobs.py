@@ -54,16 +54,21 @@ class BatchTagEditJob(BaseJob):
         except Exception as e:
             self.stop_timer()
             logging.error(f"BatchTagEditJob failed: {e}", exc_info=True)
-            self.signals.failed.emit(str(e))
+            self.error = str(e)
+            self.signals.failed.emit(self.error)
 
     def view_results(self):
         """Show summary of batch edit results"""
-        if not self.results: return
         from fm_dicom.widgets.focus_aware import FocusAwareMessageBox
-        msg = f"Batch edit complete.\n\nUpdated: {self.results.get('updated', 0)}\nFailed: {self.results.get('failed', 0)}"
-        if self.results.get('failed_details'):
-            msg += "\n\nFailures (first 5):\n" + "\n".join(self.results['failed_details'][:5])
-        FocusAwareMessageBox.information(None, "Batch Edit Results", msg)
+        if self.results:
+            msg = f"Batch edit complete.\n\nUpdated: {self.results.get('updated', 0)}\nFailed: {self.results.get('failed', 0)}"
+            if self.results.get('failed_details'):
+                msg += "\n\nFailures (first 5):\n" + "\n".join(self.results['failed_details'][:5])
+            FocusAwareMessageBox.information(None, "Batch Edit Results", msg)
+        elif self.error:
+            FocusAwareMessageBox.critical(None, "Batch Edit Error", f"The operation failed:\n\n{self.error}")
+        else:
+            FocusAwareMessageBox.warning(None, "No Results", "No result details are available.")
 
 class MergeJob(BaseJob):
     """Background job for merging patients, studies, or series."""
@@ -124,13 +129,18 @@ class MergeJob(BaseJob):
         except Exception as e:
             self.stop_timer()
             logging.error(f"MergeJob failed: {e}", exc_info=True)
-            self.signals.failed.emit(str(e))
+            self.error = str(e)
+            self.signals.failed.emit(self.error)
 
     def view_results(self):
         """Show summary of merge results"""
-        if not self.results: return
         from fm_dicom.widgets.focus_aware import FocusAwareMessageBox
-        msg = f"Merge complete.\n\nSuccessfully updated: {self.results.get('updated', 0)}\nFailed: {self.results.get('failed', 0)}"
-        if self.results.get('failed_details'):
-            msg += "\n\nFailures (first 5):\n" + "\n".join(self.results['failed_details'][:5])
-        FocusAwareMessageBox.information(None, "Merge Results", msg)
+        if self.results:
+            msg = f"Merge complete.\n\nSuccessfully updated: {self.results.get('updated', 0)}\nFailed: {self.results.get('failed', 0)}"
+            if self.results.get('failed_details'):
+                msg += "\n\nFailures (first 5):\n" + "\n".join(self.results['failed_details'][:5])
+            FocusAwareMessageBox.information(None, "Merge Results", msg)
+        elif self.error:
+            FocusAwareMessageBox.critical(None, "Merge Error", f"The operation failed:\n\n{self.error}")
+        else:
+            FocusAwareMessageBox.warning(None, "No Results", "No result details are available.")
