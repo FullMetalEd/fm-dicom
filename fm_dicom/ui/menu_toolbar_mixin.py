@@ -131,6 +131,16 @@ class MenuToolbarMixin:
         
         view_menu.addSeparator()
         
+        # Task Center toggle
+        self.act_view_action_center = QAction("Show Task Center", self)
+        self.act_view_action_center.setCheckable(True)
+        self.act_view_action_center.setChecked(True)
+        self.act_view_action_center.setStatusTip("Show or hide the Task Center job monitor")
+        self.act_view_action_center.triggered.connect(self.toggle_action_center)
+        view_menu.addAction(self.act_view_action_center)
+        
+        view_menu.addSeparator()
+        
         # Theme submenu
         theme_menu = view_menu.addMenu("&Theme")
         current_theme = self.config.get("theme", "dark")
@@ -196,6 +206,14 @@ class MenuToolbarMixin:
         audit_action.setStatusTip("View tag change audit log")
         audit_action.triggered.connect(self.show_audit_log)
         tools_menu.addAction(audit_action)
+        
+        tools_menu.addSeparator()
+        
+        # Test Task Center
+        test_job_action = QAction("Test Task Center", self)
+        test_job_action.setStatusTip("Submit a dummy background job to the Task Center")
+        test_job_action.triggered.connect(self.test_action_center)
+        tools_menu.addAction(test_job_action)
     
     def _setup_help_menu(self, menubar):
         """Setup Help menu"""

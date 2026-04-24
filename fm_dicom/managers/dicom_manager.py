@@ -717,152 +717,120 @@ class DicomManager(QObject):
         self.commit_staged_changes(context.level, context.node_path)
     
     def _perform_level_tag_save(self, filepaths, edits, level, *, show_summary=True, summary_title="Changes Saved"):
-        """Perform tag saves across multiple files at the specified level"""
-        import pydicom
-        from PyQt6.QtWidgets import QProgressDialog, QApplication
-        import os
-        
-        updated_count = 0
-        failed_files = []
-        
-        progress = FocusAwareProgressDialog(f"Saving changes to {level}...", "Cancel", 0, len(filepaths), self.main_window)
-        progress.setWindowTitle("Saving Tag Changes")
-        progress.setMinimumDuration(0)
-        progress.setValue(0)
-
-        for idx, fp in enumerate(filepaths):
-            progress.setValue(idx)
-            if progress.wasCanceled():
-                break
-            QApplication.processEvents()
+        """Perform tag saves across multiple files at the specified level using Task Center"""
+        try:
+            from fm_dicom.jobs.file_operation_jobs import FileSaveJob
             
-            try:
-                # Check memory items first (for duplicated items)
-                is_memory_item = False
-                if hasattr(self.main_window, 'tree_manager') and self.main_window.tree_manager:
-                    if fp in self.main_window.tree_manager.memory_items:
-                        ds = self.main_window.tree_manager.memory_items[fp]
-                        is_memory_item = True
+            # Note: We need a slightly different SaveJob that handles DICOM tag application
+            class TagSaveJob(FileSaveJob):
+                def __init__(self, filepaths, edits, level, dicom_manager):
+                    super().__init__({}, dicom_manager) # Empty dict, we'll handle the loop
+                    self.title = f"Saving {level} changes ({len(filepaths)} files)"
+                    self.filepaths = filepaths
+                    self.edits = edits
+                    self.level = level
+                    self.dicom_manager = dicom_manager
 
-                if not is_memory_item:
-                    ds = pydicom.dcmread(fp)
-
-                file_updated = False
-                labels = self._get_dataset_labels(ds)
-                
-                for edit_info in edits:
-                    tag = edit_info['tag']
-                    new_val_str = edit_info['value_str']
-                    original_elem_ref = edit_info['original_elem']
-
-                    if tag in ds:  # Modify existing tag
-                        target_elem = ds[tag]
-                        old_value_fmt = self._format_audit_value(target_elem.value)
-                        try:
-                            # Convert value based on VR
-                            converted_value = self._convert_value_by_vr_advanced(new_val_str, original_elem_ref, target_elem)
-                            target_elem.value = converted_value
-                            file_updated = True
-                            self._record_audit_entry(
-                                fp,
-                                level,
-                                edit_info,
-                                labels,
-                                old_value_fmt,
-                                self._format_audit_value(converted_value),
-                            )
-                        except Exception as e_conv:
-                            logging.warning(f"Could not convert value '{new_val_str}' for tag {tag} in {fp}. Error: {e_conv}. Saving as string.")
-                            target_elem.value = new_val_str  # Fallback to string
-                            file_updated = True
-                            self._record_audit_entry(
-                                fp,
-                                level,
-                                edit_info,
-                                labels,
-                                old_value_fmt,
-                                new_val_str,
-                            )
-                    else:  # Add new tag
-                        try:
-                            # Get VR from original element reference
-                            vr = original_elem_ref.VR if hasattr(original_elem_ref, 'VR') else 'LO'
-                            # Convert value based on VR
-                            converted_value = self._convert_value_by_vr(new_val_str, vr)
-                            # Add new tag to dataset
-                            ds.add_new(tag, vr, converted_value)
-                            file_updated = True
-                            logging.info(f"Added new tag {tag} with VR {vr} and value '{new_val_str}' to {fp}")
-                            self._record_audit_entry(
-                                fp,
-                                level,
-                                edit_info,
-                                labels,
-                                "",
-                                self._format_audit_value(converted_value),
-                            )
-                        except Exception as e_add:
-                            logging.warning(f"Could not add new tag {tag} to {fp}. Error: {e_add}. Trying with string value.")
-                            try:
-                                # Fallback to string value with LO VR
-                                ds.add_new(tag, 'LO', new_val_str)
-                                file_updated = True
-                                self._record_audit_entry(
-                                    fp,
-                                    level,
-                                    edit_info,
-                                    labels,
-                                    "",
-                                    new_val_str,
-                                )
-                            except Exception as e_fallback:
-                                logging.error(f"Failed to add new tag {tag} to {fp}: {e_fallback}")
-                                continue
-                
-                if file_updated:
-                    if is_memory_item:
-                        # Memory items are updated in-place, no disk save needed
-                        # The dataset object in memory_items is already modified
-                        updated_count += 1
-                    else:
-                        ds.save_as(fp, write_like_original=False)
-                        updated_count += 1
+                def run(self):
+                    self.signals.started.emit()
+                    updated_count = 0
+                    failed_files = []
+                    total = len(self.filepaths)
                     
-            except Exception as e_file:
-                logging.error(f"Failed to process file {fp}: {e_file}", exc_info=True)
-                failed_files.append(f"{os.path.basename(fp)}: {str(e_file)}")
-                
-        progress.setValue(len(filepaths))
-        
-        result = {
-            "level": level,
-            "total_files": len(filepaths),
-            "updated": updated_count,
-            "failed_files": failed_files,
-        }
+                    import pydicom
+                    for idx, fp in enumerate(self.filepaths):
+                        if self.is_cancelled(): return
+                        self.signals.progress.emit(idx + 1, total, f"Saving: {os.path.basename(fp)}")
+                        
+                        try:
+                            # Apply the edits (reuse existing logic if possible or move it here)
+                            success = self.dicom_manager._apply_tags_to_file(fp, self.edits, self.level)
+                            if success: updated_count += 1
+                        except Exception as e:
+                            failed_files.append(f"{os.path.basename(fp)}: {str(e)}")
+                    
+                    self.signals.finished.emit({"success": True, "updated": updated_count, "failed": len(failed_files)})
 
-        if show_summary:
-            msg = (
-                f"Tag changes saved to {level}.\n"
-                f"Updated {updated_count} of {len(filepaths)} files."
-            )
-            if failed_files:
-                msg += f"\nFailed: {len(failed_files)} files."
-            FocusAwareMessageBox.information(self.main_window, summary_title, msg)
-        
-        # Reload current file to show updated values
-        if self.current_file in filepaths:
-            self.load_dicom_tags(self.current_file)
+            job = TagSaveJob(filepaths, edits, level, self)
             
-        # Refresh tree to show updated patient names and other hierarchy changes
+            def on_finished(result):
+                # Reload current file if it was part of the save
+                if self.current_file in filepaths:
+                    self.load_dicom_tags(self.current_file)
+                
+                # Refresh tree to show updated patient names and other hierarchy changes
+                if hasattr(self.main_window, 'tree_manager') and self.main_window.tree_manager:
+                    if hasattr(self.main_window, "prepare_for_tree_refresh"):
+                        self.main_window.prepare_for_tree_refresh()
+                    self.main_window.tree_manager.refresh_tree()
+                
+                logging.info(f"Tag save finished: {result['updated']} updated, {result['failed']} failed")
+                if show_summary:
+                    msg = f"Tag changes saved to {level}.\nUpdated {result['updated']} of {len(filepaths)} files."
+                    if result['failed'] > 0:
+                        msg += f"\nFailed: {result['failed']} files."
+                    FocusAwareMessageBox.information(self.main_window, summary_title, msg)
+
+            job.signals.finished.connect(on_finished)
+            self.main_window.job_manager.submit_job(job)
+            
+        except Exception as e:
+            logging.error(f"Failed to start background tag save: {e}")
+
+    def _apply_tags_to_file(self, fp, edits, level):
+        """Internal helper to apply a list of tag edits to a single file."""
+        import pydicom
+        # Check memory items first (for duplicated items)
+        is_memory_item = False
         if hasattr(self.main_window, 'tree_manager') and self.main_window.tree_manager:
-            if hasattr(self.main_window, "prepare_for_tree_refresh"):
-                self.main_window.prepare_for_tree_refresh()
-            self.main_window.tree_manager.refresh_tree()
-            logging.info("Tree refreshed after tag save")
+            if fp in self.main_window.tree_manager.memory_items:
+                ds = self.main_window.tree_manager.memory_items[fp]
+                is_memory_item = True
+
+        if not is_memory_item:
+            ds = pydicom.dcmread(fp)
+
+        file_updated = False
+        labels = self._get_dataset_labels(ds)
         
-        return result
-    
+        for edit_info in edits:
+            tag = edit_info['tag']
+            new_val_str = edit_info['value_str']
+            original_elem_ref = edit_info['original_elem']
+
+            if tag in ds:  # Modify existing tag
+                target_elem = ds[tag]
+                old_value_fmt = self._format_audit_value(target_elem.value)
+                try:
+                    # Convert value based on VR
+                    converted_value = self._convert_value_by_vr_advanced(new_val_str, original_elem_ref, target_elem)
+                    target_elem.value = converted_value
+                    file_updated = True
+                    self._record_audit_entry(fp, level, edit_info, labels, old_value_fmt, self._format_audit_value(converted_value))
+                except Exception as e_conv:
+                    target_elem.value = new_val_str
+                    file_updated = True
+                    self._record_audit_entry(fp, level, edit_info, labels, old_value_fmt, new_val_str)
+            else:  # Add new tag
+                try:
+                    vr = original_elem_ref.VR if hasattr(original_elem_ref, 'VR') else 'LO'
+                    converted_value = self._convert_value_by_vr(new_val_str, vr)
+                    ds.add_new(tag, vr, converted_value)
+                    file_updated = True
+                    self._record_audit_entry(fp, level, edit_info, labels, "", self._format_audit_value(converted_value))
+                except Exception:
+                    try:
+                        ds.add_new(tag, 'LO', new_val_str)
+                        file_updated = True
+                        self._record_audit_entry(fp, level, edit_info, labels, "", new_value_fmt)
+                    except Exception: continue
+        
+        if file_updated:
+            if not is_memory_item:
+                ds.save_as(fp, write_like_original=False)
+            return True
+        return False
+
     def _convert_value_by_vr_advanced(self, new_val_str, original_elem_ref, target_elem):
         """Advanced value conversion based on VR and original element"""
         import pydicom
@@ -1060,7 +1028,7 @@ class DicomManager(QObject):
         self.image_label.setText("Image Load Error")
 
     def validate_selected_items(self, file_paths):
-        """Validate selected DICOM files"""
+        """Validate selected DICOM files using background job"""
         if not file_paths:
             FocusAwareMessageBox.warning(
                 self.main_window,
@@ -1069,20 +1037,22 @@ class DicomManager(QObject):
             )
             return
         
-        logging.info(f"Starting validation of {len(file_paths)} files")
+        logging.info(f"Submitting validation of {len(file_paths)} files to Task Center")
         
         try:
-            run_validation(file_paths, self.main_window)
+            from fm_dicom.jobs.validation_job import ValidationJob
+            job = ValidationJob(file_paths, self.main_window)
+            self.main_window.job_manager.submit_job(job)
         except Exception as e:
-            logging.error(f"Validation error: {e}", exc_info=True)
+            logging.error(f"Failed to submit validation job: {e}", exc_info=True)
             FocusAwareMessageBox.critical(
                 self.main_window,
                 "Validation Error",
-                f"An error occurred during validation:\n{str(e)}"
+                f"An error occurred starting validation:\n{str(e)}"
             )
     
     def anonymize_selected_items(self, file_paths):
-        """Anonymize selected DICOM files"""
+        """Anonymize selected DICOM files using background job"""
         if not file_paths:
             FocusAwareMessageBox.warning(
                 self.main_window,
@@ -1091,23 +1061,40 @@ class DicomManager(QObject):
             )
             return
         
-        logging.info(f"Starting anonymization of {len(file_paths)} files")
+        logging.info(f"Starting anonymization process for {len(file_paths)} files")
         
         try:
-            result = run_anonymization(file_paths, self.main_window.template_manager, self.main_window)
-            # Refresh tree to show updated patient names and other changes
-            if result is not None:  # Anonymization completed successfully
-                if hasattr(self.main_window, 'tree_manager') and self.main_window.tree_manager:
-                    if hasattr(self.main_window, "prepare_for_tree_refresh"):
-                        self.main_window.prepare_for_tree_refresh()
-                    self.main_window.tree_manager.refresh_tree()
-                    logging.info("Tree refreshed after anonymization")
+            # We still need the template selection dialog to be modal before starting the job
+            from fm_dicom.anonymization.anonymization_ui import TemplateSelectionDialog
+            dialog = TemplateSelectionDialog(self.main_window.template_manager, self.main_window)
+            if dialog.exec() != dialog.DialogCode.Accepted:
+                return
+                
+            template = dialog.get_selected_template()
+            if not template:
+                return
+
+            from fm_dicom.jobs.anonymization_job import AnonymizationJob
+            job = AnonymizationJob(template, file_paths, self.main_window)
+            
+            # Connect finish signal to refresh tree
+            def on_finished(result):
+                if result:
+                    if hasattr(self.main_window, 'tree_manager') and self.main_window.tree_manager:
+                        if hasattr(self.main_window, "prepare_for_tree_refresh"):
+                            self.main_window.prepare_for_tree_refresh()
+                        self.main_window.tree_manager.refresh_tree()
+                        logging.info("Tree refreshed after background anonymization")
+
+            job.signals.finished.connect(on_finished)
+            self.main_window.job_manager.submit_job(job)
+            
         except Exception as e:
             logging.error(f"Anonymization error: {e}", exc_info=True)
             FocusAwareMessageBox.critical(
                 self.main_window,
                 "Anonymization Error",
-                f"An error occurred during anonymization:\n{str(e)}"
+                f"An error occurred starting anonymization:\n{str(e)}"
             )
     
     def show_tag_search_dialog(self):
@@ -1317,62 +1304,26 @@ class DicomManager(QObject):
             )
     
     def _start_dicom_send(self, selected_files, send_params):
-        """Start DICOM send worker with selected files and parameters"""
+        """Start DICOM send job in the background Task Center"""
         try:
+            from fm_dicom.jobs.dicom_send_job import DicomSendJob
+            
             # Get memory_items for duplicated files
             memory_items = {}
             if hasattr(self.main_window, 'tree_manager') and self.main_window.tree_manager:
                 memory_items = self.main_window.tree_manager.memory_items
 
-            # Analyze files to get unique SOP classes
-            unique_sop_classes = set()
-            for filepath in selected_files:
-                try:
-                    # Check memory items first for duplicated files
-                    if filepath in memory_items:
-                        ds = memory_items[filepath]
-                    else:
-                        ds = pydicom.dcmread(filepath, stop_before_pixels=True)
-                    if hasattr(ds, 'SOPClassUID'):
-                        unique_sop_classes.add(ds.SOPClassUID)
-                except Exception as e:
-                    logging.warning(f"Could not read SOP class from {filepath}: {e}")
+            # Create the background job
+            job = DicomSendJob(selected_files, send_params, memory_items)
             
-            if not unique_sop_classes:
-                FocusAwareMessageBox.warning(
-                    self.main_window,
-                    "No Valid DICOM Files",
-                    "No valid DICOM files found for sending."
-                )
-                return
-            
-            # Create progress dialog
-            from PyQt6.QtWidgets import QProgressDialog
-            self.send_progress = FocusAwareProgressDialog("Preparing DICOM send...", "Cancel", 0, 100, self.main_window)
-            self.send_progress.setWindowTitle("DICOM Send Progress")
-            self.send_progress.setMinimumDuration(0)
-            self.send_progress.setValue(0)
-            
-            # Store total file count for progress calculation
-            self.send_total_files = len(selected_files)
-            
-            # Create and start worker (memory_items already fetched at start of method)
-            from fm_dicom.workers.dicom_send_worker import DicomSendWorker
-            self.send_worker = DicomSendWorker(selected_files, send_params, list(unique_sop_classes), memory_items)
-            
-            # Connect signals
-            self.send_worker.progress_updated.connect(self._on_send_progress)
-            self.send_worker.send_complete.connect(self._on_send_complete)
-            self.send_worker.send_failed.connect(self._on_send_failed)
-            self.send_worker.association_status.connect(self._on_send_status)
-            self.send_worker.conversion_progress.connect(self._on_conversion_progress)
-            self.send_progress.canceled.connect(self.send_worker.cancel)
-            
-            # Start worker
-            self.send_worker.start()
-            self.send_progress.show()
-            
-            logging.info(f"Started DICOM send for {len(selected_files)} files")
+            # Submit to Task Center
+            if hasattr(self.main_window, 'job_manager'):
+                self.main_window.job_manager.submit_job(job)
+                logging.info(f"Submitted DICOM send job for {len(selected_files)} files to Task Center")
+            else:
+                # Fallback if job manager is missing (should not happen)
+                logging.error("Job Manager not found in MainWindow")
+                FocusAwareMessageBox.critical(self.main_window, "System Error", "Task Center is unavailable.")
             
         except Exception as e:
             logging.error(f"Error starting DICOM send: {e}", exc_info=True)
@@ -1582,67 +1533,34 @@ class DicomManager(QObject):
         self._perform_batch_edit(file_paths, tag, tag_info, new_value)
     
     def _perform_batch_edit(self, file_paths, tag, tag_info, new_value):
-        """Perform the actual batch edit operation"""
-        updated_count = 0
-        failed_files = []
-        
-        from PyQt6.QtWidgets import QProgressDialog
-        progress = FocusAwareProgressDialog(f"Batch editing {tag_info['name']}...", "Cancel", 0, len(file_paths), self.main_window)
-        progress.setWindowTitle("Batch Tag Edit")
-        progress.setMinimumDuration(0)
-        progress.setValue(0)
+        """Perform the batch edit operation using Task Center job"""
+        try:
+            from fm_dicom.jobs.batch_jobs import BatchTagEditJob
+            job = BatchTagEditJob(file_paths, tag_info, new_value, self)
+            
+            def on_finished(result):
+                # Reload current file if it was part of the batch
+                if hasattr(self, 'current_file') and self.current_file in file_paths:
+                    self.load_dicom_tags(self.current_file)
+                
+                # Refresh tree if needed
+                if hasattr(self.main_window, 'tree_manager') and self.main_window.tree_manager:
+                    if hasattr(self.main_window, "prepare_for_tree_refresh"):
+                        self.main_window.prepare_for_tree_refresh()
+                    self.main_window.tree_manager.refresh_tree()
+                
+                logging.info(f"Batch edit finished: {result['updated']} updated, {result['failed']} failed")
+                
+                msg = f"Batch edit complete.\nUpdated {result['updated']} of {len(file_paths)} files."
+                if result['failed'] > 0:
+                    msg += f"\nFailed: {result['failed']} files."
+                FocusAwareMessageBox.information(self.main_window, "Batch Edit Complete", msg)
 
-        for idx, filepath in enumerate(file_paths):
-            progress.setValue(idx)
-            if progress.wasCanceled():
-                break
-            QApplication.processEvents()
+            job.signals.finished.connect(on_finished)
+            self.main_window.job_manager.submit_job(job)
             
-            try:
-                import pydicom
-                ds = pydicom.dcmread(filepath)
-                
-                # Determine VR
-                if tag in ds:
-                    vr = ds[tag].VR
-                else:
-                    vr = tag_info.get('vr', 'LO')
-                    
-                # Convert value
-                converted_value = self._convert_value_by_vr(new_value, vr)
-                
-                # Update or add tag
-                if tag in ds:
-                    ds[tag].value = converted_value
-                else:
-                    ds.add_new(tag, vr, converted_value)
-                    
-                ds.save_as(filepath)
-                updated_count += 1
-                
-            except Exception as e:
-                failed_files.append(f"{os.path.basename(filepath)}: {str(e)}")
-                logging.error(f"Failed to update {filepath}: {e}")
-                
-        progress.setValue(len(file_paths))
-        
-        # Show results
-        msg = f"Batch edit complete.\nUpdated {updated_count} of {len(file_paths)} files."
-        if failed_files:
-            msg += f"\nFailed: {len(failed_files)} files."
-            
-        FocusAwareMessageBox.information(self.main_window, "Batch Edit Complete", msg)
-        
-        # Refresh current file display if it was part of the batch
-        if hasattr(self, 'current_file') and self.current_file in file_paths:
-            self.load_dicom_tags(self.current_file)
-            
-        # Refresh tree to show updated patient names and other hierarchy changes
-        if hasattr(self.main_window, 'tree_manager') and self.main_window.tree_manager:
-            if hasattr(self.main_window, "prepare_for_tree_refresh"):
-                self.main_window.prepare_for_tree_refresh()
-            self.main_window.tree_manager.refresh_tree()
-            logging.info("Tree refreshed after batch edit")
+        except Exception as e:
+            logging.error(f"Failed to start background batch edit: {e}")
     
     def _convert_value_by_vr(self, value, vr):
         """Convert string value to appropriate type based on VR"""

@@ -57,8 +57,8 @@ class LazySelectionSummaryWidget(QWidget):
             }}
         """)
     
-    def update_summary(self, selected_files):
-        """Update summary with lazy calculation"""
+    def update_summary(self, selected_files, total_size=None):
+        """Update summary with lazy calculation or pre-calculated size"""
         if not selected_files:
             self.file_count_label.setText("Files: 0")
             self.size_label.setText("Size: 0 MB")
@@ -69,21 +69,20 @@ class LazySelectionSummaryWidget(QWidget):
         file_count = len(selected_files)
         self.file_count_label.setText(f"Files: {file_count}")
         
-        # Calculate size from cache or estimate
-        total_size = 0
-        for file_path in selected_files:
-            if file_path in self._file_size_cache:
-                total_size += self._file_size_cache[file_path]
-            elif os.path.exists(file_path):
-                try:
-                    size = os.path.getsize(file_path)
-                    self._file_size_cache[file_path] = size
-                    total_size += size
-                except (OSError, IOError) as e:
-                    # Estimate 500KB per file if can't read
-                    import logging
-                    logging.debug(f"Could not get size for {file_path}: {e}")
-                    total_size += 500 * 1024
+        # Calculate size if not provided
+        if total_size is None:
+            total_size = 0
+            for file_path in selected_files:
+                if file_path in self._file_size_cache:
+                    total_size += self._file_size_cache[file_path]
+                elif os.path.exists(file_path):
+                    try:
+                        size = os.path.getsize(file_path)
+                        self._file_size_cache[file_path] = size
+                        total_size += size
+                    except (OSError, IOError) as e:
+                        # Estimate 500KB per file if can't read
+                        total_size += 500 * 1024
         
         # Format size
         if total_size < 1024 * 1024:  # Less than 1MB

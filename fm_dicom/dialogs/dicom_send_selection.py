@@ -204,32 +204,39 @@ class DicomSendSelectionDialog(QDialog):
         return pydicom.dcmread(filepath, stop_before_pixels=stop_before_pixels)
     
     def _start_async_tree_population(self):
-        """Start background tree population worker"""
-        # Create and configure worker (pass memory_items for duplicated files)
-        self.tree_populator = AsyncTreePopulator(self.loaded_files, self.hierarchy_data, self.memory_items)
-        
-        # Connect signals with queued connections for thread safety
-        self.tree_populator.tree_data_ready.connect(self._on_tree_data_ready, Qt.ConnectionType.QueuedConnection)
-        self.tree_populator.progress_updated.connect(self._on_population_progress, Qt.ConnectionType.QueuedConnection)
-        self.tree_populator.population_complete.connect(self._on_population_complete, Qt.ConnectionType.QueuedConnection)
-        self.tree_populator.population_failed.connect(self._on_population_failed, Qt.ConnectionType.QueuedConnection)
-        
-        # Show loading state in tree and force UI update
-        self._show_loading_state()
-        
-        # For very large datasets, also show a progress dialog
-        total_files = len(self.loaded_files) if self.loaded_files else 0
-        if total_files > 5000:
-            self.progress_dialog = FocusAwareProgressDialog("Loading file hierarchy...", "Cancel", 0, 100, self)
-            self.progress_dialog.setWindowTitle("Loading DICOM Files")
-            self.progress_dialog.setMinimumDuration(0)
-            self.progress_dialog.setValue(0)
-            self.progress_dialog.canceled.connect(self._cancel_population)
-            self.progress_dialog.show()
-        
-        # Start worker
-        self.tree_populator.start()
-        logging.info("Started async tree population worker")
+        """Start background tree population job in Task Center"""
+        try:
+            from fm_dicom.jobs.send_jobs import SendTreePopulateJob
+            job = SendTreePopulateJob(self.loaded_files, self.hierarchy_data, self.memory_items)
+            
+            # Connect signals
+            job.signals.finished.connect(self._on_tree_data_ready)
+            job.signals.finished.connect(lambda _: self._on_population_complete())
+            job.signals.failed.connect(self._on_population_failed)
+            
+            # Show loading state in tree
+            self._show_loading_state()
+            
+            # Submit to JobManager (get from parent main window)
+            main_window = self.parent()
+            while main_window and not hasattr(main_window, 'job_manager'):
+                main_window = main_window.parent()
+                
+            if main_window and hasattr(main_window, 'job_manager'):
+                main_window.job_manager.submit_job(job)
+                logging.info("Submitted send tree population job to Task Center")
+            else:
+                # Fallback to local thread if no manager found
+                logging.warning("JobManager not found in parents, falling back to local thread")
+                self.tree_populator = AsyncTreePopulator(self.loaded_files, self.hierarchy_data, self.memory_items)
+                self.tree_populator.tree_data_ready.connect(self._on_tree_data_ready)
+                self.tree_populator.population_complete.connect(self._on_population_complete)
+                self.tree_populator.population_failed.connect(self._on_population_failed)
+                self.tree_populator.start()
+                
+        except Exception as e:
+            logging.error(f"Failed to start background tree population: {e}")
+            self._on_population_failed(str(e))
     
     def _show_loading_state(self):
         """Show loading indicator in tree area"""
@@ -593,187 +600,75 @@ class DicomSendSelectionDialog(QDialog):
         return hierarchy
     
     def _populate_tree_widget_with_progress(self, hierarchy, progress=None):
-        """Populate tree widget with proper checkbox setup and progress feedback"""
-        instances_processed = 0
-        batch_size = 100  # Process in batches to yield UI control
+        """Populate tree widget with proper checkbox setup and progress feedback.
+        OPTIMIZED: Only goes down to Series level."""
+        items_processed = 0
         
         for patient, studies in hierarchy.items():
             patient_item = QTreeWidgetItem([patient, "", ""])
-            
-            # FIXED: Only ItemIsUserCheckable - let OptimizedCheckboxTreeWidget handle tri-state
-            patient_item.setFlags(
-                patient_item.flags() | 
-                Qt.ItemFlag.ItemIsUserCheckable
-                # NO tri-state flags - custom widget handles this
-            )
+            patient_item.setFlags(patient_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             patient_item.setCheckState(0, Qt.CheckState.Unchecked)
-            
             self.tree_widget.addTopLevelItem(patient_item)
             
             patient_file_count = 0
+            patient_size = 0
+            
             for study, series_dict in studies.items():
                 study_item = QTreeWidgetItem([study, "", ""])
-                
-                # FIXED: Only ItemIsUserCheckable - let OptimizedCheckboxTreeWidget handle tri-state
-                study_item.setFlags(
-                    study_item.flags() | 
-                    Qt.ItemFlag.ItemIsUserCheckable
-                    # NO tri-state flags - custom widget handles this
-                )
+                study_item.setFlags(study_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 study_item.setCheckState(0, Qt.CheckState.Unchecked)
-                
                 patient_item.addChild(study_item)
                 
                 study_file_count = 0
+                study_size = 0
+                
                 for series, instances in series_dict.items():
-                    series_item = QTreeWidgetItem([series, "", ""])
+                    series_file_count = len(instances)
+                    file_paths = list(instances.values())
                     
-                    # FIXED: Only ItemIsUserCheckable - let OptimizedCheckboxTreeWidget handle tri-state
-                    series_item.setFlags(
-                        series_item.flags() | 
-                        Qt.ItemFlag.ItemIsUserCheckable
-                        # NO tri-state flags - custom widget handles this
-                    )
+                    # Calculate series size
+                    series_size = self._calculate_series_size_fast(instances)
+                    
+                    series_item = QTreeWidgetItem([series, str(series_file_count), ""])
+                    series_item.setFlags(series_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                     series_item.setCheckState(0, Qt.CheckState.Unchecked)
                     
+                    # Store ALL file paths in the series node
+                    series_item.setData(0, Qt.ItemDataRole.UserRole, file_paths)
+                    # Store size for fast summary updates
+                    series_item.setData(2, Qt.ItemDataRole.UserRole, series_size)
+                    
+                    if series_size > 0:
+                        series_item.setText(2, f"{series_size / (1024*1024):.1f} MB")
+                    else:
+                        series_item.setText(2, "--")
+                        
                     study_item.addChild(series_item)
                     
-                    series_file_count = len(instances)
                     study_file_count += series_file_count
-                    patient_file_count += series_file_count
-                    
-                    # Set file count immediately
-                    series_item.setText(1, str(series_file_count))
-                    
-                    # Skip file size calculation for large series to avoid UI freezing
-                    if series_file_count > 50:  # Large series - skip calculation
-                        series_item.setText(2, f"~{series_file_count} files")
-                    else:
-                        # Only calculate size for small series
-                        series_size = self._calculate_series_size_fast(instances)
-                        if series_size > 0:
-                            series_size_mb = series_size / (1024 * 1024)
-                            series_item.setText(2, f"{series_size_mb:.1f}MB")
-                        else:
-                            series_item.setText(2, f"{series_file_count} files")
-                    
-                    # Process instances in batches to avoid UI freezing
-                    instance_items = []
-                    for instance, filepath in sorted(instances.items()):
-                        instance_item = QTreeWidgetItem([instance, "1", ""])
-                        
-                        # CORRECT: Only ItemIsUserCheckable for leaf items
-                        instance_item.setFlags(
-                            instance_item.flags() | 
-                            Qt.ItemFlag.ItemIsUserCheckable
-                        )
-                        instance_item.setCheckState(0, Qt.CheckState.Unchecked)
-                        instance_item.setData(0, Qt.ItemDataRole.UserRole, filepath)  # Store file path
-                        
-                        instance_items.append(instance_item)
-                        instances_processed += 1
-                        
-                        # Check for cancellation and yield UI control in batches
-                        if instances_processed % batch_size == 0:
-                            if progress:
-                                if progress.wasCanceled():
-                                    return True  # Cancelled
-                                progress.setValue(instances_processed)
-                                progress.setLabelText(f"Processing {patient}... ({instances_processed} items)")
-                            
-                            # Yield control to UI
-                            QApplication.processEvents()
-                    
-                    # Add all instance items at once for better performance
-                    for item in instance_items:
-                        series_item.addChild(item)
-                
+                    study_size += series_size
+                    items_processed += 1 # We count nodes added
+
                 study_item.setText(1, str(study_file_count))
-            
+                if study_size > 0:
+                    study_item.setText(2, f"{study_size / (1024*1024):.1f} MB")
+                
+                patient_file_count += study_file_count
+                patient_size += study_size
+
             patient_item.setText(1, str(patient_file_count))
+            if patient_size > 0:
+                patient_item.setText(2, f"{patient_size / (1024*1024):.1f} MB")
             
-            # Update progress after each patient
             if progress:
-                progress.setValue(instances_processed)
-                progress.setLabelText(f"Processed {patient}")
+                progress.setValue(items_processed)
                 QApplication.processEvents()
         
-        if progress:
-            progress.setValue(progress.maximum())
-            progress.setLabelText("Tree population complete")
-        
-        return False  # Not cancelled
-    
+        return False
+
     def _populate_tree_widget_sync(self, hierarchy):
-        """Synchronous tree population for use after async data processing"""
-        for patient, studies in hierarchy.items():
-            patient_item = QTreeWidgetItem([patient, "", ""])
-            
-            # FIXED: Only ItemIsUserCheckable - let OptimizedCheckboxTreeWidget handle tri-state
-            patient_item.setFlags(
-                patient_item.flags() | 
-                Qt.ItemFlag.ItemIsUserCheckable
-                # NO tri-state flags - custom widget handles this
-            )
-            patient_item.setCheckState(0, Qt.CheckState.Unchecked)
-            
-            self.tree_widget.addTopLevelItem(patient_item)
-            
-            patient_file_count = 0
-            for study, series_dict in studies.items():
-                study_item = QTreeWidgetItem([study, "", ""])
-                
-                # FIXED: Only ItemIsUserCheckable - let OptimizedCheckboxTreeWidget handle tri-state
-                study_item.setFlags(
-                    study_item.flags() | 
-                    Qt.ItemFlag.ItemIsUserCheckable
-                    # NO tri-state flags - custom widget handles this
-                )
-                study_item.setCheckState(0, Qt.CheckState.Unchecked)
-                
-                patient_item.addChild(study_item)
-                
-                study_file_count = 0
-                for series, instances in series_dict.items():
-                    series_item = QTreeWidgetItem([series, "", ""])
-                    
-                    # FIXED: Only ItemIsUserCheckable - let OptimizedCheckboxTreeWidget handle tri-state
-                    series_item.setFlags(
-                        series_item.flags() | 
-                        Qt.ItemFlag.ItemIsUserCheckable
-                        # NO tri-state flags - custom widget handles this
-                    )
-                    series_item.setCheckState(0, Qt.CheckState.Unchecked)
-                    
-                    study_item.addChild(series_item)
-                    
-                    series_file_count = len(instances)
-                    study_file_count += series_file_count
-                    patient_file_count += series_file_count
-                    
-                    # Set file count immediately
-                    series_item.setText(1, str(series_file_count))
-                    
-                    # Skip file size calculation for fast population
-                    series_item.setText(2, f"{series_file_count} files")
-                    
-                    # Add instance items
-                    for instance, filepath in sorted(instances.items()):
-                        instance_item = QTreeWidgetItem([instance, "1", ""])
-                        
-                        # CORRECT: Only ItemIsUserCheckable for leaf items
-                        instance_item.setFlags(
-                            instance_item.flags() | 
-                            Qt.ItemFlag.ItemIsUserCheckable
-                        )
-                        instance_item.setCheckState(0, Qt.CheckState.Unchecked)
-                        instance_item.setData(0, Qt.ItemDataRole.UserRole, filepath)  # Store file path
-                        
-                        series_item.addChild(instance_item)
-                
-                study_item.setText(1, str(study_file_count))
-            
-            patient_item.setText(1, str(patient_file_count))
+        """Synchronous version of the optimized tree population."""
+        return self._populate_tree_widget_with_progress(hierarchy, None)
     
     def _populate_tree_widget(self, hierarchy):
         """Legacy method for backward compatibility"""
@@ -860,10 +755,10 @@ class DicomSendSelectionDialog(QDialog):
         collect(tree_item)
         return filepaths
     
-    def _on_selection_changed(self, selected_files):
+    def _on_selection_changed(self, selected_files, total_size):
         """Handle selection changes"""
         self.selected_files = selected_files
-        self.summary_widget.update_summary(selected_files)
+        self.summary_widget.update_summary(selected_files, total_size)
         
         # Update send button text
         if selected_files:

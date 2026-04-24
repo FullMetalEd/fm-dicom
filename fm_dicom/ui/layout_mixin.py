@@ -18,7 +18,7 @@ from PyQt6.QtCore import Qt, QPoint, QSize
 from fm_dicom import __version__
 from fm_dicom.ui.icon_loader import themed_icon
 from fm_dicom.widgets.welcome_widget import WelcomeWidget
-from fm_dicom.widgets.action_center import ActionCenterWidget
+from fm_dicom.widgets.task_center import TaskCenterWidget
 
 
 class LayoutMixin:
@@ -268,8 +268,8 @@ class LayoutMixin:
         main_splitter.setStretchFactor(1, 2)
         layout.addWidget(main_splitter)
 
-        # Action Center Dock
-        self._setup_action_center()
+        # Task Center Dock
+        self._setup_task_center()
 
         # Helper methods for view switching
         self.show_welcome_screen_if_empty()
@@ -827,25 +827,25 @@ class LayoutMixin:
         else:
             self.progress_label.setVisible(False)
     
-    def _setup_action_center(self):
-        """Setup Action Center dock widget"""
-        self.action_center_dock = QDockWidget("Action Center", self)
-        self.action_center_dock.setObjectName("ActionCenterDock")
-        self.action_center_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.LeftDockWidgetArea)
-        
-        self.action_center = ActionCenterWidget()
-        self.action_center.close_requested.connect(self.action_center_dock.close)
-        self.action_center_dock.setWidget(self.action_center)
-        
-        # Add dock to main window
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.action_center_dock)
-        
-        # Hide by default
-        self.action_center_dock.hide()
-        
-        # Add toggle action to View menu if available
-        # This will be handled in menu setup
+    def _setup_task_center(self):
+        """Setup Task Center dock widget"""
+        from PyQt6.QtWidgets import QDockWidget
+        self.task_center_dock = QDockWidget("Task Center", self)
+        self.task_center_dock.setObjectName("TaskCenterDock")
+        self.task_center_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.LeftDockWidgetArea)
 
+        self.task_center = TaskCenterWidget()
+        # The QDockWidget provides its own title bar and close button by default.
+        # We don't need a redundant close button in the TaskCenterWidget.
+        self.task_center_dock.setWidget(self.task_center)
+
+        # Add dock to main window
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.task_center_dock)
+
+        # Show by default
+        self.task_center_dock.show()
+
+        # Note: Qt automatically handles geometry saving/restoring if objectName is set
     def update_operation_status(self, message, timeout=0):
         """Update the main status bar message"""
         if hasattr(self, 'status_bar'):
@@ -876,3 +876,7 @@ class LayoutMixin:
             self.welcome_widget.setVisible(False)
         if hasattr(self, 'main_splitter'):
             self.main_splitter.setVisible(True)
+        # Force layout update
+        self.main_splitter.updateGeometry()
+        if hasattr(self, 'centralWidget') and self.centralWidget():
+            self.centralWidget().layout().activate()

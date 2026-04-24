@@ -34,6 +34,7 @@ from fm_dicom.managers.tree_manager import TreeManager, TREE_PATH_ROLE
 from fm_dicom.managers.dicom_manager import DicomManager
 from fm_dicom.managers.audit_manager import AuditLogManager
 from fm_dicom.managers.staging_manager import StagingManager
+from fm_dicom.managers.job_manager import JobManager, DummyJob
 
 # Existing modules that will be preserved
 from fm_dicom.anonymization.anonymization import TemplateManager
@@ -103,6 +104,9 @@ class MainWindow(QMainWindow, LayoutMixin):
         if start_path:
             QTimer.singleShot(100, lambda: self.open_file_or_dir(start_path))
             
+        # Restore window state (including dock sizes)
+        self._restore_window_state()
+
         # Enable drag and drop
         self.setAcceptDrops(True)
 
@@ -227,10 +231,19 @@ class MainWindow(QMainWindow, LayoutMixin):
             audit_manager=self.audit_manager,
             staging_manager=self.staging_manager,
         )
-    
+        self.job_manager = JobManager(self)
+
     def _setup_signal_connections(self):
         """Setup signal connections between managers and UI"""
+        # Job manager signals
+        self.job_manager.job_added.connect(self.task_center.add_job_card)
+        self.job_manager.job_added.connect(lambda: self.task_center_dock.show())
+        
+        # Sync Task Center toggle state
+        self.task_center_dock.visibilityChanged.connect(self._on_task_center_visibility_changed)
+
         # File manager signals
+
         self.file_manager.files_loaded.connect(self.tree_manager.populate_tree)
         self.file_manager.files_to_append.connect(lambda files: self.tree_manager.populate_tree(files, append=True))
         self.file_manager.loading_started.connect(lambda: self.status_bar.showMessage("Loading files..."))
@@ -512,7 +525,16 @@ class MainWindow(QMainWindow, LayoutMixin):
 
         if hasattr(self, "receive_service") and self.receive_service:
             self.receive_service.stop()
-        super().closeEvent(event)
+        
+        # Cleanup temporary files
+        self.file_manager.cleanup_temp_dirs()
+        
+        # Save window size and state
+        self.config["window_size"] = [self.width(), self.height()]
+        self._save_window_state()
+        
+        event.accept()
+        logging.info("Application closed")
     
     # Delegate methods to managers (these maintain the existing API)
     def open_file(self):
@@ -1055,6 +1077,23 @@ class MainWindow(QMainWindow, LayoutMixin):
         # This would use the template manager
         FocusAwareMessageBox.information(self, "Templates", "Template management functionality")
     
+    def test_action_center(self):
+        """Submit a dummy job to test the Task Center"""
+        job = DummyJob("Manual Test Job", duration_sec=10)
+        self.job_manager.submit_job(job)
+    
+    def toggle_action_center(self):
+        """Toggle Task Center visibility"""
+        if self.task_center_dock.isVisible():
+            self.task_center_dock.hide()
+        else:
+            self.task_center_dock.show()
+
+    def _on_task_center_visibility_changed(self, visible):
+        """Sync menu action when dock visibility changes"""
+        if hasattr(self, 'act_view_action_center'):
+            self.act_view_action_center.setChecked(visible)
+
     def batch_edit_tag(self):
         """Batch edit tags using searchable interface with selection validation"""
         selected = self.tree.selectedItems() if hasattr(self, 'tree') else []
@@ -1336,14 +1375,14 @@ class MainWindow(QMainWindow, LayoutMixin):
             )
             return
         
-        study_labels = [item.text(1) for item in study_nodes]  # Study is in column 1
+        study_labels = [item.text(0) for item in study_nodes]
         primary_label_selected, ok = QInputDialog.getItem(
             self, "Merge Studies", "Select primary study (whose metadata to keep):", study_labels, 0, False
         )
         if not ok or not primary_label_selected:
             return
         
-        primary_node = next(item for item in study_nodes if item.text(1) == primary_label_selected)
+        primary_node = next(item for item in study_nodes if item.text(0) == primary_label_selected)
         
         # Get primary study's UID and description
         primary_fp_sample = None
@@ -1402,7 +1441,7 @@ class MainWindow(QMainWindow, LayoutMixin):
         studies = set()
         for series in series_nodes:
             if series.parent():
-                studies.add(series.parent().text(1))  # Study is in column 1
+                studies.add(series.parent().text(0))
         
         if len(studies) > 1:
             FocusAwareMessageBox.warning(
@@ -1411,14 +1450,14 @@ class MainWindow(QMainWindow, LayoutMixin):
             )
             return
         
-        series_labels = [item.text(2) for item in series_nodes]  # Series is in column 2
+        series_labels = [item.text(0) for item in series_nodes]
         primary_label_selected, ok = QInputDialog.getItem(
             self, "Merge Series", "Select primary series (whose metadata to keep):", series_labels, 0, False
         )
         if not ok or not primary_label_selected:
             return
         
-        primary_node = next(item for item in series_nodes if item.text(2) == primary_label_selected)
+        primary_node = next(item for item in series_nodes if item.text(0) == primary_label_selected)
         
         # Get primary series UID and description
         primary_fp_sample = None
@@ -1470,140 +1509,57 @@ class MainWindow(QMainWindow, LayoutMixin):
         self._perform_series_merge(files_to_update, primary_series_uid, primary_series_desc)
     
     def _perform_patient_merge(self, files_to_update, primary_id_val, primary_name_val):
-        """Perform the actual patient merge operation"""
-        from PyQt6.QtWidgets import QProgressDialog, QApplication
-        import pydicom
-        import os
-        
-        updated_count = 0
-        failed_files = []
-        
-        progress = FocusAwareProgressDialog("Merging patients...", "Cancel", 0, len(files_to_update), self)
-        progress.setWindowTitle("Merging Patients")
-        progress.setMinimumDuration(0)
-        progress.setValue(0)
-        
-        for idx, filepath in enumerate(files_to_update):
-            progress.setValue(idx)
-            if progress.wasCanceled():
-                break
-            QApplication.processEvents()
-            
-            try:
-                ds = pydicom.dcmread(filepath)
-                ds.PatientID = primary_id_val
-                ds.PatientName = primary_name_val
-                ds.save_as(filepath)
-                updated_count += 1
-            except Exception as e:
-                failed_files.append(f"{os.path.basename(filepath)}: {str(e)}")
-                logging.error(f"Failed to merge patient for {filepath}: {e}")
-                
-        progress.setValue(len(files_to_update))
-        
-        # Show results
-        msg = f"Merged patient data.\nFiles updated: {updated_count}\nFailed: {len(failed_files)}"
-        if failed_files:
-            msg += "\n\nDetails (first few):\n" + "\n".join(failed_files[:3])
-        FocusAwareMessageBox.information(self, "Merge Patients Complete", msg)
-
-        # Refresh the tree to show merged data
-        self._refresh_tree_after_merge()
+        """Perform patient merge using Task Center job"""
+        target_info = {
+            "level": "patient",
+            "patient_id": primary_id_val,
+            "patient_name": primary_name_val
+        }
+        self._submit_merge_job(target_info, files_to_update, "patient")
     
     def _perform_study_merge(self, files_to_update, primary_study_uid, primary_study_desc):
-        """Perform the actual study merge operation"""
-        from PyQt6.QtWidgets import QProgressDialog, QApplication
-        import pydicom
-        import os
-        
-        updated_count = 0
-        failed_files = []
-        
-        progress = FocusAwareProgressDialog("Merging studies...", "Cancel", 0, len(files_to_update), self)
-        progress.setWindowTitle("Merging Studies")
-        progress.setMinimumDuration(0)
-        progress.setValue(0)
-        
-        for idx, filepath in enumerate(files_to_update):
-            progress.setValue(idx)
-            if progress.wasCanceled():
-                break
-            QApplication.processEvents()
-            
-            try:
-                ds = pydicom.dcmread(filepath)
-                ds.StudyInstanceUID = primary_study_uid
-                if primary_study_desc:
-                    ds.StudyDescription = primary_study_desc
-                ds.save_as(filepath)
-                updated_count += 1
-            except Exception as e:
-                failed_files.append(f"{os.path.basename(filepath)}: {str(e)}")
-                logging.error(f"Failed to merge study for {filepath}: {e}")
-                
-        progress.setValue(len(files_to_update))
-        
-        # Show results
-        msg = f"Merged study data.\nFiles updated: {updated_count}\nFailed: {len(failed_files)}"
-        if failed_files:
-            msg += "\n\nDetails (first few):\n" + "\n".join(failed_files[:3])
-        FocusAwareMessageBox.information(self, "Merge Studies Complete", msg)
-
-        # Refresh the tree to show merged data
-        self._refresh_tree_after_merge()
+        """Perform study merge using Task Center job"""
+        target_info = {
+            "level": "study",
+            "study_uid": primary_study_uid,
+            "study_desc": primary_study_desc
+        }
+        self._submit_merge_job(target_info, files_to_update, "study")
     
     def _perform_series_merge(self, files_to_update, primary_series_uid, primary_series_desc):
-        """Perform the actual series merge operation"""
-        from PyQt6.QtWidgets import QProgressDialog, QApplication
-        import pydicom
-        import os
-        
-        updated_count = 0
-        failed_files = []
-        
-        progress = FocusAwareProgressDialog("Merging series...", "Cancel", 0, len(files_to_update), self)
-        progress.setWindowTitle("Merging Series")
-        progress.setMinimumDuration(0)
-        progress.setValue(0)
-        
-        for idx, filepath in enumerate(files_to_update):
-            progress.setValue(idx)
-            if progress.wasCanceled():
-                break
-            QApplication.processEvents()
+        """Perform series merge using Task Center job"""
+        target_info = {
+            "level": "series",
+            "series_uid": primary_series_uid,
+            "series_desc": primary_series_desc
+        }
+        self._submit_merge_job(target_info, files_to_update, "series")
+    
+    def _submit_merge_job(self, target_info, files_to_update, level):
+        """Helper to submit a merge job to the Task Center"""
+        try:
+            from fm_dicom.jobs.batch_jobs import MergeJob
+            job = MergeJob(target_info, files_to_update, level, self.dicom_manager)
             
-            try:
-                ds = pydicom.dcmread(filepath)
-                ds.SeriesInstanceUID = primary_series_uid
-                if primary_series_desc:
-                    ds.SeriesDescription = primary_series_desc
-                ds.save_as(filepath)
-                updated_count += 1
-            except Exception as e:
-                failed_files.append(f"{os.path.basename(filepath)}: {str(e)}")
-                logging.error(f"Failed to merge series for {filepath}: {e}")
+            def on_finished(result):
+                # Refresh tree
+                if hasattr(self, 'tree_manager'):
+                    if hasattr(self, "prepare_for_tree_refresh"):
+                        self.prepare_for_tree_refresh()
+                    self.tree_manager.refresh_tree()
                 
-        progress.setValue(len(files_to_update))
-        
-        # Show results
-        msg = f"Merged series data.\nFiles updated: {updated_count}\nFailed: {len(failed_files)}"
-        if failed_files:
-            msg += "\n\nDetails (first few):\n" + "\n".join(failed_files[:3])
-        FocusAwareMessageBox.information(self, "Merge Series Complete", msg)
+                logging.info(f"Merge {level} finished: {result['updated']} updated")
+                
+                msg = f"Merge {level} complete.\nFiles updated: {result['updated']}"
+                if result.get('failed', 0) > 0:
+                    msg += f"\nFailed: {result['failed']} files."
+                FocusAwareMessageBox.information(self, f"Merge {level.title()} Complete", msg)
 
-        # Refresh the tree to show merged data
-        self._refresh_tree_after_merge()
-    
-    def _refresh_tree_after_merge(self):
-        """Refresh tree after patient merge to show updated hierarchy"""
-        if hasattr(self, 'tree_manager') and self.tree_manager:
-            if hasattr(self, "prepare_for_tree_refresh"):
-                self.prepare_for_tree_refresh()
-            self.tree_manager.refresh_tree()
-        else:
-            # Fallback to old method if tree manager not available
-            self._legacy_refresh_tree_after_merge()
-    
+            job.signals.finished.connect(on_finished)
+            self.job_manager.submit_job(job)
+        except Exception as e:
+            logging.error(f"Failed to submit merge job: {e}")
+
     def _legacy_refresh_tree_after_merge(self):
         """Legacy method for refreshing tree after merge"""
         # Get all currently loaded files that still exist
@@ -1695,34 +1651,28 @@ class MainWindow(QMainWindow, LayoutMixin):
         self._start_export_worker(filepaths, worker_export_type, output_path)
     
     def _start_export_worker(self, filepaths, export_type, output_path):
-        """Start the export worker thread"""
-        from PyQt6.QtWidgets import QProgressDialog
-        import tempfile
-        
-        # Create progress dialog
-        self.export_progress = FocusAwareProgressDialog("Preparing export...", "Cancel", 0, 100, self)
-        self.export_progress.setWindowTitle("Export Progress")
-        self.export_progress.setMinimumDuration(0)
-        self.export_progress.setValue(0)
-        self.export_progress.canceled.connect(self._cancel_export)
-        
-        # Create temporary directory for DICOMDIR exports
-        temp_dir = None
-        if export_type == "dicomdir_zip":
-            temp_dir = tempfile.mkdtemp()
-        
-        # Create and start worker
-        from fm_dicom.workers.export_worker import ExportWorker
-        # Pass memory_items for duplicated files
-        memory_items = self.tree_manager.memory_items if hasattr(self, 'tree_manager') else {}
-        self.export_worker = ExportWorker(filepaths, export_type, output_path, temp_dir, memory_items)
-        self.export_worker.progress_updated.connect(self._on_export_progress)
-        self.export_worker.stage_changed.connect(self._on_export_stage_changed)
-        self.export_worker.export_complete.connect(self._on_export_complete)
-        self.export_worker.export_failed.connect(self._on_export_error)
-        
-        self.export_worker.start()
-        self.export_progress.show()
+        """Start the export job in Task Center"""
+        try:
+            import tempfile
+            temp_dir = None
+            if export_type == "dicomdir_zip":
+                temp_dir = tempfile.mkdtemp()
+            
+            memory_items = self.tree_manager.memory_items if hasattr(self, 'tree_manager') else {}
+            
+            from fm_dicom.jobs.export_jobs import ExportJob
+            job = ExportJob(filepaths, export_type, output_path, temp_dir, memory_items)
+            
+            def on_finished(result):
+                self.update_operation_status(f"Export complete: {result['count']} files", 5000)
+                FocusAwareMessageBox.information(self, "Export Complete", f"Successfully exported {result['count']} files to:\n{output_path}")
+
+            job.signals.finished.connect(on_finished)
+            self.job_manager.submit_job(job)
+            
+        except Exception as e:
+            logging.error(f"Failed to start export job: {e}")
+            FocusAwareMessageBox.critical(self, "Export Error", f"Failed to start export:\n{str(e)}")
     
     def _on_export_progress(self, current, total):
         """Handle export progress updates"""
@@ -1786,202 +1736,54 @@ class MainWindow(QMainWindow, LayoutMixin):
 
     # Analysis and Performance Testing Methods
     def analyze_all_loaded_files(self):
-        """Analyze performance characteristics of all loaded files with UI dialog"""
+        """Analyze characteristics of all loaded files using Task Center job"""
         if not self.loaded_files:
             FocusAwareMessageBox.warning(self, "No Files", "No files loaded for analysis.")
             return
         
-        logging.info("Starting comprehensive file analysis...")
-        
-        # Show progress dialog
-        progress = FocusAwareProgressDialog("Analyzing files...", "Cancel", 0, len(self.loaded_files), self)
-        progress.setWindowTitle("File Analysis")
-        progress.setMinimumDuration(0)
-        progress.setValue(0)
-        
-        file_details = []
-        unique_patients = set()
-        unique_dimensions = set()
-        transfer_syntaxes = {}
-        large_files = []
-        
-        for idx, file_info in enumerate(self.loaded_files):
-            if progress.wasCanceled():
-                return
-            
-            # Handle different file_info formats
-            if isinstance(file_info, tuple):
-                filepath = file_info[0]  # (filepath, dataset) tuple
-            else:
-                filepath = file_info  # Just filepath string
-                
-            progress.setValue(idx)
-            progress.setLabelText(f"Analyzing {os.path.basename(filepath)}...")
-            QApplication.processEvents()
-            
-            try:
-                import pydicom
-                ds = pydicom.dcmread(filepath)
-                
-                # Extract detailed info
-                transfer_syntax = str(getattr(ds.file_meta, 'TransferSyntaxUID', 'Unknown'))
-                transfer_syntax_name = getattr(ds.file_meta.TransferSyntaxUID, 'name', 'Unknown') if hasattr(ds.file_meta, 'TransferSyntaxUID') else 'Unknown'
-                rows = getattr(ds, 'Rows', 0)
-                cols = getattr(ds, 'Columns', 0)
-                bits_allocated = getattr(ds, 'BitsAllocated', 0)
-                samples_per_pixel = getattr(ds, 'SamplesPerPixel', 1)
-                photometric = getattr(ds, 'PhotometricInterpretation', 'Unknown')
-                patient_id = str(getattr(ds, 'PatientID', 'Unknown'))
-                
-                # Calculate sizes
-                estimated_size = rows * cols * bits_allocated * samples_per_pixel // 8
-                file_size = os.path.getsize(filepath)
-                compression_ratio = estimated_size / file_size if file_size > 0 else 0
-                
-                file_info = {
-                    'filename': os.path.basename(filepath),
-                    'filepath': filepath,
-                    'patient_id': patient_id,
-                    'transfer_syntax': transfer_syntax,
-                    'transfer_syntax_name': transfer_syntax_name,
-                    'dimensions': f"{cols}x{rows}",
-                    'bits': bits_allocated,
-                    'samples': samples_per_pixel,
-                    'photometric': photometric,
-                    'estimated_uncompressed': estimated_size,
-                    'actual_file_size': file_size,
-                    'uncompressed_mb': estimated_size / (1024*1024),
-                    'file_size_mb': file_size / (1024*1024),
-                    'compression_ratio': compression_ratio
-                }
-                
-                file_details.append(file_info)
-                unique_patients.add(patient_id)
-                unique_dimensions.add(f"{cols}x{rows}")
-                transfer_syntaxes[transfer_syntax_name] = transfer_syntaxes.get(transfer_syntax_name, 0) + 1
-                
-                # Check if it's a large file
-                if estimated_size > 10*1024*1024:  # >10MB
-                    large_files.append(file_info)
-                    
-            except Exception as e:
-                logging.warning(f"Error analyzing {filepath}: {e}")
-                continue
-        
-        progress.close()
-        
-        if not file_details:
-            FocusAwareMessageBox.warning(self, "Analysis Failed", "No files could be analyzed.")
-            return
-        
-        # Calculate summary statistics
-        sizes = [f['estimated_uncompressed'] for f in file_details]
-        size_range = f"{min(sizes)/(1024*1024):.1f}MB to {max(sizes)/(1024*1024):.1f}MB"
-        
-        # Prepare results for dialog
-        analysis_results = {
-            'files': file_details,
-            'unique_patients': unique_patients,
-            'unique_dimensions': list(unique_dimensions),
-            'transfer_syntaxes': transfer_syntaxes,
-            'large_files': large_files,
-            'size_range': size_range
-        }
-        
-        # Show detailed results dialog with export capabilities
-        results_dialog = FileAnalysisResultsDialog(analysis_results, self)
-        results_dialog.exec()
+        try:
+            from fm_dicom.jobs.analysis_jobs import AnalysisJob
+            job = AnalysisJob(self.loaded_files, self)
+            self.job_manager.submit_job(job)
+        except Exception as e:
+            logging.error(f"Failed to start background analysis: {e}")
 
     def test_loading_performance(self):
-        """Test actual loading performance of all files with UI dialog"""
+        """Test actual loading performance of all files using Task Center job"""
         if not self.loaded_files:
             FocusAwareMessageBox.warning(self, "No Files", "No files loaded for performance testing.")
             return
         
-        logging.info("Starting performance testing...")
-        
-        # Show progress dialog
-        progress = FocusAwareProgressDialog("Testing performance...", "Cancel", 0, len(self.loaded_files), self)
-        progress.setWindowTitle("Performance Testing")
-        progress.setMinimumDuration(0)
-        progress.setValue(0)
-        
-        results = []
-        
-        for idx, file_info in enumerate(self.loaded_files):
-            if progress.wasCanceled():
-                return
-            
-            # Handle different file_info formats
-            if isinstance(file_info, tuple):
-                filepath = file_info[0]  # (filepath, dataset) tuple
-            else:
-                filepath = file_info  # Just filepath string
-                
-            progress.setValue(idx)
-            progress.setLabelText(f"Testing {os.path.basename(filepath)}...")
-            QApplication.processEvents()
-            
-            try:
-                import pydicom
-                # Test loading time
-                start_time = time.time()
-                ds = pydicom.dcmread(filepath)
-                load_time = time.time() - start_time
-                
-                # Test pixel access time
-                pixel_time = 0
-                try:
-                    pixel_start = time.time()
-                    _ = ds.pixel_array
-                    pixel_time = time.time() - pixel_start
-                except Exception as e:
-                    logging.warning(f"Could not access pixel data for {filepath}: {e}")
-                    pixel_time = 0
-                    
-                total_time = load_time + pixel_time
-                
-                results.append({
-                    'filename': os.path.basename(filepath),
-                    'filepath': filepath,
-                    'load_time': load_time,
-                    'pixel_time': pixel_time,
-                    'total_time': total_time
-                })
-                
-            except Exception as e:
-                logging.error(f"Error testing {filepath}: {e}")
-                results.append({
-                    'filename': os.path.basename(filepath),
-                    'filepath': filepath,
-                    'load_time': 0,
-                    'pixel_time': 0,
-                    'total_time': 0
-                })
-        
-        progress.close()
-        
-        if not results:
-            FocusAwareMessageBox.warning(self, "Performance Test Failed", "No files could be tested.")
-            return
-        
-        # Analyze results
-        slow_files = [r for r in results if r['total_time'] > 0.5]
-        fastest_file = min(results, key=lambda x: x['total_time'])
-        slowest_file = max(results, key=lambda x: x['total_time'])
-        
-        # Prepare results for dialog
-        performance_results = {
-            'files': results,
-            'slow_files': slow_files,
-            'fastest_file': fastest_file,
-            'slowest_file': slowest_file
-        }
-        
-        # Show detailed results dialog with export capabilities
-        results_dialog = PerformanceResultsDialog(performance_results, self)
-        results_dialog.exec()
+        try:
+            from fm_dicom.jobs.analysis_jobs import PerformanceTestJob
+            job = PerformanceTestJob(self.loaded_files, self)
+            self.job_manager.submit_job(job)
+        except Exception as e:
+            logging.error(f"Failed to start background performance test: {e}")
     
+    def _save_window_state(self):
+        """Save window geometry and state (docks, toolbars)"""
+        try:
+            self.config["window_geometry"] = self.saveGeometry().toHex().data().decode()
+            self.config["window_state"] = self.saveState().toHex().data().decode()
+            from fm_dicom.config.config_manager import save_config
+            save_config(self.config)
+        except Exception as e:
+            logging.warning(f"Could not save window state: {e}")
+
+    def _restore_window_state(self):
+        """Restore window geometry and state"""
+        try:
+            geom = self.config.get("window_geometry")
+            if geom:
+                self.restoreGeometry(bytes.fromhex(geom))
+            
+            state = self.config.get("window_state")
+            if state:
+                self.restoreState(bytes.fromhex(state))
+        except Exception as e:
+            logging.warning(f"Could not restore window state: {e}")
+
     # Cleanup
     def closeEvent(self, event):
         """Handle application close"""
@@ -2005,8 +1807,9 @@ class MainWindow(QMainWindow, LayoutMixin):
         # Cleanup temporary files
         self.file_manager.cleanup_temp_dirs()
         
-        # Save window size
+        # Save window size and state
         self.config["window_size"] = [self.width(), self.height()]
+        self._save_window_state()
         
         event.accept()
         logging.info("Application closed")

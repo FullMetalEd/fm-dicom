@@ -14,7 +14,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 class OptimizedCheckboxTreeWidget(QTreeWidget):
     """Tree widget with hierarchical checkbox behavior and tri-state logic"""
     
-    selection_changed = pyqtSignal(list)  # Emits list of selected file paths
+    selection_changed = pyqtSignal(list, int)  # Emits (list of file paths, total_size)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -116,21 +116,43 @@ class OptimizedCheckboxTreeWidget(QTreeWidget):
             logging.warning(f"Error updating single parent: {e}")
     
     def _emit_selection_changed(self):
-        """Emit list of selected file paths"""
+        """Emit list of selected file paths and total size"""
         try:
-            selected_files = self.get_selected_files()
-            self.selection_changed.emit(selected_files)
+            selected_files, total_size = self.get_selected_info()
+            self.selection_changed.emit(selected_files, total_size)
         except Exception as e:
             logging.warning(f"Error emitting selection changed: {e}")
     
     def get_selected_files(self):
-        """Return list of selected file paths - only from leaf nodes"""
+        """Legacy helper for backward compatibility"""
+        files, _ = self.get_selected_info()
+        return files
+
+    def get_selected_info(self):
+        """Return (list of file paths, total size) from checked nodes"""
         selected_files = []
         try:
             self._collect_checked_files(self.invisibleRootItem(), selected_files)
+            # Note: total_size is summed from the pre-calculated data in the tree nodes
+            total_size = self._calculate_selected_size(self.invisibleRootItem())
         except Exception as e:
-            logging.warning(f"Error collecting selected files: {e}")
-        return selected_files
+            logging.warning(f"Error collecting selected info: {e}")
+        return selected_files, total_size
+    
+    def _calculate_selected_size(self, item):
+        """Sum up pre-calculated sizes from checked leaf nodes"""
+        total = 0
+        for i in range(item.childCount()):
+            child = item.child(i)
+            if child.childCount() == 0:
+                if child.checkState(0) == Qt.CheckState.Checked:
+                    # Size is stored in column 2's UserRole
+                    size = child.data(2, Qt.ItemDataRole.UserRole)
+                    if isinstance(size, (int, float)):
+                        total += size
+            else:
+                total += self._calculate_selected_size(child)
+        return total
     
     def _collect_checked_files(self, item, file_list):
         """Recursively collect checked files from leaf nodes only"""
@@ -140,12 +162,15 @@ class OptimizedCheckboxTreeWidget(QTreeWidget):
                 if not child:
                     continue
                 
-                # Only collect from leaf nodes (instances)
+                # Only collect from leaf nodes
                 if child.childCount() == 0:
-                    # This is a leaf node - check if it's selected and has file path
-                    file_path = child.data(0, Qt.ItemDataRole.UserRole)
-                    if file_path and child.checkState(0) == Qt.CheckState.Checked:
-                        file_list.append(file_path)
+                    # This is a leaf node - check if it's selected and has file path(s)
+                    data = child.data(0, Qt.ItemDataRole.UserRole)
+                    if data and child.checkState(0) == Qt.CheckState.Checked:
+                        if isinstance(data, list):
+                            file_list.extend(data)
+                        else:
+                            file_list.append(data)
                 else:
                     # This is a parent node - recurse into children
                     self._collect_checked_files(child, file_list)
@@ -187,8 +212,16 @@ class OptimizedCheckboxTreeWidget(QTreeWidget):
                 
                 if child.childCount() == 0:
                     # This is a leaf node - check if it should be selected
-                    file_path = child.data(0, Qt.ItemDataRole.UserRole)
-                    if file_path and file_path in selected_paths:
+                    data = child.data(0, Qt.ItemDataRole.UserRole)
+                    is_selected = False
+                    if isinstance(data, list):
+                        # For a collection (like a series), check if any are selected
+                        # (Usually it will be all or none)
+                        is_selected = any(p in selected_paths for p in data)
+                    else:
+                        is_selected = data in selected_paths
+                        
+                    if is_selected:
                         child.setCheckState(0, Qt.CheckState.Checked)
                     else:
                         child.setCheckState(0, Qt.CheckState.Unchecked)

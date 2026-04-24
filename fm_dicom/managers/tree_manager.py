@@ -226,58 +226,62 @@ class TreeManager(QObject):
     # Context menu integration handled by main_window's show_tree_context_menu
     
     def populate_tree(self, files, append=False):
-        """Populate tree with DICOM file hierarchy using optimized processing"""
-        if append:
-            logging.info(f"Appending {len(files)} files to existing tree ({len(self.loaded_files)} already loaded)")
-        else:
-            logging.info(f"Starting tree population with {len(files)} files")
-            self.loaded_files = []
-
-        self.tree.clear()
-        self.file_metadata = {}
-
-        if append:
-            # Extend without duplicates
-            existing_paths = {f[0] if isinstance(f, tuple) else f for f in self.loaded_files}
-            for entry in files:
-                path = entry[0] if isinstance(entry, tuple) else entry
-                if path not in existing_paths:
-                    self.loaded_files.append(entry)
-                    existing_paths.add(path)
-        else:
-            self.loaded_files = files.copy()
-
-        # Extract file paths from mixed input formats
+        """Populate tree with DICOM file hierarchy using Task Center job"""
         file_paths = self._extract_file_paths(files)
+        
+        try:
+            from fm_dicom.jobs.tree_jobs import TreePopulateJob
+            job = TreePopulateJob(file_paths, self, append)
+            job.signals.finished.connect(self._on_tree_job_finished)
+            self.main_window.job_manager.submit_job(job)
+        except Exception as e:
+            logging.error(f"Failed to start background tree population: {e}")
 
-        # Decide whether to use threaded processing based on config and dataset size
-        if (self.use_threaded_processing and
-            len(file_paths) > self.thread_threshold):
-            logging.info(f"Using threaded processing for {len(file_paths)} files (threshold: {self.thread_threshold})")
-            self._append_mode = append  # Store for threaded processing completion
-            self._populate_tree_threaded(file_paths)
+    def _on_tree_job_finished(self, result):
+        """Handle tree population job completion on UI thread"""
+        hierarchy = result.get("hierarchy", {})
+        append = result.get("append", False)
+        file_paths = result.get("file_paths", [])
+        metadata = result.get("metadata", {})
+
+        # Update metadata map
+        if not append:
+            self.file_metadata = metadata
         else:
-            logging.info(f"Using sequential processing for {len(file_paths)} files")
-            # Use original method for smaller datasets or when threading disabled
-            new_hierarchy = self._build_hierarchy(files)
-            if new_hierarchy is None:  # Cancelled
-                return
+            self.file_metadata.update(metadata)
 
-            if append and self.hierarchy:
-                # Merge new hierarchy with existing one
-                self.hierarchy = self._merge_hierarchies(self.hierarchy, new_hierarchy)
-            else:
-                # Store hierarchy for performance optimization
-                self.hierarchy = new_hierarchy
+        # Update loaded_files
+        new_files = []
+        for patient_data in hierarchy.values():
+            for study_data in patient_data.values():
+                for series_data in study_data.values():
+                    for instance_data in series_data.values():
+                        filepath = instance_data['filepath']
+                        dataset = instance_data.get('dataset')
+                        if dataset:
+                            new_files.append((filepath, dataset))
+                        else:
+                            new_files.append(filepath)
 
-            # Populate tree widget (full rebuild for now - could optimize later)
-            self._build_tree_structure(self.hierarchy)
+        # Final hierarchy build and tree update
+        if append and self.hierarchy:
+            self.hierarchy = self._merge_hierarchies(self.hierarchy, hierarchy)
+            # Update loaded_files properly
+            existing_paths = {f[0] if isinstance(f, tuple) else f for f in self.loaded_files}
+            for new_file in new_files:
+                new_path = new_file[0] if isinstance(new_file, tuple) else new_file
+                if new_path not in existing_paths:
+                    self.loaded_files.append(new_file)
+                    existing_paths.add(new_path)
+        else:
+            self.hierarchy = hierarchy
+            self.loaded_files = new_files
+            self.tree.clear()
+            # DON'T clear file_metadata here, it was already set from metadata variable
 
-            # Update status
-            total_files = len(files)
-            self.tree_populated.emit(total_files)
-
-            logging.info(f"Tree populated with {total_files} files")
+        self._build_tree_structure(self.hierarchy)
+        self.tree_populated.emit(len(self.loaded_files))
+        logging.info(f"Tree populated with {len(self.loaded_files)} files")
 
     def _extract_file_paths(self, files):
         """Extract file paths from mixed input formats (paths, tuples)"""
@@ -289,143 +293,22 @@ class TreeManager(QObject):
                 file_paths.append(file_info)  # Already just a path
         return file_paths
 
-    def _populate_tree_threaded(self, file_paths):
-        """Populate tree using threaded processing for large datasets"""
-        # Initialize processing state
-        self.progressive_hierarchy = {}
-        self.processing_stats = {'processed': 0, 'total': len(file_paths), 'errors': 0}
-
-        # Pre-filter files to remove obvious non-DICOM files
-        filtered_paths = FastDicomScanner.filter_dicom_files(file_paths)
-        if len(filtered_paths) != len(file_paths):
-            logging.info(f"Pre-filtered {len(file_paths)} files to {len(filtered_paths)} potential DICOM files")
-
-        # Create threaded processor
-        self.threaded_processor = ThreadedDicomProcessor(
-            max_workers=self.max_workers,
-            batch_size=self.batch_size
-        )
-
-        # Connect signals for progressive updates
-        self.threaded_processor.progress_updated.connect(self._on_threaded_progress)
-        self.threaded_processor.file_processed.connect(self._on_file_processed)
-        self.threaded_processor.batch_completed.connect(self._on_batch_completed)
-        self.threaded_processor.processing_finished.connect(self._on_processing_finished)
-        self.threaded_processor.processing_error.connect(self._on_processing_error)
-
-        # Show progress dialog
-        self.progress_dialog = FocusAwareProgressDialog(
-            f"Processing {len(filtered_paths)} DICOM files...",
-            "Cancel",
-            0,
-            len(filtered_paths),
-            self.main_window
-        )
-        self.progress_dialog.setWindowTitle("Loading DICOM Files")
-        self.progress_dialog.setMinimumDuration(0)
-        self.progress_dialog.canceled.connect(self.threaded_processor.cancel_processing)
-        self.progress_dialog.show()
-
-        # Start threaded processing
-        self.threaded_processor.process_files(
-            filtered_paths,
-            read_pixels=False,  # Headers only for hierarchy building
-            required_tags=None  # Use defaults
-        )
-
-    def _on_threaded_progress(self, current, total, current_file):
-        """Handle progress updates from threaded processor"""
-        if hasattr(self, 'progress_dialog') and self.progress_dialog:
-            self.progress_dialog.setValue(current)
-            self.progress_dialog.setLabelText(f"Processing: {current_file}\n({current}/{total} files)")
-            QApplication.processEvents()
-
-    def _on_file_processed(self, result):
-        """Handle single file processing completion"""
-        if result.success:
-            # Add to progressive hierarchy
-            self._add_to_progressive_hierarchy(result)
-        else:
-            self.processing_stats['errors'] += 1
-            if self.processing_stats['errors'] <= 5:  # Log first few errors
-                logging.warning(f"Failed to process {result.file_path}: {result.error}")
-
-    def _on_batch_completed(self, batch_results):
-        """Handle batch completion - update tree structure progressively"""
-        # Update tree with current hierarchy state
-        if self.progressive_hierarchy:
-            # Build tree incrementally - only add new nodes
-            self._update_tree_structure_progressive(self.progressive_hierarchy)
-
-    def _on_processing_finished(self):
-        """Handle completion of all threaded processing"""
-        if hasattr(self, 'progress_dialog') and self.progress_dialog:
-            self.progress_dialog.close()
-
-        # Final hierarchy build and tree update
-        if hasattr(self, '_append_mode') and self._append_mode and self.hierarchy:
-            # Merge progressive hierarchy with existing hierarchy
-            self.hierarchy = self._merge_hierarchies(self.hierarchy, self.progressive_hierarchy)
-        else:
-            self.hierarchy = self.progressive_hierarchy
-        self._build_tree_structure(self.hierarchy)
-
-        # Convert file paths back to loaded_files format
-        if not (hasattr(self, '_append_mode') and self._append_mode):
-            # Replace mode - rebuild loaded_files from hierarchy
-            self.loaded_files = []
-
-        # Extract files from current hierarchy and add to loaded_files
-        new_files = []
-        for patient_data in self.hierarchy.values():
-            for study_data in patient_data.values():
-                for series_data in study_data.values():
-                    for instance_data in series_data.values():
-                        filepath = instance_data['filepath']
-                        dataset = instance_data.get('dataset')
-                        if dataset:
-                            new_files.append((filepath, dataset))
-                        else:
-                            new_files.append(filepath)
-
-        if hasattr(self, '_append_mode') and self._append_mode:
-            # Append mode - extend loaded_files with new files only
-            existing_paths = {f[0] if isinstance(f, tuple) else f for f in self.loaded_files}
-            for new_file in new_files:
-                new_path = new_file[0] if isinstance(new_file, tuple) else new_file
-                if new_path not in existing_paths:
-                    self.loaded_files.append(new_file)
-                    existing_paths.add(new_path)
-        else:
-            # Replace mode
-            self.loaded_files = new_files
-
-        # Update status
-        total_files = len(self.loaded_files)
-        errors = self.processing_stats['errors']
-        self.tree_populated.emit(total_files)
-
-        logging.info(f"Threaded tree population completed: {total_files} files, {errors} errors")
-
     def _on_processing_error(self, error_message):
         """Handle processing error"""
-        if hasattr(self, 'progress_dialog') and self.progress_dialog:
-            self.progress_dialog.close()
-
+        logging.error(f"Threaded processing error: {error_message}")
         FocusAwareMessageBox.critical(
             self.main_window,
             "Processing Error",
             f"Error during threaded DICOM processing:\n\n{error_message}"
         )
 
-    def _add_to_progressive_hierarchy(self, result):
+    def _add_to_progressive_hierarchy(self, result, target_hierarchy=None):
         """Add processing result to progressive hierarchy"""
         if not result.success or not result.metadata:
-            return
+            return None
 
         metadata = result.metadata
-        dataset = result.dataset
-
+        
         # Extract hierarchy information from metadata
         patient_id = metadata.get('PatientID', 'Unknown ID')
         patient_name = metadata.get('PatientName', 'Unknown Name')
@@ -453,20 +336,22 @@ class TreeManager(QObject):
             instance_label = f"{os.path.basename(result.file_path)} [{sop_uid}]"
             instance_sort_key = 999999
 
-        # Store metadata for the UI
-        self.file_metadata[result.file_path] = (
-            patient_label, study_label, series_label, instance_label
-        )
-
-        # Build progressive hierarchy
-        self.progressive_hierarchy.setdefault(patient_label, {}).setdefault(
-            study_label, {}
-        ).setdefault(series_label, {})[instance_label] = {
+        # Hierarchy node data
+        instance_data = {
             'filepath': result.file_path,
-            'sort_key': instance_sort_key,
-            'instance_number': instance_number,
-            'dataset': dataset
+            'dataset': result.dataset,
+            'sort_key': instance_sort_key
         }
+
+        # Which hierarchy to update?
+        hierarchy = target_hierarchy if target_hierarchy is not None else self.progressive_hierarchy
+
+        # Build hierarchy
+        hierarchy.setdefault(patient_label, {}).setdefault(
+            study_label, {}).setdefault(
+            series_label, {})[instance_label] = instance_data
+            
+        return (patient_label, study_label, series_label, instance_label)
 
     def _update_tree_structure_progressive(self, hierarchy):
         """Update tree structure progressively during processing"""
@@ -476,144 +361,34 @@ class TreeManager(QObject):
         pass
     
     def refresh_tree(self):
-        """Refresh the tree with current loaded files, showing progress"""
+        """Refresh the tree with current loaded files using Task Center job"""
         if not self.loaded_files:
+            self.tree.clear()
+            self.hierarchy = {}
             return
 
         if hasattr(self.main_window, "prepare_for_tree_refresh"):
             self.main_window.prepare_for_tree_refresh()
-            
-        # Show progress dialog
-        progress = FocusAwareProgressDialog("Refreshing tree...", "Cancel", 0, 100, self.main_window)
-        progress.setWindowTitle("Refreshing File Tree")
-        progress.setMinimumDuration(0)
-        progress.setValue(0)
-        progress.show()
-        QApplication.processEvents()
+
+        file_paths = [f[0] if isinstance(f, tuple) else f for f in self.loaded_files]
         
         try:
-            # Clear current tree
-            progress.setValue(10)
-            progress.setLabelText("Clearing current tree...")
-            QApplication.processEvents()
-            
-            self.tree.clear()
-            self.file_metadata = {}  # Clear disk-based items only
-            # Keep memory_items - these are duplicated items that should survive refresh
-            
-            # Rebuild hierarchy - force re-reading from disk to get updated data
-            progress.setValue(30)
-            progress.setLabelText("Re-reading DICOM files from disk...")
-            QApplication.processEvents()
-            
-            # Extract file paths and force re-reading from disk
-            file_paths = []
-            for file_info in self.loaded_files:
-                if isinstance(file_info, tuple):
-                    file_paths.append(file_info[0])
-                else:
-                    file_paths.append(file_info)
+            from fm_dicom.jobs.tree_jobs import TreePopulateJob
+            job = TreePopulateJob(file_paths, self, append=False)
+            job.title = "Refreshing Tree"
+            job.signals.finished.connect(self._on_tree_job_finished)
+            self.main_window.job_manager.submit_job(job)
+        except Exception as e:
+            logging.error(f"Failed to start background tree refresh: {e}")
 
-            # Deduplicate while preserving order
-            seen_paths = set()
-            unique_paths = []
-            for path in file_paths:
-                if path in seen_paths:
-                    continue
-                seen_paths.add(path)
-                unique_paths.append(path)
-
-            file_paths = unique_paths
-            
-            logging.info(f"Tree refresh: Re-reading {len(file_paths)} files from disk")
-            if file_paths:
-                logging.debug(f"First file path: {file_paths[0]}")
-            
-            # Combine disk files and memory items for hierarchy building
-            combined_files = []
-
-            # Add disk files (force fresh read from disk)
-            combined_files.extend(file_paths)
-
-            # Add memory items (duplicated items that should be preserved)
-            for memory_path, memory_dataset in self.memory_items.items():
-                combined_files.append((memory_path, memory_dataset))
-
-            logging.info(f"Building hierarchy with {len(file_paths)} disk files and {len(self.memory_items)} memory items")
-            hierarchy = self._build_hierarchy(combined_files, progress, 30, 80)
-            
-            if progress.wasCanceled():
-                return
-                
-            # Update loaded_files with fresh data (extract from hierarchy)
-            progress.setValue(75)
-            progress.setLabelText("Updating file cache...")
-            QApplication.processEvents()
-            
-            fresh_loaded = []
-            for patient_data in hierarchy.values():
-                for study_data in patient_data.values():
-                    for series_data in study_data.values():
-                        for instance_data in series_data.values():
-                            filepath = instance_data['filepath']
-                            dataset = instance_data['dataset']
-                            fresh_loaded.append((filepath, dataset))
-
-            # Keep original order of combined paths, but update datasets
-            refreshed_paths = {path: ds for path, ds in fresh_loaded}
-            ordered_refreshed = []
-            for path in file_paths:
-                ds = refreshed_paths.get(path)
-                if ds is not None:
-                    ordered_refreshed.append((path, ds))
-
-            fresh_loaded_files = ordered_refreshed
-            
-            self.loaded_files = fresh_loaded_files
-                
-            # Store hierarchy for performance optimization
-            self.hierarchy = hierarchy
-            
-            # Rebuild tree structure
-            progress.setValue(80)
-            progress.setLabelText("Building tree structure...")
-            QApplication.processEvents()
-            
-            self._build_tree_structure(hierarchy)
-            
-            progress.setValue(100)
-            progress.setLabelText("Tree refresh complete")
-            QApplication.processEvents()
-            
-            # Emit signal
-            self.tree_populated.emit(len(self.loaded_files))
-            
-        finally:
-            progress.close()
-    
-    def _build_hierarchy(self, files, progress_dialog=None, start_progress=0, end_progress=100):
-        """Build hierarchy from file list with optional progress updates"""
+    def _build_hierarchy(self, files, progress_callback=None):
+        """Build hierarchy from file list without pop-out dialogs"""
         hierarchy = {}
         modalities = set()
         
-        # Check if we need to read headers or if they're already loaded
-        needs_header_reading = any(not isinstance(f, tuple) for f in files)
-        logging.info(f"Headers already loaded: {not needs_header_reading}")
-        
-        if needs_header_reading and progress_dialog is None:
-            # Progress dialog for loading headers
-            progress = FocusAwareProgressDialog("Loading DICOM headers...", "Cancel", 0, len(files), self.main_window)
-            progress.setWindowTitle("Loading DICOM Files")
-            progress.setMinimumDuration(0)
-            progress.setValue(0)
-        else:
-            # Use provided progress dialog or no dialog
-            progress = progress_dialog
-        
         for idx, file_info in enumerate(files):
-            if progress and progress.wasCanceled():
-                logging.warning(f"Progress dialog cancelled at index {idx}")
-                return None
+            if progress_callback:
+                progress_callback(idx + 1, len(files), f"Processing: {os.path.basename(file_info[0] if isinstance(file_info, tuple) else file_info)}")
             
             try:
                 # Handle both (filepath, dataset) tuples and just filepaths
@@ -624,9 +399,12 @@ class TreeManager(QObject):
                     # Check memory items first (duplicated items) before reading from disk
                     if file_path in self.memory_items:
                         ds = self.memory_items[file_path]
-                        logging.debug(f"Loading duplicated item from memory: {file_path}")
                     else:
+                        import pydicom
                         ds = pydicom.dcmread(file_path, stop_before_pixels=True)
+                
+                # ... hierarchy building logic (extracted for brevity) ...
+                # (I'll need to keep the actual logic, just removing the progress dialog part)
                 
                 # Extract hierarchy information
                 patient_id = getattr(ds, "PatientID", "Unknown ID")
@@ -1456,11 +1234,9 @@ class TreeManager(QObject):
                 f"regenerate_study_uid={uid_config.regenerate_study_uid}"
             )
 
-            duplicated_items = self.duplication_manager.duplicate_by_hierarchy(
-                selection,
-                duplication_level,
-                uid_config,
-            )
+            from fm_dicom.jobs.tree_jobs import DuplicationJob
+            job = DuplicationJob(selection, duplication_level, uid_config, self.duplication_manager)
+            self.main_window.job_manager.submit_job(job)
 
             # Success message will be handled by duplication_completed signal
             # Integration and tree refresh will be handled by signal handlers
@@ -1525,11 +1301,9 @@ class TreeManager(QObject):
                 uid_config.regenerate_series_uid = False
                 uid_config.regenerate_instance_uid = True
 
-            duplicated_items = self.duplication_manager.duplicate_by_hierarchy(
-                selection,
-                duplication_level,
-                uid_config,
-            )
+            from fm_dicom.jobs.tree_jobs import DuplicationJob
+            job = DuplicationJob(selection, duplication_level, uid_config, self.duplication_manager)
+            self.main_window.job_manager.submit_job(job)
 
             # Success message will be handled by duplication_completed signal
             # Integration and tree refresh will be handled by signal handlers
@@ -1569,11 +1343,9 @@ class TreeManager(QObject):
             uid_config.add_derived_suffix = True
 
             # Perform duplication
-            duplicated_items = self.duplication_manager.duplicate_by_hierarchy(
-                selection,
-                duplication_level,
-                uid_config,
-            )
+            from fm_dicom.jobs.tree_jobs import DuplicationJob
+            job = DuplicationJob(selection, duplication_level, uid_config, self.duplication_manager)
+            self.main_window.job_manager.submit_job(job)
 
             # Success message will be handled by duplication_completed signal
             # Integration and tree refresh will be handled by signal handlers
@@ -1838,48 +1610,16 @@ class TreeManager(QObject):
             logging.error(f"Failed to integrate duplicated items: {e}", exc_info=True)
 
     def _on_duplication_started(self, level: str, count: int):
-        """Handle duplication started signal - show progress dialog"""
-        try:
-            level_name = level.title() if level != "mixed" else "Selected Items"
-            self.duplication_progress_dialog = FocusAwareProgressDialog(
-                f"Duplicating {count} {level_name}...", "Cancel", 0, count, self.main_window
-            )
-            self.duplication_progress_dialog.setWindowTitle(f"Duplicating {level_name}")
-            self.duplication_progress_dialog.setMinimumDuration(0)
-            self.duplication_progress_dialog.setValue(0)
-            self.duplication_progress_dialog.show()
-
-            # Connect cancel to duplication manager if it supports cancellation
-            # For now, just close dialog - cancellation can be added later if needed
-            self.duplication_progress_dialog.canceled.connect(self._on_duplication_cancelled)
-
-            logging.info(f"Started duplication progress dialog for {count} {level} items")
-
-        except Exception as e:
-            logging.error(f"Error showing duplication progress: {e}", exc_info=True)
+        """Handle duplication started - no-op here as job is submitted manually"""
+        pass
 
     def _on_duplication_progress(self, current: int, total: int):
-        """Handle duplication progress signal - update progress dialog"""
-        try:
-            if self.duplication_progress_dialog:
-                progress_percent = int((current / total) * 100) if total > 0 else 0
-                self.duplication_progress_dialog.setValue(current)
-                self.duplication_progress_dialog.setLabelText(
-                    f"Processing item {current} of {total} ({progress_percent}%)"
-                )
-                QApplication.processEvents()  # Keep UI responsive
-
-        except Exception as e:
-            logging.error(f"Error updating duplication progress: {e}", exc_info=True)
+        """Handle duplication progress - no-op here"""
+        pass
 
     def _on_duplication_completed(self, duplicated_items: list):
-        """Handle duplication completed signal - close progress, integrate items, refresh tree"""
+        """Handle duplication completed signal - integrate items and refresh tree"""
         try:
-            # Close progress dialog
-            if self.duplication_progress_dialog:
-                self.duplication_progress_dialog.close()
-                self.duplication_progress_dialog = None
-
             if duplicated_items:
                 # Integrate duplicated items into memory storage
                 self._integrate_duplicated_items(duplicated_items)
@@ -1895,32 +1635,12 @@ class TreeManager(QObject):
                     f"The duplicated items are now visible in the tree. "
                     f"Use 'Save Duplicated Items' to write them to disk if needed."
                 )
-
-            logging.info(f"Duplication completed with {len(duplicated_items)} items")
-
         except Exception as e:
             logging.error(f"Error handling duplication completion: {e}", exc_info=True)
 
     def _on_duplication_error(self, error_message: str):
-        """Handle duplication error signal - close progress and show error"""
-        try:
-            # Close progress dialog
-            if self.duplication_progress_dialog:
-                self.duplication_progress_dialog.close()
-                self.duplication_progress_dialog = None
-
-            # Show error message
-            FocusAwareMessageBox.critical(
-                self.main_window,
-                "Duplication Error",
-                f"Duplication failed:\n\n{error_message}"
-            )
-
-            logging.error(f"Duplication error: {error_message}")
-
-        except Exception as e:
-            logging.error(f"Error handling duplication error: {e}", exc_info=True)
-
+        """Handle duplication error signal"""
+        FocusAwareMessageBox.critical(self.main_window, "Duplication Error", error_message)
     def _on_duplication_cancelled(self):
         """Handle duplication cancelled by user"""
         try:
